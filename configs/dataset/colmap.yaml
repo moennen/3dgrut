@@ -1,4 +1,6 @@
-type: colmap
-downsample_factor: 1
-test_split_interval: 8
-load_exif: true  # Load EXIF exposure data from JPEG images for post-processing
+  type: colmap
+  downsample_factor: 1
+  
+  train:
+    batch_size: 8192
+    sample_full_image: False
