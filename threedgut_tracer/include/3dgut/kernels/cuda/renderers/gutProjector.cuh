@@ -139,7 +139,8 @@ struct GUTProjector : Params, UTParams {
             return false;
         }
 
-        const tcnn::vec3& particleScale   = particles.scale(particleParameters);
+        const tcnn::vec3& particleScale = particles.scale(particleParameters);
+        // const tcnn::mat3 particleRotation = tcnn::transpose(particles.rotationT(particleParameters));
         const tcnn::mat3 particleRotation = particles.rotation(particleParameters);
 
         particleSensorRay = particleMean - sensorWorldPosition;
@@ -221,13 +222,12 @@ struct GUTProjector : Params, UTParams {
                                        tcnn::vec3 sensorWorldPosition,
                                        tcnn::mat4x3 sensorViewMatrix,
                                        threedgut::TSensorState sensorShutterState,
-                                       uint32_t* __restrict__ particlesTilesCountPtr,
+                                       uint32_t* __restrict__ particlesTilesOffsetPtr,
                                        tcnn::vec2* __restrict__ particlesProjectedPositionPtr,
                                        tcnn::vec4* __restrict__ particlesProjectedConicOpacityPtr,
                                        tcnn::vec2* __restrict__ particlesProjectedExtentPtr,
                                        float* __restrict__ particlesGlobalDepthPtr,
                                        float* __restrict__ particlesPrecomputedFeaturesPtr,
-                                       int* __restrict__ particlesVisibilityCudaPtr,
                                        threedgut::MemoryHandles parameters) {
 
         const uint32_t particleIdx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -244,6 +244,7 @@ struct GUTProjector : Params, UTParams {
         tcnn::vec3 particleSensorRay;
         tcnn::vec3 particleProjCovariance;
         bool validProjection = false;
+
         {
             validProjection = unscentedParticleProjection(
                 resolution,
@@ -263,37 +264,32 @@ struct GUTProjector : Params, UTParams {
         tcnn::vec2 particleProjExtent;
         tcnn::vec4 particleProjConicOpacity;
         float particleMaxConicOpacityPower;
-        bool validConicEstimation = false;
-        {
-            validConicEstimation = computeProjectedExtentConicOpacity(particleProjCovariance,
-                                                                      particleProjOpacity,
-                                                                      particleProjExtent,
-                                                                      particleProjConicOpacity,
-                                                                      particleMaxConicOpacityPower);
+        if (validProjection) {
+            validProjection = computeProjectedExtentConicOpacity(particleProjCovariance,
+                                                                 particleProjOpacity,
+                                                                 particleProjExtent,
+                                                                 particleProjConicOpacity,
+                                                                 particleMaxConicOpacityPower);
         }
 
-        particlesVisibilityCudaPtr[particleIdx] = validConicEstimation ? 1 : 0;
-
-        validProjection = validProjection && validConicEstimation;
-
-        uint32_t numValidTiles = 0;
+        uint32_t numValidParticleProjections = 0;
         if (validProjection) {
             const BoundingBox2D tileBBox = computeTileSpaceBBox(tileGrid, particleProjCenter, particleProjExtent);
             if constexpr (Params::TileCulling) {
                 for (int y = tileBBox.min.y; y < tileBBox.max.y; ++y) {
                     for (int x = tileBBox.min.x; x < tileBBox.max.x; ++x) {
                         if (tileMinParticlePowerResponse(tcnn::vec2(x, y), particleProjConicOpacity, particleProjCenter) < particleMaxConicOpacityPower) {
-                            numValidTiles++;
+                            numValidParticleProjections++;
                         }
                     }
                 }
             } else {
-                numValidTiles = (tileBBox.max.x - tileBBox.min.x) * (tileBBox.max.y - tileBBox.min.y);
+                numValidParticleProjections = (tileBBox.max.x - tileBBox.min.x) * (tileBBox.max.y - tileBBox.min.y);
             }
         }
 
-        particlesTilesCountPtr[particleIdx] = numValidTiles;
-        if (numValidTiles == 0) {
+        particlesTilesOffsetPtr[particleIdx] = numValidParticleProjections;
+        if (numValidParticleProjections == 0) {
             particlesProjectedPositionPtr[particleIdx]     = tcnn::vec2::zero();
             particlesProjectedConicOpacityPtr[particleIdx] = tcnn::vec4::zero();
             particlesProjectedExtentPtr[particleIdx]       = tcnn::vec2::zero();
@@ -306,7 +302,7 @@ struct GUTProjector : Params, UTParams {
         if constexpr (!Params::PerRayParticleFeatures) {
             particles.initializeFeatures(parameters);
             reinterpret_cast<TFeaturesVec*>(particlesPrecomputedFeaturesPtr)[particleIdx] =
-                particles.template featuresCustomFromBuffer<false>(particleIdx, particleSensorRay / particleSensorDistance);
+                particles.featuresCustomFromBuffer<false>(particleIdx, particleSensorRay / particleSensorDistance);
         }
 
         particlesProjectedPositionPtr[particleIdx]     = particleProjCenter;
@@ -418,13 +414,12 @@ struct GUTProjector : Params, UTParams {
         particles.initializeDensity(parameters);
         const tcnn::vec3 incidentDirection = tcnn::normalize(particles.fetchPosition(particleIdx) - sensorWorldPosition);
 
-        particles.initializeFeatures(parameters);
         particles.initializeFeaturesGradient(parametersGradient);
-        particles.featuresBwdCustomToBuffer<false>(
-            particleIdx,
-            reinterpret_cast<const TFeaturesVec*>(particlesPrecomputedFeaturesPtr)[particleIdx],
-            reinterpret_cast<const TFeaturesVec*>(particlesPrecomputedFeaturesGradPtr)[particleIdx],
-            incidentDirection);
+        particles.featuresBwdCustomToBuffer(particleIdx,
+                                            reinterpret_cast<const TFeaturesVec*>(particlesPrecomputedFeaturesPtr)[particleIdx],
+                                            reinterpret_cast<const TFeaturesVec*>(particlesPrecomputedFeaturesGradPtr)[particleIdx],
+                                            incidentDirection);
+
         particles.initializeDensityGradient(parametersGradient);
         particles.template densityIncidentDirectionBwdToBuffer<true>(particleIdx, sensorWorldPosition);
     }

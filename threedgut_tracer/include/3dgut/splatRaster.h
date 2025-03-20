@@ -37,7 +37,7 @@ private:
 
     class CudaTimer;
 
-    bool m_enableKernelTimings = false;
+    bool m_enableKernelTimings  = false;
     std::map<std::string, float> m_timings;
 
     const size_t m_maxNumTimers = 256; // We only keep the most recent 256 timers
@@ -48,7 +48,7 @@ public:
 
     ~SplatRaster();
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<torch::Tensor, torch::Tensor>
     trace(uint32_t frameNumber, int numActiveFeatures,
           // Particles
           torch::Tensor particleDensity,

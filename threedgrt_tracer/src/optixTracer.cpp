@@ -13,12 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#endif
-
 #ifdef _MSC_VER
 #pragma warning(push, 0)
 #include <torch/extension.h>
@@ -27,17 +21,17 @@
 #include <torch/extension.h>
 #endif
 
+#include <3dgrt/tensorBuffering.h>
 #include <3dgrt/cuoptixMacros.h>
 #include <3dgrt/optixTracer.h>
 #include <3dgrt/particlePrimitives.h>
 #include <3dgrt/pipelineParameters.h>
-#include <3dgrt/tensorBuffering.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAUtils.h>
-#include <algorithm>
 #include <cuda_runtime.h>
-#include <fstream>
 #include <nvrtc.h>
+#include <algorithm>
+#include <fstream>
 #include <optix.h>
 #include <optix_function_table_definition.h>
 
@@ -98,9 +92,10 @@ void getPtxFromCuString(std::string& ptx,
     include_dirs.push_back(std::string("-I") + optix_include_dir);
     include_dirs.push_back(std::string("-I") + cuda_include_dir);
 
-    for (const std::string& extra_path : extra_includes) {
+    for (const std::string& extra_path: extra_includes) {
         include_dirs.push_back(std::string("-I") + extra_path);
     }
+
 
     for (const std::string& dir : include_dirs) {
         options.push_back(dir.c_str());
@@ -197,12 +192,13 @@ inline MOGPrimitiveTypes primitiveTypeFromStr(const std::string& primitiveTypeSt
 // OptixTracer
 //------------------------------------------------------------------------------
 
-std::vector<std::string> OptixTracer::generateDefines(
+ std::vector<std::string> OptixTracer::generateDefines(
     float particleKernelDegree,
     bool particleKernelDensityClamping,
     int particleRadianceSphDegree,
     bool enableNormals,
-    bool enableHitCounts) {
+    bool enableHitCounts
+) {
     std::vector<std::string> defines;
     if (_state) {
         defines.emplace_back("-DPARTICLE_KERNEL_DEGREE=" + std::to_string(static_cast<int32_t>(particleKernelDegree)));
@@ -266,7 +262,7 @@ OptixTracer::OptixTracer(
     _state->gPrimNumTri                   = 0;
 
     std::vector<std::string> defines = generateDefines(particleKernelDegree, particleKernelDensityClamping,
-                                                       particleRadianceSphDegree, enableNormals, enableHitCounts);
+                                                        particleRadianceSphDegree, enableNormals, enableHitCounts);
 
     const uint32_t sharedFlags =
         (_state->gPrimType == MOGTracingSphere ? PipelineFlag_SpherePrim : ((_state->gPrimType == MOGTracingCustom) || (_state->gPrimType == MOGTracingInstances) ? PipelineFlag_HasIS : 0));
@@ -314,6 +310,7 @@ OptixTracer::~OptixTracer(void) {
 
     delete _state;
 }
+
 
 void OptixTracer::createPipeline(const OptixDeviceContext context,
                                  const std::string& path,
@@ -605,6 +602,14 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
             _state->gPrimAABBSz = sizeof(OptixAabb) * gNum;
         }
 
+        if (!_state->optixAabbPtr) {
+            CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&_state->optixAabbPtr), sizeof(OptixAabb), cudaStream));
+        }
+
+        OptixAabb hostOptixAabb{1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+        CUDA_CHECK(cudaMemcpyAsync(
+            reinterpret_cast<void*>(_state->optixAabbPtr), &hostOptixAabb, sizeof(OptixAabb), cudaMemcpyHostToDevice, cudaStream));
+
         _state->gPrimNumVert = 0;
         _state->gPrimNumTri  = 0;
 
@@ -615,7 +620,11 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                      _state->particleKernelMinResponse, primitiveOpts,
                                      _state->particleKernelDegree,
                                      reinterpret_cast<OptixAabb*>(_state->gPrimAABB),
-                                     cudaStream);
+                                     reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
+
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(&_state->gasAABB),
+                                   reinterpret_cast<void*>(_state->optixAabbPtr), sizeof(OptixAabb), cudaMemcpyDeviceToHost,
+                                   cudaStream));
     } else if (_state->gPrimType == MOGTracingInstances) {
 
         if (_state->gPrimAABBSz < sizeof(OptixInstance) * gNum) {
@@ -626,6 +635,14 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
         }
 
         OptixTraversableHandle ias = createParticleInstanceAS(cudaStream);
+
+        if (!_state->optixAabbPtr) {
+            CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&_state->optixAabbPtr), sizeof(OptixAabb), cudaStream));
+        }
+
+        OptixAabb hostOptixAabb{1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+        CUDA_CHECK(cudaMemcpyAsync(
+            reinterpret_cast<void*>(_state->optixAabbPtr), &hostOptixAabb, sizeof(OptixAabb), cudaMemcpyHostToDevice, cudaStream));
 
         _state->gPrimNumVert = 0;
         _state->gPrimNumTri  = 0;
@@ -639,8 +656,21 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                           primitiveOpts,
                                           _state->particleKernelDegree,
                                           ias,
-                                          reinterpret_cast<OptixInstance*>(_state->gPrimAABB), cudaStream);
+                                          reinterpret_cast<OptixInstance*>(_state->gPrimAABB),
+                                          reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
+
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(&_state->gasAABB),
+                                   reinterpret_cast<void*>(_state->optixAabbPtr), sizeof(OptixAabb), cudaMemcpyDeviceToHost,
+                                   cudaStream));
     } else {
+        if (!_state->optixAabbPtr) {
+            CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&_state->optixAabbPtr), sizeof(OptixAabb), cudaStream));
+        }
+
+        OptixAabb hostOptixAabb{1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+        CUDA_CHECK(cudaMemcpyAsync(
+            reinterpret_cast<void*>(_state->optixAabbPtr), &hostOptixAabb, sizeof(OptixAabb), cudaMemcpyHostToDevice, cudaStream));
+
         if (_state->gPrimType == MOGTracingIcosaHedron) {
             _state->gPrimNumVert = 12;
             _state->gPrimNumTri  = 20;
@@ -655,7 +685,8 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                                 primitiveOpts,
                                                 _state->particleKernelDegree,
                                                 reinterpret_cast<float3*>(_state->gPrimVrt),
-                                                reinterpret_cast<int3*>(_state->gPrimTri), cudaStream);
+                                                reinterpret_cast<int3*>(_state->gPrimTri),
+                                                reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
         } else if (_state->gPrimType == MOGTracingOctraHedron) {
             _state->gPrimNumVert = 6;
             _state->gPrimNumTri  = 8;
@@ -671,6 +702,7 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                                _state->particleKernelDegree,
                                                reinterpret_cast<float3*>(_state->gPrimVrt),
                                                reinterpret_cast<int3*>(_state->gPrimTri),
+                                               reinterpret_cast<OptixAabb*>(_state->optixAabbPtr),
                                                cudaStream);
             CUDA_CHECK_LAST();
         } else if (_state->gPrimType == MOGTracingTriHexa) {
@@ -688,6 +720,7 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                             _state->particleKernelDegree,
                                             reinterpret_cast<float3*>(_state->gPrimVrt),
                                             reinterpret_cast<int3*>(_state->gPrimTri),
+                                            reinterpret_cast<OptixAabb*>(_state->optixAabbPtr),
                                             cudaStream);
             CUDA_CHECK_LAST();
         } else if (_state->gPrimType == MOGTracingTriSurfel) {
@@ -706,6 +739,7 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                               _state->particleKernelDegree,
                                               reinterpret_cast<float3*>(_state->gPrimVrt),
                                               reinterpret_cast<int3*>(_state->gPrimTri),
+                                              reinterpret_cast<OptixAabb*>(_state->optixAabbPtr),
                                               reinterpret_cast<float4*>(_state->gPipelineParticleData),
                                               cudaStream);
             CUDA_CHECK_LAST();
@@ -723,12 +757,12 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                                 primitiveOpts,
                                                 _state->particleKernelDegree,
                                                 reinterpret_cast<float3*>(_state->gPrimVrt),
-                                                reinterpret_cast<int3*>(_state->gPrimTri), cudaStream);
+                                                reinterpret_cast<int3*>(_state->gPrimTri),
+                                                reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
         } else if (_state->gPrimType == MOGTracingSphere) {
             _state->gPrimNumVert = 0;
             _state->gPrimNumTri  = 1; // number of primtive per gaussians
-            reallocateBuffer(&_state->gPrimVrt, _state->gPrimVrtSz, sizeof(float3) * gNum, cudaStream);
-            reallocateBuffer(&_state->gPrimTri, _state->gPrimTriSz, sizeof(float) * gNum, cudaStream);
+            reallocatePrimGeomBuffer(cudaStream);
 
             computeGaussianEnclosingSphere(gNum,
                                            getPtr<float3>(mogPos),
@@ -739,7 +773,8 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                            primitiveOpts,
                                            _state->particleKernelDegree,
                                            reinterpret_cast<float3*>(_state->gPrimVrt),
-                                           reinterpret_cast<float*>(_state->gPrimTri), cudaStream);
+                                           reinterpret_cast<float*>(_state->gPrimTri),
+                                           reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
         } else {
             _state->gPrimNumVert = 5;
             _state->gPrimNumTri  = 6;
@@ -754,8 +789,12 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
                                             primitiveOpts,
                                             _state->particleKernelDegree,
                                             reinterpret_cast<float3*>(_state->gPrimVrt),
-                                            reinterpret_cast<int3*>(_state->gPrimTri), cudaStream);
+                                            reinterpret_cast<int3*>(_state->gPrimTri),
+                                            reinterpret_cast<OptixAabb*>(_state->optixAabbPtr), cudaStream);
         }
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(&_state->gasAABB),
+                                   reinterpret_cast<void*>(_state->optixAabbPtr), sizeof(OptixAabb), cudaMemcpyDeviceToHost,
+                                   cudaStream));
     }
 
     {
@@ -825,33 +864,21 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
             _state->gasBufferSz = gas_buffer_sizes.outputSizeInBytes;
         }
 
-        if (!_state->optixAabbPtr) {
-            CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&_state->optixAabbPtr), sizeof(OptixAabb), cudaStream));
-        }
-
-        OptixAccelEmitDesc emit_desc = {};
-        emit_desc.type               = OPTIX_PROPERTY_TYPE_AABBS;
-        emit_desc.result             = _state->optixAabbPtr;
-
         OPTIX_CHECK(optixAccelBuild(_state->context,
                                     cudaStream, // CUDA stream
                                     &accel_options, &prim_input,
                                     1, // num build inputs
                                     _state->gasBufferTmp, gas_buffer_sizes.tempSizeInBytes, _state->gasBuffer,
                                     gas_buffer_sizes.outputSizeInBytes, &_state->gasHandle,
-                                    &emit_desc, // emitted property list
-                                    1           // num emitted properties
+                                    nullptr, // emitted property list
+                                    0        // num emitted properties
                                     ));
-
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(&_state->gasAABB),
-                                   reinterpret_cast<void*>(_state->optixAabbPtr), sizeof(OptixAabb), cudaMemcpyDeviceToHost,
-                                   cudaStream));
     }
 
     CUDA_CHECK_LAST();
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 OptixTracer::trace(uint32_t frameNumber,
                    torch::Tensor rayToWorld,
                    torch::Tensor rayOri,
@@ -862,13 +889,12 @@ OptixTracer::trace(uint32_t frameNumber,
                    int sphDegree,
                    float minTransmittance) {
 
-    const torch::TensorOptions opts  = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    torch::Tensor rayRad             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
-    torch::Tensor rayDns             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
-    torch::Tensor rayHit             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 2}, opts);
-    torch::Tensor rayNrm             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
-    torch::Tensor rayHitsCount       = torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
-    torch::Tensor particleVisibility = torch::zeros({particleDensity.size(0), 1}, opts);
+    const torch::TensorOptions opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::Tensor rayRad            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
+    torch::Tensor rayDns            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
+    torch::Tensor rayHit            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 2}, opts);
+    torch::Tensor rayNrm            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
+    torch::Tensor rayHitsCount      = torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
 
     PipelineParameters paramsHost;
     paramsHost.handle = _state->gasHandle;
@@ -891,7 +917,6 @@ OptixTracer::trace(uint32_t frameNumber,
     paramsHost.particleDensity      = getPtr<const ParticleDensity>(particleDensity);
     paramsHost.particleRadiance     = getPtr<const float>(particleRadiance);
     paramsHost.particleExtendedData = reinterpret_cast<const void*>(_state->gPipelineParticleData);
-    paramsHost.particleVisibility   = getPtr<int32_t>(particleVisibility);
 
     paramsHost.rayRadiance    = packed_accessor32<float, 4>(rayRad);
     paramsHost.rayDensity     = packed_accessor32<float, 4>(rayDns);
@@ -911,7 +936,7 @@ OptixTracer::trace(uint32_t frameNumber,
 
     CUDA_CHECK_LAST();
 
-    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(rayRad, rayDns, rayHit, rayNrm, rayHitsCount, particleVisibility);
+    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(rayRad, rayDns, rayHit, rayNrm, rayHitsCount);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

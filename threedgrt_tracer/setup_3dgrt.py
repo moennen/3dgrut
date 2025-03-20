@@ -14,23 +14,60 @@
 # limitations under the License.
 
 import os
-
-from threedgrut.utils import jit
+import torch
+import torch.utils.cpp_extension
 
 
 # ----------------------------------------------------------------------------
 #
 def setup_3dgrt(conf):
-    def to_cpp_bool(value):
-        return "true" if value else "false"
-
     include_paths = []
-    include_paths.append(os.path.join(os.path.dirname(__file__), "include"))
-    include_paths.append(os.path.join(os.path.dirname(__file__), "dependencies", "optix-dev", "include"))
+
+    # Make sure we can find the necessary compiler and libary binaries.
+    if os.name == "nt":
+        include_paths.append(os.path.dirname(__file__) + r"\include")
+        include_paths.append(os.path.dirname(__file__) + r"\dependencies\optix-dev\include")
+
+        def find_cl_path():
+            import glob
+
+            for edition in ["Enterprise", "Professional", "BuildTools", "Community"]:
+                paths = sorted(
+                    glob.glob(
+                        r"C:\Program Files (x86)\Microsoft Visual Studio\*\%s\VC\Tools\MSVC\*\bin\Hostx64\x64" % edition
+                    ),
+                    reverse=True,
+                )
+                if paths:
+                    return paths[0]
+
+        # If cl.exe is not on path, try to find it.
+        if os.system("where cl.exe >nul 2>nul") != 0:
+            cl_path = find_cl_path()
+            if cl_path is None:
+                raise RuntimeError("Could not locate a supported Microsoft Visual C++ installation")
+            os.environ["PATH"] += ";" + cl_path
+
+    elif os.name == "posix":
+        include_paths.append(os.path.dirname(__file__) + r"/include")
+        include_paths.append(os.path.dirname(__file__) + r"/dependencies/optix-dev/include")
 
     # Compiler options.
-    cflags = []
-    cuda_flags = []
+    cc_flags = ["-DNVDR_TORCH"]
+
+    nvcc_flags = [
+        "-DNVDR_TORCH",
+        "-std=c++17",
+        "--extended-lambda",
+        "--expt-relaxed-constexpr",
+        "-Xcompiler=-fno-strict-aliasing",
+    ]
+
+    # Linker options.
+    if os.name == "posix":
+        ldflags = ["-lcuda", "-lnvrtc"]
+    elif os.name == "nt":
+        ldflags = ["cuda.lib", "advapi32.lib", "nvrtc.lib"]
 
     # List of sources.
     source_files = [
@@ -40,33 +77,61 @@ def setup_3dgrt(conf):
     ]
 
     # Compile slang kernels
-    slang_build_dir = os.path.join(os.path.dirname(__file__), "include", "3dgrt", "kernels", "slang")
-    jit.compile_slang_kernel(
-        kernel_files=[
-            f"{os.path.join(slang_build_dir,'models/gaussianParticles.slang')}",
-            f"{os.path.join(slang_build_dir,'models/shRadiativeParticles.slang')}",
-        ],
-        output_file=f"{os.path.join(slang_build_dir, 'gaussianParticles.cuh')}",
-        defines=[
+    # TODO: do not overwrite files, use config hash to register the needed version
+    import importlib, subprocess
+
+    slang_mod = importlib.import_module("slangtorch")
+    slang_build_env = os.environ
+    slang_build_env["PATH"] += ";" if os.name == "nt" else ":"
+    slang_build_env["PATH"] += os.path.join(os.path.dirname(slang_mod.__file__), "bin")
+    slang_build_inc_dir = os.path.join(os.path.dirname(__file__), "include")
+    slang_build_file_dir = os.path.join(os.path.dirname(__file__), "include/3dgrt/kernels/slang/")
+    subprocess.check_call(
+        [
+            "slangc",
+            "-target", "cuda",
+            "-I", slang_build_inc_dir,
+            "-line-directive-mode", "none",
+            "-matrix-layout-row-major", # NB : this is required for cuda target
+            "-O2",
             f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
             f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
             f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
             f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
             f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
-            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
-            f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type=='trisurfel')}",
+            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={conf.render.enable_normals}",
+            f"-DGAUSSIAN_PARTICLE_SURFEL={conf.render.primitive_type=='trisurfel'}",
+            f"{os.path.join(slang_build_file_dir,'models/gaussianParticles.slang')}",
+            f"{os.path.join(slang_build_file_dir,'models/shRadiativeParticles.slang')}",
+            "-o",
+            f"{os.path.join(slang_build_file_dir,'gaussianParticles.cuh')}",
         ],
-        include_paths=[
-            os.path.join(os.path.dirname(__file__), "include"),
-        ],
+        env=slang_build_env,
     )
+
+    if os.name == "posix":
+        use_cugl_interop = False
+        try:
+            import polyscope
+            use_cugl_interop = True   # polyscope installed, possibly without cupy / cuda-python available
+            import cupy
+            import cuda
+            use_cugl_interop = False  # polyscope has access to preset bindings from cupy / cuda-python
+        except ImportError:
+            use_cugl_interop = False  # polyscope not installed or polyscope installed + cupy / cuda-python available
+        if use_cugl_interop:
+            include_paths.append(os.path.dirname(__file__) + r"/dependencies/cugl/include")
+            cc_flags.append("-DUSE_CUGL_INTEROP=1")
 
     # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
-    return jit.load(
+    torch.utils.cpp_extension.load(
         name="lib3dgrt_cc",
         sources=source_paths,
-        extra_cflags=cflags,
-        extra_cuda_cflags=cuda_flags,
+        extra_cflags=cc_flags,
+        extra_cuda_cflags=nvcc_flags,
+        extra_ldflags=ldflags,
         extra_include_paths=include_paths,
+        with_cuda=True,
+        verbose=True,
     )

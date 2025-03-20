@@ -13,12 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#endif
-
 #include <3dgut/threedgut.cuh>
 
 #include <3dgut/renderer/gutRenderer.h>
@@ -239,12 +233,10 @@ threedgut::GUTRenderer::~GUTRenderer() {
 }
 
 threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& params,
-                                                        const vec3* sensorRayOriginCudaPtr,
-                                                        const vec3* sensorRayDirectionCudaPtr,
-                                                        float* worldHitCountCudaPtr,
+                                                        const vec3* wordlRayOriginCudaPtr,
+                                                        const vec3* worldRayDirectionCudaPtr,
                                                         float* worldHitDistanceCudaPtr,
                                                         vec4* radianceDensityCudaPtr,
-                                                        int* particlesVisibilityCudaPtr,
                                                         Parameters& parameters,
                                                         int cudaDeviceIndex,
                                                         cudaStream_t cudaStream) {
@@ -267,7 +259,7 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
     const TSensorPose sensorPoseInv = sensorPoseInverse(sensorPose);                                                          // Transform from sensor to world space
 
     CHECK_STATUS_RETURN(m_forwardContext->updateParticlesWorkingBuffers(numParticles, cudaStream, m_logger));
-    if (!/*m_settings.perRayFeatures*/ TGUTRendererParams::PerRayParticleFeatures) {
+    if (!/*m_settings.perRayFeatures*/TGUTRendererParams::PerRayParticleFeatures) {
         CHECK_STATUS_RETURN(m_forwardContext->updateParticlesFeaturesBuffer(numParticles * featuresDim(), cudaStream, m_logger));
     }
 
@@ -289,7 +281,6 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
             (tcnn::vec2*)m_forwardContext->particlesProjectedExtent.data(),
             (float*)m_forwardContext->particlesGlobalDepth.data(),
             (float*)m_forwardContext->particlesPrecomputedFeatures.data(),
-            particlesVisibilityCudaPtr,
             parameters.m_dptrParametersBuffer);
         CUDA_CHECK_STREAM_RETURN(cudaStream, m_logger);
     }
@@ -376,44 +367,20 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
 
     {
         const auto renderProfile = DeviceLaunchesLogger::ScopePush{deviceLaunchesLogger, "render::render"};
-
-#if FINE_GRAINED_LOAD_BALANCING
-        constexpr uint32_t VirtualTilesPerTile = GUTParameters::Tiling::VirtualTilesPerTile;
-        constexpr uint32_t ThreadsPerBlock     = GUTParameters::Tiling::FineGrainedThreadsPerBlock;
-        const uint32_t virtual_tiles_total     = tileGrid.x * tileGrid.y * VirtualTilesPerTile;
-        ::renderBalanced<<<virtual_tiles_total, ThreadsPerBlock, 0, cudaStream>>>( // ThreadsPerBlock = FineGrainedWarpsPerBlock * WarpSize
+        ::render<<<dim3{tileGrid.x, tileGrid.y, 1u}, dim3{GUTParameters::Tiling::BlockX, GUTParameters::Tiling::BlockY, 1u}, 0, cudaStream>>>(
             params,
             (const tcnn::uvec2*)m_forwardContext->sortedTileRangeIndices.data(),
             (const uint32_t*)m_forwardContext->sortedTileParticleIdx.data(),
-            (const tcnn::vec3*)sensorRayOriginCudaPtr,
-            (const tcnn::vec3*)sensorRayDirectionCudaPtr,
+            (const tcnn::vec3*)wordlRayOriginCudaPtr,
+            (const tcnn::vec3*)worldRayDirectionCudaPtr,
             sensorPoseToMat(sensorPoseInv),
-            worldHitCountCudaPtr,
-            worldHitDistanceCudaPtr,
-            radianceDensityCudaPtr,
-            (const tcnn::vec2*)m_forwardContext->particlesProjectedPosition.data(),
-            (const tcnn::vec4*)m_forwardContext->particlesProjectedConicOpacity.data(),
-            (const float*)m_forwardContext->particlesGlobalDepth.data(),
-            (const float*)m_forwardContext->particlesPrecomputedFeatures.data(),
-            parameters.m_dptrParametersBuffer,
-            tcnn::uvec2{tileGrid.x, tileGrid.y});
-#else
-        ::render<<<dim3{tileGrid.x, tileGrid.y, 1u}, dim3{GUTParameters::Tiling::BlockX, GUTParameters::Tiling::BlockY, 1u}, 0, cudaStream>>>(
-            params, // threedgut::RenderParameters params
-            (const tcnn::uvec2*)m_forwardContext->sortedTileRangeIndices.data(),
-            (const uint32_t*)m_forwardContext->sortedTileParticleIdx.data(),
-            (const tcnn::vec3*)sensorRayOriginCudaPtr,
-            (const tcnn::vec3*)sensorRayDirectionCudaPtr,
-            sensorPoseToMat(sensorPoseInv),
-            worldHitCountCudaPtr,
-            worldHitDistanceCudaPtr,
-            radianceDensityCudaPtr,
+            (float*)worldHitDistanceCudaPtr,
+            (tcnn::vec4*)radianceDensityCudaPtr,
             (const tcnn::vec2*)m_forwardContext->particlesProjectedPosition.data(),
             (const tcnn::vec4*)m_forwardContext->particlesProjectedConicOpacity.data(),
             (const float*)m_forwardContext->particlesGlobalDepth.data(),
             (const float*)m_forwardContext->particlesPrecomputedFeatures.data(),
             parameters.m_dptrParametersBuffer);
-#endif
         CUDA_CHECK_STREAM_RETURN(cudaStream, m_logger);
     }
 
@@ -421,14 +388,14 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
 }
 
 threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters& params,
-                                                         const vec3* sensorRayOriginCudaPtr,
-                                                         const vec3* sensorRayDirectionCudaPtr,
-                                                         const float* worldHitDistanceCudaPtr,         //
-                                                         const float* worldHitDistanceGradientCudaPtr, // TODO: not implemented yet
-                                                         const vec4* radianceDensityCudaPtr,           //
-                                                         const vec4* radianceDensityGradientCudaPtr,   // TODO: not implemented yet
-                                                         vec3* worldRayOriginGradientCudaPtr,          // TODO: not implemented yet
-                                                         vec3* worldRayDirectionGradientCudaPtr,       // TODO: not implemented yet
+                                                         const vec3* wordlRayOriginCudaPtr,
+                                                         const vec3* worldRayDirectionCudaPtr,
+                                                         const float* worldHitDistanceCudaPtr,
+                                                         const float* worldHitDistanceGradientCudaPtr,
+                                                         const vec4* radianceDensityCudaPtr,
+                                                         const vec4* radianceDensityGradientCudaPtr,
+                                                         vec3* wordlRayOriginGradientCudaPtr,
+                                                         vec3* worldRayDirectionGradientCudaPtr,
                                                          Parameters& parameters,
                                                          int cudaDeviceIndex,
                                                          cudaStream_t cudaStream) {
@@ -456,12 +423,12 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
         LOG_ERROR(m_logger, "[GUTRenderer] number of particles is 0, cannot render backward.");
     }
 
-    if (!/*m_settings.perRayFeatures*/ TGUTRendererParams::PerRayParticleFeatures) {
+    if (!/*m_settings.perRayFeatures*/TGUTRendererParams::PerRayParticleFeatures) {
         CHECK_STATUS_RETURN(
             m_forwardContext->updateParticlesFeaturesGradientBuffer(numParticles * featuresDim(), cudaStream, m_logger));
     }
 
-    if (/*m_settings.renderMode == Settings::Splat*/ TGUTProjectorParams::BackwardProjection) {
+    if (/*m_settings.renderMode == Settings::Splat*/TGUTProjectorParams::BackwardProjection) {
         CHECK_STATUS_RETURN(
             m_forwardContext->updateParticlesProjectionGradientBuffers(numParticles, cudaStream, m_logger));
     }
@@ -472,15 +439,15 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
             params,
             (const tcnn::uvec2*)m_forwardContext->sortedTileRangeIndices.data(),
             (const uint32_t*)m_forwardContext->sortedTileParticleIdx.data(),
-            (const tcnn::vec3*)sensorRayOriginCudaPtr,
-            (const tcnn::vec3*)sensorRayDirectionCudaPtr,
+            (const tcnn::vec3*)wordlRayOriginCudaPtr,
+            (const tcnn::vec3*)worldRayDirectionCudaPtr,
             sensorPoseToMat(sensorPoseInv),
-            (const float*)worldHitDistanceCudaPtr,             //
-            (const float*)worldHitDistanceGradientCudaPtr,     // TODO: not implemented yet
-            (const tcnn::vec4*)radianceDensityCudaPtr,         //
-            (const tcnn::vec4*)radianceDensityGradientCudaPtr, // TODO: not implemented yet
-            (tcnn::vec3*)worldRayOriginGradientCudaPtr,        // TODO: not implemented yet
-            (tcnn::vec3*)worldRayDirectionGradientCudaPtr,     // TODO: not implemented yet
+            (const float*)worldHitDistanceCudaPtr,
+            (const float*)worldHitDistanceGradientCudaPtr,
+            (const tcnn::vec4*)radianceDensityCudaPtr,
+            (const tcnn::vec4*)radianceDensityGradientCudaPtr,
+            (tcnn::vec3*)wordlRayOriginGradientCudaPtr,
+            (tcnn::vec3*)worldRayDirectionGradientCudaPtr,
             (const tcnn::vec2*)m_forwardContext->particlesProjectedPosition.data(),
             (const tcnn::vec4*)m_forwardContext->particlesProjectedConicOpacity.data(),
             (const float*)m_forwardContext->particlesGlobalDepth.data(),
@@ -494,7 +461,7 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
         CUDA_CHECK_STREAM_RETURN(cudaStream, m_logger);
     }
 
-    if (!/*m_settings.perRayFeatures*/ TGUTRendererParams::PerRayParticleFeatures) {
+    if (!/*m_settings.perRayFeatures*/TGUTRendererParams::PerRayParticleFeatures) {
         const auto projectProfile = DeviceLaunchesLogger::ScopePush{deviceLaunchesLogger, "render-backward::project"};
         ::projectBackward<<<div_round_up(numParticles, GUTParameters::Tiling::BlockSize), GUTParameters::Tiling::BlockSize, 0, cudaStream>>>(
             tileGrid,

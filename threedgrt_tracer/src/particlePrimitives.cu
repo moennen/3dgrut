@@ -30,8 +30,8 @@ __device__ inline float kernelScale(float density, float modulatedMinResponse, u
 
     // bump kernel
     if (kernelDegree < 0) {
-        const float k  = fabsf(kernelDegree);
-        const float s  = 1.0 / powf(3.0, k);
+        const float k = fabsf(kernelDegree);
+        const float s     = 1.0 / powf(3.0, k);
         const float ks = powf((1.f / (logf(minResponse) - 1.f) + 1.f) / s, 1.f / k);
         return ks;
     }
@@ -48,6 +48,7 @@ __device__ inline float kernelScale(float density, float modulatedMinResponse, u
     /// find distance r (>0) st e^{a*r^b} = minResponse
     /// TODO : reshuffle the math to call powf only once
     return powf(logf(minResponse) / a, 1.0f / b);
+
 }
 
 constexpr uint32_t octaHedronNumVrt = 6;
@@ -70,14 +71,15 @@ __global__ void computeGaussianEnclosingOctaHedronKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         const uint32_t sVertIdx = octaHedronNumVrt * idx;
         const uint32_t sTriIdx  = octaHedronNumTri * idx;
 
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -90,6 +92,14 @@ __global__ void computeGaussianEnclosingOctaHedronKernel(
         for (int i = 0; i < octaHedronNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (octaHedronVrt[i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 octaHedronTri[octaHedronNumTri] = {make_int3(2, 1, 0), make_int3(1, 4, 0), make_int3(4, 3, 0),
@@ -118,11 +128,12 @@ __global__ void computeGaussianEnclosingTriHexaKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -137,6 +148,14 @@ __global__ void computeGaussianEnclosingTriHexaKernel(
         for (int i = 0; i < triHexaNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (triHexaVrt[i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 triHexaTri[triHexaNumTri] = {
@@ -168,11 +187,12 @@ __global__ void computeGaussianEnclosingTriSurfelKernel(
     const float degree,
     float3* __restrict__ gPrimVrt,
     int3* __restrict__ gPrimTri,
-    float4* __restrict__ gNormalDensity) {
+    float4* __restrict__ gNormalDensity,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -192,6 +212,14 @@ __global__ void computeGaussianEnclosingTriSurfelKernel(
         for (int i = 0; i < triSurfelNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (triSurfelVrt[axis][i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 triSurfelTri[triSurfelNumTri] = {make_int3(0, 1, 2), make_int3(0, 1, 3)};
@@ -223,11 +251,12 @@ __global__ void computeGaussianEnclosingTriBaryKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         float33 rot;
-        quaternionWXYZToMatrixTranspose(make_float4(gRot[idx][0], gRot[idx][1], gRot[idx][2], gRot[idx][3]), rot);
+        invRotationMatrix(make_float4(gRot[idx][0], gRot[idx][1], gRot[idx][2], gRot[idx][3]), rot);
         const float3 scl   = make_float3(gScl[idx][0], gScl[idx][1], gScl[idx][2]);
         const float3 trans = make_float3(gPos[idx][0], gPos[idx][1], gPos[idx][2]);
 
@@ -242,6 +271,14 @@ __global__ void computeGaussianEnclosingTriBaryKernel(
         for (int i = 0; i < triBaryNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = triBaryVrt[i] * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 triBaryTri[triBaryNumTri] = {make_int3(0, 1, 2)};
@@ -284,14 +321,15 @@ __global__ void computeGaussianEnclosingTetraHedronKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         const uint32_t sVertIdx = tetraHedronNumVrt * idx;
         const uint32_t sTriIdx  = tetraHedronNumTri * idx;
 
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -306,6 +344,14 @@ __global__ void computeGaussianEnclosingTetraHedronKernel(
         for (int i = 0; i < tetraHedronNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (tetraHedronVrt[i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 tetraHedronTri[tetraHedronNumTri] = {make_int3(0, 2, 1), make_int3(0, 3, 2), make_int3(0, 1, 3),
@@ -347,14 +393,15 @@ __global__ void computeGaussianEnclosingDiamondKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         const uint32_t sVertIdx = diamondNumVrt * idx;
         const uint32_t sTriIdx  = diamondNumTri * idx;
 
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -368,6 +415,14 @@ __global__ void computeGaussianEnclosingDiamondKernel(
         for (int i = 0; i < diamondNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (diamondVrt[i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 diamondTri[diamondNumTri] = {make_int3(0, 2, 3), make_int3(0, 4, 2), make_int3(0, 3, 4),
@@ -393,11 +448,21 @@ __global__ void computeGaussianEnclosingSphereKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimCenter,
-    float* __restrict__ gPrimRadius) {
+    float* __restrict__ gPrimRadius,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         gPrimCenter[idx] = gPos[idx];
         gPrimRadius[idx] = fmaxf(gScl[idx].x, fmaxf(gScl[idx].y, gScl[idx].z)) * kernelScale(gDns[idx], kernelMinResponse, opts, degree);
+
+        if (gPrimAABB) {
+            atomicMinFloat(&gPrimAABB[0].minX, gPrimCenter[idx].x - gPrimRadius[idx]);
+            atomicMinFloat(&gPrimAABB[0].minY, gPrimCenter[idx].y - gPrimRadius[idx]);
+            atomicMinFloat(&gPrimAABB[0].minZ, gPrimCenter[idx].z - gPrimRadius[idx]);
+            atomicMaxFloat(&gPrimAABB[0].maxX, gPrimCenter[idx].x + gPrimRadius[idx]);
+            atomicMaxFloat(&gPrimAABB[0].maxY, gPrimCenter[idx].y + gPrimRadius[idx]);
+            atomicMaxFloat(&gPrimAABB[0].maxZ, gPrimCenter[idx].z + gPrimRadius[idx]);
+        }
     }
 }
 
@@ -454,14 +519,15 @@ __global__ void computeGaussianEnclosingIcosaHedronKernel(
     const uint32_t opts,
     const float degree,
     float3* __restrict__ gPrimVrt,
-    int3* __restrict__ gPrimTri) {
+    int3* __restrict__ gPrimTri,
+    OptixAabb* gPrimAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         const uint32_t sVertIdx = icosaHedronNumVrt * idx;
         const uint32_t sTriIdx  = icosaHedronNumTri * idx;
 
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -476,6 +542,14 @@ __global__ void computeGaussianEnclosingIcosaHedronKernel(
         for (int i = 0; i < icosaHedronNumVrt; ++i) {
             float3& vrt = gPrimVrt[sVertIdx + i];
             vrt         = (icosaHedronVrt[i] * kscl) * rot + trans;
+            if (gPrimAABB) {
+                atomicMinFloat(&gPrimAABB[0].minX, vrt.x);
+                atomicMinFloat(&gPrimAABB[0].minY, vrt.y);
+                atomicMinFloat(&gPrimAABB[0].minZ, vrt.z);
+                atomicMaxFloat(&gPrimAABB[0].maxX, vrt.x);
+                atomicMaxFloat(&gPrimAABB[0].maxY, vrt.y);
+                atomicMaxFloat(&gPrimAABB[0].maxZ, vrt.z);
+            }
         }
 
         const int3 icosaHedronTri[icosaHedronNumTri] = {
@@ -504,11 +578,12 @@ __global__ void computeGaussianEnclosingAABBKernel(
     const float kernelMinResponse,
     const uint32_t opts,
     const float degree,
-    OptixAabb* __restrict__ gPrimAABB) {
+    OptixAabb* __restrict__ gPrimAABB,
+    OptixAabb* gAABB) {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -537,6 +612,15 @@ __global__ void computeGaussianEnclosingAABBKernel(
                 aabb.maxZ = fmaxf(aabb.maxZ, vrt.z);
             }
         }
+
+        if (gAABB) {
+            atomicMinFloat(&gAABB[0].minX, aabb.minX);
+            atomicMinFloat(&gAABB[0].minY, aabb.minY);
+            atomicMinFloat(&gAABB[0].minZ, aabb.minZ);
+            atomicMaxFloat(&gAABB[0].maxX, aabb.maxX);
+            atomicMaxFloat(&gAABB[0].maxY, aabb.maxY);
+            atomicMaxFloat(&gAABB[0].maxZ, aabb.maxZ);
+        }
     }
 }
 
@@ -550,13 +634,14 @@ __global__ void computeGaussianEnclosingInstancesKernel(
     const uint32_t opts,
     const float degree,
     OptixTraversableHandle ias,
-    OptixInstance* __restrict__ gPrimInstances) {
+    OptixInstance* __restrict__ gPrimInstances,
+    OptixAabb* gAABB) {
 
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < gNum) {
 
         float33 rot;
-        quaternionWXYZToMatrixTranspose(gRot[idx], rot);
+        invRotationMatrix(gRot[idx], rot);
         const float3 scl   = gScl[idx];
         const float3 trans = gPos[idx];
 
@@ -584,6 +669,15 @@ __global__ void computeGaussianEnclosingInstancesKernel(
                 aabb.maxY = fmaxf(aabb.maxY, vrt.y);
                 aabb.maxZ = fmaxf(aabb.maxZ, vrt.z);
             }
+        }
+
+        if (gAABB) {
+            atomicMinFloat(&gAABB[0].minX, aabb.minX);
+            atomicMinFloat(&gAABB[0].minY, aabb.minY);
+            atomicMinFloat(&gAABB[0].minZ, aabb.minZ);
+            atomicMaxFloat(&gAABB[0].maxX, aabb.maxX);
+            atomicMaxFloat(&gAABB[0].maxY, aabb.maxY);
+            atomicMaxFloat(&gAABB[0].maxZ, aabb.maxZ);
         }
 
         OptixInstance instance;
@@ -674,6 +768,7 @@ void computeGaussianEnclosingOctaHedron(uint32_t gNum,
                                         const float degree,
                                         float3* gPrimVrt,
                                         int3* gPrimTri,
+                                        OptixAabb* gPrimAABB,
                                         cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -683,7 +778,7 @@ void computeGaussianEnclosingOctaHedron(uint32_t gNum,
         gRot,
         gScl,
         gDns,
-        kernelMinResponse, opts, degree, gPrimVrt, gPrimTri);
+        kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB);
 }
 
 void computeGaussianEnclosingIcosaHedron(uint32_t gNum,
@@ -696,6 +791,7 @@ void computeGaussianEnclosingIcosaHedron(uint32_t gNum,
                                          const float degree,
                                          float3* gPrimVrt,
                                          int3* gPrimTri,
+                                         OptixAabb* gPrimAABB,
                                          cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -705,7 +801,7 @@ void computeGaussianEnclosingIcosaHedron(uint32_t gNum,
                                                                               gRot,
                                                                               gScl,
                                                                               gDns,
-                                                                              kernelMinResponse, opts, degree, gPrimVrt, gPrimTri);
+                                                                              kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB);
 }
 
 void computeGaussianEnclosingTetraHedron(uint32_t gNum,
@@ -718,6 +814,7 @@ void computeGaussianEnclosingTetraHedron(uint32_t gNum,
                                          const float degree,
                                          float3* gPrimVrt,
                                          int3* gPrimTri,
+                                         OptixAabb* gPrimAABB,
                                          cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -727,7 +824,7 @@ void computeGaussianEnclosingTetraHedron(uint32_t gNum,
                                                                               gRot,
                                                                               gScl,
                                                                               gDns,
-                                                                              kernelMinResponse, opts, degree, gPrimVrt, gPrimTri);
+                                                                              kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB);
 }
 
 void computeGaussianEnclosingDiamond(uint32_t gNum,
@@ -740,6 +837,7 @@ void computeGaussianEnclosingDiamond(uint32_t gNum,
                                      const float degree,
                                      float3* gPrimVrt,
                                      int3* gPrimTri,
+                                     OptixAabb* gPrimAABB,
                                      cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -749,7 +847,7 @@ void computeGaussianEnclosingDiamond(uint32_t gNum,
                                                                           gRot,
                                                                           gScl,
                                                                           gDns,
-                                                                          kernelMinResponse, opts, degree, gPrimVrt, gPrimTri);
+                                                                          kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB);
 }
 
 void computeGaussianEnclosingSphere(uint32_t gNum,
@@ -762,6 +860,7 @@ void computeGaussianEnclosingSphere(uint32_t gNum,
                                     const float degree,
                                     float3* gPrimCenter,
                                     float* gPrimRadius,
+                                    OptixAabb* gPrimAABB,
                                     cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -771,7 +870,7 @@ void computeGaussianEnclosingSphere(uint32_t gNum,
                                                                          gRot,
                                                                          gScl,
                                                                          gDns,
-                                                                         kernelMinResponse, opts, degree, gPrimCenter, gPrimRadius);
+                                                                         kernelMinResponse, opts, degree, gPrimCenter, gPrimRadius, gPrimAABB);
 }
 
 void copyGaussianEnclosingPrimitives(uint32_t gNum,
@@ -786,9 +885,9 @@ void copyGaussianEnclosingPrimitives(uint32_t gNum,
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-        gPrimVertTs.scalar_type(), "copyGaussianEnclosingPrimitives", ([&] { copyGaussianEnclosingPrimitivesKernel<scalar_t><<<blocks, threads, 0, stream>>>(
-                                                                                 gNum, gNumVert, gNumTri, gPrimVertTs.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-                                                                                 gPrimTriTs.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(), gPrimVrt, gPrimTri); }));
+        gPrimVertTs.type(), "copyGaussianEnclosingPrimitives", ([&] { copyGaussianEnclosingPrimitivesKernel<scalar_t><<<blocks, threads, 0, stream>>>(
+                                                                          gNum, gNumVert, gNumTri, gPrimVertTs.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                                                                          gPrimTriTs.packed_accessor32<int32_t, 2, torch::RestrictPtrTraits>(), gPrimVrt, gPrimTri); }));
 }
 
 void computeGaussianEnclosingAABB(uint32_t gNum,
@@ -800,6 +899,7 @@ void computeGaussianEnclosingAABB(uint32_t gNum,
                                   uint32_t opts,
                                   const float degree,
                                   OptixAabb* gPrimAABB,
+                                  OptixAabb* gAABB,
                                   cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -810,7 +910,7 @@ void computeGaussianEnclosingAABB(uint32_t gNum,
         gRot,
         gScl,
         gDns,
-        kernelMinResponse, opts, degree, gPrimAABB);
+        kernelMinResponse, opts, degree, gPrimAABB, gAABB);
 }
 
 void computeGaussianEnclosingInstances(uint32_t gNum,
@@ -823,6 +923,7 @@ void computeGaussianEnclosingInstances(uint32_t gNum,
                                        const float degree,
                                        OptixTraversableHandle ias,
                                        OptixInstance* gPrimInstances,
+                                       OptixAabb* gAABB,
                                        cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -833,7 +934,7 @@ void computeGaussianEnclosingInstances(uint32_t gNum,
         gRot,
         gScl,
         gDns,
-        kernelMinResponse, opts, degree, ias, gPrimInstances);
+        kernelMinResponse, opts, degree, ias, gPrimInstances, gAABB);
 }
 
 void computeGaussianEnclosingTriHexa(uint32_t gNum,
@@ -846,6 +947,7 @@ void computeGaussianEnclosingTriHexa(uint32_t gNum,
                                      const float degree,
                                      float3* gPrimVrt,
                                      int3* gPrimTri,
+                                     OptixAabb* gPrimAABB,
                                      cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
@@ -855,7 +957,7 @@ void computeGaussianEnclosingTriHexa(uint32_t gNum,
                                                                           gRot,
                                                                           gScl,
                                                                           gDns,
-                                                                          kernelMinResponse, opts, degree, gPrimVrt, gPrimTri);
+                                                                          kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB);
 }
 
 void computeGaussianEnclosingTriSurfel(uint32_t gNum,
@@ -868,6 +970,7 @@ void computeGaussianEnclosingTriSurfel(uint32_t gNum,
                                        const float degree,
                                        float3* gPrimVrt,
                                        int3* gPrimTri,
+                                       OptixAabb* gPrimAABB,
                                        float4* gNormalDensity,
                                        cudaStream_t stream) {
     const uint32_t threads = 1024;
@@ -878,7 +981,7 @@ void computeGaussianEnclosingTriSurfel(uint32_t gNum,
                                                                             gRot,
                                                                             gScl,
                                                                             gDns,
-                                                                            kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gNormalDensity);
+                                                                            kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gNormalDensity, gPrimAABB);
 }
 
 void computeGaussianEnclosingTriBary(uint32_t gNum,
@@ -891,17 +994,18 @@ void computeGaussianEnclosingTriBary(uint32_t gNum,
                                      const float degree,
                                      float3* gPrimVrt,
                                      int3* gPrimTri,
+                                     OptixAabb* gPrimAABB,
                                      cudaStream_t stream) {
     const uint32_t threads = 1024;
     const uint32_t blocks  = div_round_up(static_cast<uint32_t>(gNum), threads);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-        gPos.scalar_type(), "computeGaussianEnclosingTriBary", ([&] { computeGaussianEnclosingTriBaryKernel<scalar_t>
-                                                                          <<<blocks, threads, 0, stream>>>(gNum, gPos.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-                                                                                                           gRot.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-                                                                                                           gScl.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-                                                                                                           gDns.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-                                                                                                           kernelMinResponse, opts, degree, gPrimVrt, gPrimTri); }));
+        gPos.type(), "computeGaussianEnclosingTriBary", ([&] { computeGaussianEnclosingTriBaryKernel<scalar_t>
+                                                                   <<<blocks, threads, 0, stream>>>(gNum, gPos.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                                                                                                    gRot.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                                                                                                    gScl.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                                                                                                    gDns.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
+                                                                                                    kernelMinResponse, opts, degree, gPrimVrt, gPrimTri, gPrimAABB); }));
 }
 
 void generatePinholeCameraRays(int2 resolution, float2 tanFoV, const float4* invViewMatrix, float3* rayOri, float3* rayDir, cudaStream_t stream) {

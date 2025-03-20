@@ -16,12 +16,11 @@
 import logging
 import os
 from enum import IntEnum
-
 import torch
 import torch.utils.cpp_extension
 
-from threedgrut.datasets.protocols import Batch
 from threedgrut.utils.timer import CudaTimer
+from threedgrut.datasets.protocols import Batch
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,8 @@ def load_3dgrt_plugin(conf):
         except ImportError:
             from .setup_3dgrt import setup_3dgrt
 
-            tdgrt = setup_3dgrt(conf)
+            setup_3dgrt(conf)
+            import lib3dgrt_cc as tdgrt  # type: ignore
         _3dgrt_plugin = tdgrt
 
 
@@ -66,7 +66,7 @@ class Tracer:
             min_transmittance,
         ):
             particle_density = torch.concat([mog_pos, mog_dns, mog_rot, mog_scl, torch.zeros_like(mog_dns)], dim=1)
-            ray_radiance, ray_density, ray_hit_distance, ray_normals, hits_count, mog_visibility = tracer_wrapper.trace(
+            ray_radiance, ray_density, ray_hit_distance, ray_normals, hits_count = tracer_wrapper.trace(
                 frame_id,
                 ray_to_world,
                 ray_ori,
@@ -99,18 +99,11 @@ class Tracer:
                 ray_hit_distance[:, :, :, 0:1],  # return only the hit distance
                 ray_normals,
                 hits_count,
-                mog_visibility,
             )
 
         @staticmethod
         def backward(
-            ctx,
-            ray_radiance_grd,
-            ray_density_grd,
-            ray_hit_distance_grd,
-            ray_normals_grd,
-            ray_hits_count_grd_UNUSED,
-            mog_visibility_grd_UNUSED,
+            ctx, ray_radiance_grd, ray_density_grd, ray_hit_distance_grd, ray_normals_grd, ray_hits_count_grd_UNUSED
         ):
             (
                 ray_to_world,
@@ -216,11 +209,11 @@ class Tracer:
     def render(self, gaussians, gpu_batch: Batch, train=False, frame_id=0):
         num_gaussians = gaussians.num_gaussians
         with torch.cuda.nvtx.range(f"model.forward({num_gaussians} gaussians)"):
-
+    
             if self.frame_timer is not None:
                 self.frame_timer.start()
-
-            pred_rgb, pred_opacity, pred_dist, pred_normals, hits_count, mog_visibility = Tracer._Autograd.apply(
+    
+            (pred_rgb, pred_opacity, pred_dist, pred_normals, hits_count) = Tracer._Autograd.apply(
                 self.tracer_wrapper,
                 frame_id,
                 gpu_batch.T_to_world.contiguous(),
@@ -242,7 +235,7 @@ class Tracer:
             pred_rgb, pred_opacity = gaussians.background(
                 gpu_batch.T_to_world.contiguous(), gpu_batch.rays_dir.contiguous(), pred_rgb, pred_opacity, train
             )
-
+        
         if self.frame_timer is not None:
             self.timings["forward_render"] = self.frame_timer.timing()
 
@@ -253,5 +246,4 @@ class Tracer:
             "pred_normals": torch.nn.functional.normalize(pred_normals, dim=3),
             "hits_count": hits_count,
             "frame_time_ms": self.frame_timer.timing() if self.frame_timer is not None else 0.0,
-            "mog_visibility": mog_visibility,
         }

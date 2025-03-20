@@ -2,10 +2,9 @@
 
 # order in which configs override each other (/* - denotes a relative search path)
 defaults:
-  - /base_gs
+  - /base.yaml
   - /dataset: scannetpp
   - /initialization: colmap
-  - /render: 3dgrt
   - _self_
 
 # overwrite of default parameters

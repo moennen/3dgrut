@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
-import math
+import logging, math
 from dataclasses import dataclass
 
-import numpy as np
 import torch
-from ncore.data import FThetaCameraModelParameters, ShutterType
+import torch.utils.cpp_extension
+
+import numpy as np
+
 from omegaconf import OmegaConf
 
 from threedgrut.datasets.protocols import Batch
@@ -36,14 +37,13 @@ _3dgut_plugin = None
 def load_3dgut_plugin(conf):
     global _3dgut_plugin
     if _3dgut_plugin is None:
-        import torch
-
         try:
             from . import lib3dgut_cc as tdgut  # type: ignore
         except ImportError:
             from .setup_3dgut import setup_3dgut
 
-            tdgut = setup_3dgut(conf)
+            setup_3dgut(conf)
+            import lib3dgut_cc as tdgut  # type: ignore
         _3dgut_plugin = tdgut
 
 
@@ -185,7 +185,7 @@ class Tracer:
                 * sensor_poses.timestamps_us[0]
             )
 
-            ray_radiance_density, ray_hit_distance, ray_hit_count, mog_visibility = tracer_wrapper.trace(
+            ray_radiance_density, ray_hit_distance = tracer_wrapper.trace(
                 frame_id,
                 n_active_features,
                 particle_density,
@@ -219,8 +219,6 @@ class Tracer:
             return (
                 ray_radiance_density,
                 ray_hit_distance,
-                ray_hit_count,
-                mog_visibility,
             )
 
         @staticmethod
@@ -228,8 +226,6 @@ class Tracer:
             ctx,
             ray_radiance_density_grd,
             ray_hit_distance_grd,
-            ray_hit_count_grd_UNUSED,
-            mog_visibility_grd_UNUSED,
         ):
             (
                 ray_ori,
@@ -312,8 +308,6 @@ class Tracer:
             (
                 pred_rgba,
                 pred_dist,
-                hits_count,
-                mog_visibility,
             ) = Tracer._Autograd.apply(
                 self.tracer_wrapper,
                 frame_id,
@@ -329,10 +323,9 @@ class Tracer:
                 poses,
             )
 
-            pred_rgb = pred_rgba[..., :3].unsqueeze(0).contiguous()
-            pred_opacity = pred_rgba[..., 3:].unsqueeze(0).contiguous()
-            pred_dist = pred_dist.unsqueeze(0).contiguous()
-            hits_count = hits_count.unsqueeze(0).contiguous()
+            pred_rgb = pred_rgba[..., :3].unsqueeze(0)
+            pred_opacity = pred_rgba[..., 3:].unsqueeze(0)
+            pred_dist = pred_dist.unsqueeze(0)
 
             pred_rgb, pred_opacity = gaussians.background(
                 gpu_batch.T_to_world.contiguous(), rays_d, pred_rgb, pred_opacity, train
@@ -345,9 +338,8 @@ class Tracer:
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
             "pred_normals": torch.nn.functional.normalize(torch.ones_like(pred_rgb), dim=3),
-            "hits_count": hits_count,
+            "hits_count": torch.zeros_like(pred_rgb[..., :1]),
             "frame_time_ms": timings["forward_render"] if "forward_render" in timings else 0.0,
-            "mog_visibility": mog_visibility,
         }
 
     @staticmethod
@@ -359,70 +351,28 @@ class Tracer:
         return 2 * math.atan(pixels / (2 * focal))
 
     @staticmethod
-    def __create_sensor_pose_from_R_T(R_start, T_start, R_end, T_end):
-        """
-        Create SensorPose3D from start and end R, T matrices.
-        Supports both global shutter (R_start == R_end) and rolling shutter.
-        """
-        # Convert START pose to quaternion
-        T_world_sensor_t_start = torch.from_numpy(T_start).float()
-        T_world_sensor_R_start = torch.from_numpy(R_start.transpose()).float()
-        T_world_sensor_quat_start = SensorPose3DModel._SensorPose3DModel__so3_matrix_to_quat(T_world_sensor_R_start)
-        T_world_sensor_tquat_start = torch.hstack([T_world_sensor_t_start.cpu(), T_world_sensor_quat_start.cpu()])
-
-        # Convert END pose to quaternion
-        T_world_sensor_t_end = torch.from_numpy(T_end).float()
-        T_world_sensor_R_end = torch.from_numpy(R_end.transpose()).float()
-        T_world_sensor_quat_end = SensorPose3DModel._SensorPose3DModel__so3_matrix_to_quat(T_world_sensor_R_end)
-        T_world_sensor_tquat_end = torch.hstack([T_world_sensor_t_end.cpu(), T_world_sensor_quat_end.cpu()])
-
-        return SensorPose3D(
-            T_world_sensors=[T_world_sensor_tquat_start, T_world_sensor_tquat_end],
-            timestamps_us=[0, 1],  # Relative timestamps (start=0, end=1)
-        )
-
-    @staticmethod
     def __create_camera_parameters(gpu_batch):
+        from threedgrut.datasets.camera_models import ShutterType
+
         SHUTTER_TYPE_MAP = {
-            ShutterType.ROLLING_TOP_TO_BOTTOM.name: _3dgut_plugin.ShutterType.ROLLING_TOP_TO_BOTTOM,
-            ShutterType.ROLLING_LEFT_TO_RIGHT.name: _3dgut_plugin.ShutterType.ROLLING_LEFT_TO_RIGHT,
-            ShutterType.ROLLING_BOTTOM_TO_TOP.name: _3dgut_plugin.ShutterType.ROLLING_BOTTOM_TO_TOP,
-            ShutterType.ROLLING_RIGHT_TO_LEFT.name: _3dgut_plugin.ShutterType.ROLLING_RIGHT_TO_LEFT,
-            ShutterType.GLOBAL.name: _3dgut_plugin.ShutterType.GLOBAL,
+            ShutterType.ROLLING_TOP_TO_BOTTOM: _3dgut_plugin.ShutterType.ROLLING_TOP_TO_BOTTOM,
+            ShutterType.ROLLING_LEFT_TO_RIGHT: _3dgut_plugin.ShutterType.ROLLING_LEFT_TO_RIGHT,
+            ShutterType.ROLLING_BOTTOM_TO_TOP: _3dgut_plugin.ShutterType.ROLLING_BOTTOM_TO_TOP,
+            ShutterType.ROLLING_RIGHT_TO_LEFT: _3dgut_plugin.ShutterType.ROLLING_RIGHT_TO_LEFT,
+            ShutterType.GLOBAL: _3dgut_plugin.ShutterType.GLOBAL,
         }
 
-        # Check if rays are already in world space (rolling shutter with per-pixel poses)
-        rays_in_world_space = gpu_batch.rays_in_world_space if hasattr(gpu_batch, "rays_in_world_space") else False
+        # Process the camera extrinsics
+        pose = gpu_batch.T_to_world.squeeze()
+        assert pose.ndim == 2
+        C2W = np.concatenate((pose[:3, :4].cpu().detach().numpy(), np.zeros((1, 4))))
+        C2W[3, 3] = 1.0
 
-        if rays_in_world_space:
-            # Rays are already in world space with correct per-pixel poses baked in
-            # Use identity transform (no-op) so rays stay in world space
-            R_start = R_end = np.eye(3, dtype=np.float32)
-            T_start = T_end = np.zeros(3, dtype=np.float32)
-        else:
-            # Process the camera extrinsics (START and END poses for rolling shutter)
-            pose_start = gpu_batch.T_to_world.squeeze()
-            assert pose_start.ndim == 2
-
-            # Extract END pose for rolling shutter (if available)
-            if gpu_batch.T_to_world_end is not None:
-                pose_end = gpu_batch.T_to_world_end.squeeze()
-                assert pose_end.ndim == 2
-            else:
-                # Global shutter: END pose = START pose
-                pose_end = pose_start
-
-            # Helper function to convert pose to world-to-camera parameters
-            def pose_to_world_to_camera(pose):
-                C2W = np.concatenate((pose[:3, :4].cpu().detach().numpy(), np.zeros((1, 4))))
-                C2W[3, 3] = 1.0
-                W2C = np.linalg.inv(C2W)
-                R = np.transpose(W2C[:3, :3])
-                T = W2C[:3, 3]
-                return R, T
-
-            R_start, T_start = pose_to_world_to_camera(pose_start)
-            R_end, T_end = pose_to_world_to_camera(pose_end)
+        # Get the world-to-camera transform and set R, T
+        W2C = np.linalg.inv(C2W)
+        R = np.transpose(W2C[:3, :3])
+        T = W2C[:3, 3]
+        pose_model = SensorPose3DModel(R=R, T=T)
 
         # Process the camera intrinsics
         if (K := gpu_batch.intrinsics) is not None:
@@ -433,7 +383,7 @@ class Tracer:
             FovY = Tracer.__focal2fov(focaly, orig_h)
             # Compute the camera model parameters
             camera_model_parameters = _3dgut_plugin.fromOpenCVPinholeCameraModelParameters(
-                resolution=np.array([orig_w, orig_h], dtype=np.uint32),
+                resolution=np.array([orig_w, orig_h], dtype=np.uint64),
                 shutter_type=_3dgut_plugin.ShutterType.GLOBAL,
                 principal_point=np.array([orig_w, orig_h], dtype=np.float32) / 2,
                 focal_length=np.array(
@@ -443,7 +393,7 @@ class Tracer:
                 tangential_coeffs=np.zeros((2,), dtype=np.float32),
                 thin_prism_coeffs=np.zeros((4,), dtype=np.float32),
             )
-            return camera_model_parameters, Tracer.__create_sensor_pose_from_R_T(R_start, T_start, R_end, T_end)
+            return camera_model_parameters, pose_model.get_sensor_pose()
 
         elif (K := gpu_batch.intrinsics_OpenCVPinholeCameraModelParameters) is not None:
             camera_model_parameters = _3dgut_plugin.fromOpenCVPinholeCameraModelParameters(
@@ -453,9 +403,9 @@ class Tracer:
                 focal_length=K["focal_length"],
                 radial_coeffs=K["radial_coeffs"],
                 tangential_coeffs=K["tangential_coeffs"],
-                thin_prism_coeffs=K.get("thin_prism_coeffs", np.zeros((4,), dtype=np.float32)),
+                thin_prism_coeffs=K["thin_prism_coeffs"],
             )
-            return camera_model_parameters, Tracer.__create_sensor_pose_from_R_T(R_start, T_start, R_end, T_end)
+            return camera_model_parameters, pose_model.get_sensor_pose()
 
         elif (K := gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters) is not None:
             camera_model_parameters = _3dgut_plugin.fromOpenCVFisheyeCameraModelParameters(
@@ -466,24 +416,7 @@ class Tracer:
                 radial_coeffs=K["radial_coeffs"],
                 max_angle=K["max_angle"],
             )
-            return camera_model_parameters, Tracer.__create_sensor_pose_from_R_T(R_start, T_start, R_end, T_end)
-
-        elif (K := gpu_batch.intrinsics_FThetaCameraModelParameters) is not None:
-            POLYNOMIAL_TYPE_MAP = {
-                FThetaCameraModelParameters.PolynomialType.PIXELDIST_TO_ANGLE.name: _3dgut_plugin.PolynomialType.PIXELDIST_TO_ANGLE,
-                FThetaCameraModelParameters.PolynomialType.ANGLE_TO_PIXELDIST.name: _3dgut_plugin.PolynomialType.ANGLE_TO_PIXELDIST,
-            }
-            camera_model_parameters = _3dgut_plugin.fromFThetaCameraModelParameters(
-                resolution=K["resolution"],
-                shutter_type=SHUTTER_TYPE_MAP[K["shutter_type"]],
-                principal_point=K["principal_point"],
-                reference_poly=POLYNOMIAL_TYPE_MAP[K["reference_poly"]],
-                pixeldist_to_angle_poly=K["pixeldist_to_angle_poly"],
-                angle_to_pixeldist_poly=K["angle_to_pixeldist_poly"],
-                max_angle=K["max_angle"],
-                linear_cde=K["linear_cde"],
-            )
-            return camera_model_parameters, Tracer.__create_sensor_pose_from_R_T(R_start, T_start, R_end, T_end)
+            return camera_model_parameters, pose_model.get_sensor_pose()
 
         raise ValueError(
             f"Camera intrinsics unavailable or unsupported, input keys are [{', '.join(gpu_batch.keys())}]"

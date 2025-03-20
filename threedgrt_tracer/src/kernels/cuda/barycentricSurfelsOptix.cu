@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <3dgrt/kernels/cuda/gaussianParticles.cuh>
 #include <3dgrt/pipelineParameters.h>
+#include <3dgrt/kernels/cuda/gaussianParticles.cuh>
 #include <cuda_fp16.h>
 // clang-format on
 
@@ -141,9 +141,6 @@ extern "C" __global__ void __raygen__rg() {
                     rayRadiance += rayParticleRadiance * rayParticleWeight;
                     rayTransmittance *= (1 - rayParticleAlpha);
                     rayHitDistance += rayParticleHitDistance * rayParticleWeight;
-
-                    // NOTE(qi): Race condition here, but as we are writing the same value, it seems it is safe.
-                    params.particleVisibility[rayHit.particleId] = 1;
 
 #ifdef ENABLE_NORMALS
                     // fetch the normals from the precomputed normals buffer

@@ -25,14 +25,7 @@ struct ParticleDensity {
     float padding;
 };
 
-struct ParticeFetchedDensity {
-    float3 position;
-    float3 scale;
-    float33 rotationT;
-    float density;
-};
-
-__forceinline__ __device__ void quaternionWXYZToMatrix(const float4& q, float33& ret) {
+__forceinline__ __device__ void rotationMatrixTranspose(const float4& q, float33& ret) {
     const float r = q.x;
     const float x = q.y;
     const float y = q.z;
@@ -191,13 +184,13 @@ static inline __device__ void fetchParticleDensity(
     const ParticleDensity* particlesDensity,
     float3& particlePosition,
     float3& particleScale,
-    float33& particleRotation,
+    float33& particleInvRotation,
     float& particleDensity) {
     const ParticleDensity particleData = particlesDensity[particleIdx];
 
     particlePosition = particleData.position;
     particleScale    = particleData.scale;
-    quaternionWXYZToMatrix(particleData.quaternion, particleRotation);
+    rotationMatrixTranspose(particleData.quaternion, particleInvRotation);
     particleDensity = particleData.density;
 }
 
@@ -359,7 +352,7 @@ __device__ inline bool processHitFwd(
     float3* normal) {
     float3 particlePosition;
     float3 particleScale;
-    float33 particleRotation;
+    float33 particleInvRotation;
     float particleDensity;
 
     fetchParticleDensity(
@@ -367,14 +360,14 @@ __device__ inline bool processHitFwd(
         particlesDensity,
         particlePosition,
         particleScale,
-        particleRotation,
+        particleInvRotation,
         particleDensity);
 
     const float3 giscl   = make_float3(1 / particleScale.x, 1 / particleScale.y, 1 / particleScale.z);
     const float3 gposc   = (rayOrigin - particlePosition);
-    const float3 gposcr  = (gposc * particleRotation);
+    const float3 gposcr  = (gposc * particleInvRotation);
     const float3 gro     = giscl * gposcr;
-    const float3 rayDirR = rayDirection * particleRotation;
+    const float3 rayDirR = rayDirection * particleInvRotation;
     const float3 grdu    = giscl * rayDirR;
     const float3 grd     = safe_normalize(grdu);
 
@@ -409,7 +402,7 @@ __device__ inline bool processHitFwd(
 
         if (normal) {
             constexpr float ellispoidSqRadius = 9.0f;
-            const float3 particleScaleRotated = (particleRotation * particleScale);
+            const float3 particleScaleRotated = (particleInvRotation * particleScale);
             *normal += weight * (SurfelPrimitive ? make_float3(0, 0, (grd.z > 0 ? 1 : -1) * particleScaleRotated.z) : safe_normalize((gro + grd * (dot(grd, -1 * gro) - sqrtf(ellispoidSqRadius - grayDist))) * particleScaleRotated));
         }
     }
@@ -428,21 +421,21 @@ __device__ inline bool intersectCustomParticle(
     float& hitDistance) {
     float3 particlePosition;
     float3 particleScale;
-    float33 particleRotation;
+    float33 particleInvRotation;
     float particleDensity;
     fetchParticleDensity(
         particleIdx,
         particlesDensity,
         particlePosition,
         particleScale,
-        particleRotation,
+        particleInvRotation,
         particleDensity);
 
     const float3 giscl   = make_float3(1 / particleScale.x, 1 / particleScale.y, 1 / particleScale.z);
     const float3 gposc   = (rayOrigin - particlePosition);
-    const float3 gposcr  = (gposc * particleRotation);
+    const float3 gposcr  = (gposc * particleInvRotation);
     const float3 gro     = giscl * gposcr;
-    const float3 rayDirR = rayDirection * particleRotation;
+    const float3 rayDirR = rayDirection * particleInvRotation;
     const float3 grdu    = giscl * rayDirR;
     const float3 grd     = safe_normalize(grdu);
 
@@ -498,10 +491,10 @@ __device__ inline void processHitBwd(
     float3 radianceGrad,
     float integratedDepth,
     float& depth,
-    float integratedDepthGrad) {
+    float depthGrad) {
     float3 particlePosition;
     float3 gscl;
-    float33 particleRotation;
+    float33 particleInvRotation;
     float particleDensity;
     float4 grot;
 
@@ -509,16 +502,16 @@ __device__ inline void processHitBwd(
         particlePosition = particleData.position;
         gscl             = particleData.scale;
         grot             = particleData.quaternion;
-        quaternionWXYZToMatrix(grot, particleRotation);
+        rotationMatrixTranspose(grot, particleInvRotation);
         particleDensity = particleData.density;
     }
 
     // project ray in the gaussian
     const float3 giscl   = make_float3(1 / gscl.x, 1 / gscl.y, 1 / gscl.z);
     const float3 gposc   = (rayOrigin - particlePosition);
-    const float3 gposcr  = (gposc * particleRotation);
+    const float3 gposcr  = (gposc * particleInvRotation);
     const float3 gro     = giscl * gposcr;
-    const float3 rayDirR = rayDirection * particleRotation;
+    const float3 rayDirR = rayDirection * particleInvRotation;
     const float3 grdu    = giscl * rayDirR;
     const float3 grd     = safe_normalize(grdu);
     const float3 gcrod   = SurfelPrimitive ? gro + grd * -gro.z / grd.z : cross(grd, gro);
@@ -550,30 +543,21 @@ __device__ inline void processHitBwd(
         // ===> d_hitT / d_galpha = gdist * prevTrm - residualHitT * prevTrm
         //                        = (gdist - residualHitT) * prevTrm
         //
-        const float galphaRayHitGrd = (gdist - residualHitT) * transmittance * integratedDepthGrad;
+        const float galphaRayHitGrd = (gdist - residualHitT) * transmittance * depthGrad;
         //
         // ===> d_hitT / d_gsqdist = weight / (2*gdist)
         // ===> d_gsqdist / d_grds =  2 * grds
-        const float3 grdsRayHitGrd = gsqdist > 0.0f ? ((2 * grds * weight) / (2 * gdist)) * integratedDepthGrad : make_float3(0.0f);
+        const float3 grdsRayHitGrd = gsqdist > 0.0f ? ((2 * grds * weight) / (2 * gdist)) * depthGrad : make_float3(0.0f);
 
-        // ---> grds = gscl * grd * p  where p = dot(grd, -gro) [non-surfel] or p = -gro.z/grd.z [surfel]
+        // ---> grds = gscl * grd * dot(grd, -1 * gro)
         //
-        // ===> d_grds / d_gscl = grdd (element-wise)
+        // ===> d_grds / d_gscl =  grd * dot(grd, -1 * gro)
         const float3 gsclRayHitGrd = grdd * grdsRayHitGrd;
-        // ===> d_grds_i / d_grd_j = gscl_i * (delta_ij * p - grd_i * gro_j)  [non-surfel]
-        //   => grdRayHitGrd_j = gscl_j * grdsRayHitGrd_j * p - gro_j * dot(grdsRayHitGrd * gscl, grd)
-        // ===> d_grds_i / d_gro_j = -gscl_i * grd_i * grd_j                  [non-surfel]
-        //   => groRayHitGrd_j = -grd_j * dot(grdsRayHitGrd * gscl, grd)
-        const float grdScaledDot = dot(grdsRayHitGrd * gscl, grd);
-        float3 grdRayHitGrd, groRayHitGrd;
-        if constexpr (SurfelPrimitive) {
-            const float h = -gro.z / grd.z;
-            grdRayHitGrd  = gscl * grdsRayHitGrd * h - make_float3(0.f, 0.f, (h / grd.z) * grdScaledDot);
-            groRayHitGrd  = make_float3(0.f, 0.f, -grdScaledDot / grd.z);
-        } else {
-            grdRayHitGrd = gscl * grdsRayHitGrd * dot(grd, -1.f * gro) - gro * grdScaledDot;
-            groRayHitGrd = -grd * grdScaledDot;
-        }
+        // ===> d_grds / d_grd =  - gscl * grd * (2 dot(grd, -1 * gro)
+        const float3 grdRayHitGrd = -gscl * make_float3(2 * grd.x * gro.x + grd.y * gro.y + grd.z * gro.z, grd.x * gro.x + 2 * grd.y * gro.y + grd.z * gro.z, grd.x * gro.x + grd.y * gro.y + 2 * grd.z * gro.z) * grdsRayHitGrd;
+        //
+        // ===> d_grds / d_gro = - gscl * grd * grd
+        const float3 groRayHitGrd = -gscl * grd * grd * grdsRayHitGrd;
 
         // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         // ---> rayDns = 1 - prevTrm * (1-galpha) * nextTrm
@@ -604,8 +588,8 @@ __device__ inline void processHitBwd(
         // >>> rayRadiance = accumulatedRayRad + weigth * rayRad + (1-galpha)*transmit * residualRayRad
         const float3 rayRad = weight * grad;
         radiance += rayRad;
-        const float3 residualRayRad = maxf3((nextTransmit <= minTransmittance ? make_float3(0.f, 0.f, 0.f) : (integratedRadiance - radiance) / nextTransmit),
-                                            make_float3(0.f, 0.f, 0.f));
+        const float3 residualRayRad = maxf3((nextTransmit <= minTransmittance ? make_float3(0) : (integratedRadiance - radiance) / nextTransmit),
+                                            make_float3(0));
 
         // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         // ---> rayDns = 1 - prevTrm * (1-galpha) * nextTrm
@@ -712,13 +696,13 @@ __device__ inline void processHitBwd(
         // ---> gposcr = matmul(gposc, grotMat)
         // ===> d_gposcr / d_gposc = matmul_bw_vec(grotMat)
         // ===> d_gposcr / d_grotmat = matmul_bw_mat(gposc)
-        const float3 gposcGrd     = matmul_bw_vec(particleRotation, gposcrGrd);
+        const float3 gposcGrd     = matmul_bw_vec(particleInvRotation, gposcrGrd);
         const float4 grotGrdPoscr = matmul_bw_quat(gposc, gposcrGrd, grot);
 
         // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         // ---> gposc = rayOri - gpos
         // ===> d_gposc / d_gpos = -1
-        const float3 rayMoGPosGrd        = -gposcGrd;
+        const float3 rayMoGPosGrd = -gposcGrd;
         particleDensityGradPtr->position = rayMoGPosGrd;
 
         // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -736,7 +720,7 @@ __device__ inline void processHitBwd(
         // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         // ---> rayDirR = matmul(rayDir, grotMat)
         // ===> d_rayDirR / d_grotmat = matmul_bw_mat(rayDir, grotMat)
-        const float4 grotGrdRayDirR          = matmul_bw_quat(rayDirection, rayDirRGrd, grot);
+        const float4 grotGrdRayDirR = matmul_bw_quat(rayDirection, rayDirRGrd, grot);
         particleDensityGradPtr->quaternion.x = grotGrdPoscr.x + grotGrdRayDirR.x;
         particleDensityGradPtr->quaternion.y = grotGrdPoscr.y + grotGrdRayDirR.y;
         particleDensityGradPtr->quaternion.z = grotGrdPoscr.z + grotGrdRayDirR.z;

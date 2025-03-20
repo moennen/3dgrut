@@ -15,9 +15,6 @@
 
 #!/bin/bash
 
-set -e
-
-
 CONFIG=$1
 if [[ -z $CONFIG ]]; then
     echo "Error: Configuration is not provided. Aborting execution."
@@ -25,8 +22,7 @@ if [[ -z $CONFIG ]]; then
     exit 1
 fi
 
-RESULT_DIR=${RESULT_DIR:-"results/mipnerf360"}
-EXTRA_ARGS=${@:2} # any extra arguments to pass to the script
+RESULT_DIR=results/mipnerf360
 
 # if the result directory already exists, warn user and aport execution
 if [ -d "$RESULT_DIR" ]; then
@@ -34,10 +30,9 @@ if [ -d "$RESULT_DIR" ]; then
     exit 1
 fi
 
-mkdir -p $RESULT_DIR
-export TORCH_EXTENSIONS_DIR=$RESULT_DIR/.cache
+mkdir $RESULT_DIR
 
-SCENE_LIST="bicycle bonsai counter flowers garden kitchen room stump treehill"
+SCENE_LIST="garden bicycle stump bonsai counter kitchen room treehill flowers"
 
 for SCENE in $SCENE_LIST;
 do
@@ -50,11 +45,13 @@ do
     echo "Running: $SCENE, Configuration: $CONFIG"
 
     # train without eval
-    nvidia-smi > $RESULT_DIR/train_$SCENE.log
     CUDA_VISIBLE_DEVICES=0 python train.py --config-name $CONFIG \
         use_wandb=False with_gui=False out_dir=$RESULT_DIR \
         path=data/mipnerf360/$SCENE experiment_name=$SCENE \
-        dataset.downsample_factor=$DATA_FACTOR \
-        $EXTRA_ARGS >> $RESULT_DIR/train_$SCENE.log
+        dataset.downsample_factor=$DATA_FACTOR > $RESULT_DIR/train_$SCENE.log
 
 done
+
+# To grep results from log files, run the following command:
+# grep "Training Statistics" -A 5 train_*.log | awk 'NR % 7 == 5'
+# grep "Test Metrics"        -A 5 train_*.log | awk 'NR % 7 == 5'

@@ -17,16 +17,9 @@ import warnings
 from typing import Optional
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    ProgressColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
-from rich.table import Table
+from rich.progress import BarColumn, Progress, ProgressColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
+from rich.table import Table
 
 # Colors from: https://rich.readthedocs.io/en/stable/appendix/colors.html
 

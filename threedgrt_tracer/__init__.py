@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .tracer import Tracer
+from .tracer import (Tracer)
+from . import gui
 
-__all__ = ["Tracer"]
+__all__ = ["Tracer", "gui"]

@@ -19,7 +19,7 @@ static const int KernelDegree               = GAUSSIAN_PARTICLE_KERNEL_DEGREE;
 static const float MinParticleKernelDensity = GAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY;
 static const float MinParticleAlpha = GAUSSIAN_PARTICLE_MIN_ALPHA;
 static const float MaxParticleAlpha = GAUSSIAN_PARTICLE_MAX_ALPHA;
-static const bool Surfel                    = GAUSSIAN_PARTICLE_SURFEL;
+static const bool Surfel                    = false; // GAUSSIAN_PARTICLE_SURFEL == 0 ? true : false;
 }; // namespace gaussianParticle
 
 namespace gaussianParticle {
@@ -33,7 +33,7 @@ struct RawParameters : IDifferentiable {
 };
 
 struct RawParametersBuffer {
-    Ptr<RawParameters, Access.Read> _dataPtr;
+    const RawParameters* _dataPtr;
     RawParameters *_gradPtr;
     bool exclusiveGradient; //< true if the gradient maybe updated without atomics
 };
@@ -116,25 +116,17 @@ struct Parameters : IDifferentiable {
     particleRayDirection = normalize(grdu);
 }
 
-[BackwardDifferentiable][ForceInline] float canonicalRayMinSquaredDistance<let Surfel : bool>(
+[BackwardDifferentiable][ForceInline] float canonicalRayMinSquaredDistance(
     float3 canonicalRayOrigin,
-    float3 canonicalRayDirection)
-{
-    // NB : function is called only for intersecting rays
-    float3 gcrod;
-    if (Surfel) {
-        // if ray z direction is null, the ray origin is on the plane z = 0
-        gcrod = abs(canonicalRayDirection.z) > 1e-06 ? canonicalRayOrigin + canonicalRayDirection * -canonicalRayOrigin.z / canonicalRayDirection.z : canonicalRayOrigin;
-    } else {
-        gcrod = cross(canonicalRayDirection, canonicalRayOrigin);
-    }
+    float3 canonicalRayDirection) {
+    const float3 gcrod = cross(canonicalRayDirection, canonicalRayOrigin);
     return dot(gcrod, gcrod);
 }
 
-[BackwardDifferentiable][ForceInline] float canonicalRayMaxKernelResponse<let KernelDegree : int, let Surfel : bool>(
+[BackwardDifferentiable][ForceInline] float canonicalRayMaxKernelResponse<let KernelDegree : int>(
     float3 canonicalRayOrigin,
     float3 canonicalRayDirection) {
-    const float grayDist = canonicalRayMinSquaredDistance<Surfel>(canonicalRayOrigin, canonicalRayDirection);
+    const float grayDist = canonicalRayMinSquaredDistance(canonicalRayOrigin, canonicalRayDirection);
 
     /// generalized gaussian of degree n : scaling is s = -4.5/3^n
     switch (KernelDegree) {
@@ -190,7 +182,7 @@ struct Parameters : IDifferentiable {
     float3 canonicalRayDirection,
     float3 scale,
     float3x3 rotationT) {
-
+    
     // TODO : unify the computation of normals
     float3 surfelNm = float3(0, 0, 1); // fetchSurfelNm<MOGTRACING_PRIMITIVE_TYPE>(primId % params.gPrimNumTri);
     // resolve direction ambiguities
@@ -219,7 +211,7 @@ bool hit(
         canonicalRayOrigin,
         canonicalRayDirection);
 
-    const float maxResponse = canonicalRayMaxKernelResponse<KernelDegree, Surfel>(
+    const float maxResponse = canonicalRayMaxKernelResponse<KernelDegree>(
         canonicalRayOrigin,
         canonicalRayDirection);
 
@@ -255,17 +247,17 @@ float integrateHit<let backToFront : bool>(
            integratedNormal = lerp(integratedNormal, normal, alpha);
        }
    }
-   else
+   else 
    {
        integratedDepth += depth * weight;
-       if (enableNormal)
+       if (enableNormal) 
        {
             integratedNormal += normal * weight;
        }
    }
 
    transmittance *= (1 - alpha);
-   return weight;
+   return weight; 
 }
 
 [BackwardDifferentiable][ForceInline]
@@ -290,12 +282,12 @@ float processHitFromBuffer<let backToFront : bool>(
             enableNormal,
             normal))
     {
-        return integrateHit<backToFront>(alpha,
-                                         transmittance,
-                                         depth,
-                                         integratedDepth,
-                                         enableNormal,
-                                         normal,
+        return integrateHit<backToFront>(alpha, 
+                                         transmittance, 
+                                         depth, 
+                                         integratedDepth, 
+                                         enableNormal, 
+                                         normal, 
                                          integratedNormal);
     }
     return 0.0f;
@@ -336,10 +328,10 @@ float3 incidentDirectionFromBuffer(
 // ------------------------------------------------------------------------------------------------------------------
 // Entry points
 
-[CudaDeviceExport]
+[CudaDeviceExport] 
 inline gaussianParticle.Parameters particleDensityParameters(
     uint32_t particleIdx,
-    gaussianParticle.CommonParameters commonParameters)
+    gaussianParticle.CommonParameters commonParameters) 
 {
     return gaussianParticle.fetchParameters(
         particleIdx,
@@ -372,7 +364,7 @@ inline bool particleDensityHit(
     inout float integratedDepth,
     in bool enableNormal,
     in float3 normal,
-    inout float3 integratedNormal)
+    inout float3 integratedNormal) 
 {
     return gaussianParticle.integrateHit<false>(
         alpha,
@@ -393,7 +385,7 @@ inline float particleDensityProcessHitFwdFromBuffer(
     inout float transmittance,
     inout float integratedDepth,
     in bool enableNormal,
-    inout float3 integratedNormal)
+    inout float3 integratedNormal) 
 {
     return gaussianParticle.processHitFromBuffer<false>(
         rayOrigin,
@@ -422,15 +414,15 @@ void particleDensityProcessHitBwdToBuffer(
     bool enableNormal,
     in float3 normal,
     inout float3 integratedNormal,
-    inout float3 integratedNormalGrad)
+    inout float3 integratedNormalGrad) 
 {
     if (alpha > 0.0f)
     {
         const float weight = 1.0f / (1.0f - alpha);
-
+        
         transmittance *= weight;
         DifferentialPair<float> transmittanceDiff = DifferentialPair<float>(transmittance, transmittanceGrad);
-
+        
         integratedDepth = (integratedDepth - depth * alpha) * weight;
         DifferentialPair<float> integratedDepthDiff = DifferentialPair<float>(integratedDepth, integratedDepthGrad);
 
@@ -488,7 +480,7 @@ bool particleDensityHitCustom(
         canonicalRayOrigin,
         canonicalRayDirection);
 
-    const float maxResponse = gaussianParticle.canonicalRayMaxKernelResponse<gaussianParticle.KernelDegree, gaussianParticle.Surfel>(
+    const float maxResponse = gaussianParticle.canonicalRayMaxKernelResponse<gaussianParticle.KernelDegree>(
         canonicalRayOrigin,
         canonicalRayDirection);
 
@@ -497,7 +489,7 @@ bool particleDensityHitCustom(
 
     return (hitDistance > minHitDistance) &&
            (hitDistance < maxHitDistance) &&
-           (gaussianParticle.canonicalRayMinSquaredDistance<gaussianParticle.Surfel>(
+           (gaussianParticle.canonicalRayMinSquaredDistance(
                 canonicalRayOrigin, canonicalRayDirection) < maxParticleSquaredDistance);
 }
 
@@ -516,7 +508,7 @@ bool particleDensityHitInstance(
     hitDistance = numerator * denominator;
     return (hitDistance > minHitDistance) &&
            (hitDistance < maxHitDistance) &&
-           (gaussianParticle.canonicalRayMinSquaredDistance<gaussianParticle.Surfel>(
+           (gaussianParticle.canonicalRayMinSquaredDistance(
                 canonicalRayOrigin,
                 normalize(canonicalUnormalizedRayDirection)) < maxParticleSquaredDistance);
 }
@@ -537,9 +529,9 @@ bool particleDensityHitInstance(
 )
 {
     bwd_diff(gaussianParticle.incidentDirectionFromBuffer)(
-        particleIdx,
-        commonParameters.parametersBuffer,
-        sourcePosition,
+        particleIdx, 
+        commonParameters.parametersBuffer, 
+        sourcePosition, 
         incidentDirectionGrad
     );
 }

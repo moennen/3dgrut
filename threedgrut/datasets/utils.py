@@ -15,10 +15,9 @@
 
 from __future__ import annotations
 
-import collections
 import math
-import platform
 import struct
+import collections
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -36,29 +35,7 @@ def focal2fov(focal: float, pixels: int):
     return 2 * math.atan(pixels / (2 * focal))
 
 
-def create_pixel_coords(width: int, height: int, device: torch.device = None) -> torch.Tensor:
-    """Generate pixel coordinates with +0.5 center offset for post-processing.
-
-    Creates a grid of pixel coordinates where each coordinate represents the center
-    of the pixel (hence the +0.5 offset).
-
-    Args:
-        width: Image width in pixels.
-        height: Image height in pixels.
-        device: Target device for the tensor. Defaults to None (CPU).
-
-    Returns:
-        Pixel coordinates tensor of shape [1, H, W, 2] containing (x, y) coordinates.
-    """
-    pixel_y, pixel_x = torch.meshgrid(
-        torch.arange(height, dtype=torch.float32, device=device) + 0.5,
-        torch.arange(width, dtype=torch.float32, device=device) + 0.5,
-        indexing="ij",
-    )
-    return torch.stack([pixel_x, pixel_y], dim=-1).unsqueeze(0)  # [1, H, W, 2]
-
-
-def pinhole_camera_rays(x, y, f_x, f_y, w, h, ray_jitter=None, cx=None, cy=None):
+def pinhole_camera_rays(x, y, f_x, f_y, w, h, ray_jitter=None):
     """
     return:
         ray_origin (sz_y, sz_x, 3)
@@ -72,13 +49,8 @@ def pinhole_camera_rays(x, y, f_x, f_y, w, h, ray_jitter=None, cx=None, cy=None)
     else:
         jitter_xs = jitter_ys = 0.5
 
-    if cx is None:
-        cx = 0.5 * w
-    if cy is None:
-        cy = 0.5 * h
-
-    xs = ((x + jitter_xs) - cx) / f_x
-    ys = ((y + jitter_ys) - cy) / f_y
+    xs = ((x + jitter_xs) - 0.5 * w) / f_x
+    ys = ((y + jitter_ys) - 0.5 * h) / f_y
 
     ray_lookat = np.stack((xs, ys, np.ones_like(xs)), axis=-1)
     ray_origin = np.zeros_like(ray_lookat)
@@ -106,7 +78,6 @@ def camera_to_world_rays(ray_o, ray_d, poses):
 
     return ray_o, ray_d
 
-
 @dataclass(slots=True, kw_only=True)
 class PointCloud:
     """Represents a 3d point cloud consisting of corresponding start and end points"""
@@ -115,7 +86,7 @@ class PointCloud:
     xyz_end: torch.Tensor  # [N,3]
     device: str
     dtype = torch.float32
-    color: torch.Tensor | None = None  # uint8 RGB colors in [0, 255], shape [N,3]
+    color: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         assert len(self.xyz_start) == len(self.xyz_end)
@@ -137,9 +108,7 @@ class PointCloud:
         return PointCloud(
             xyz_start=torch.cat([pc.xyz_start for pc in point_clouds_list]),
             xyz_end=torch.cat([pc.xyz_end for pc in point_clouds_list]),
-            color=(
-                torch.cat([pc.color for pc in point_clouds_list]) if point_clouds_list[0].color is not None else None
-            ),
+            color=torch.cat([pc.color for pc in point_clouds_list]) if point_clouds_list[0].color is not None else None,
             device=device,
         )
 
@@ -153,10 +122,10 @@ class PointCloud:
 
 
 def get_center_and_diag(cam_centers):
-    avg_cam_center = np.median(cam_centers, axis=0, keepdims=True)
+    avg_cam_center = np.mean(cam_centers, axis=0, keepdims=True)
     center = avg_cam_center
     dist = np.linalg.norm(cam_centers - center, axis=1, keepdims=True)
-    diagonal = np.median(dist)
+    diagonal = np.max(dist)
     return center.flatten(), diagonal
 
 
@@ -194,8 +163,7 @@ class _RepeatSampler(object):
 
 def compute_max_distance_to_border(image_size_component: float, principal_point_component: float) -> float:
     """Given an image size component (x or y) and corresponding principal point component (x or y),
-    returns the maximum distance (in image domain units) from the principal point to either image boundary.
-    """
+    returns the maximum distance (in image domain units) from the principal point to either image boundary."""
     center = 0.5 * image_size_component
     if principal_point_component > center:
         return principal_point_component
@@ -242,7 +210,6 @@ def create_camera_visualization(cam_list):
 
         ps_cam.add_color_image_quantity("target image", cam["rgb_img"][:, :, :3], enabled=True)
 
-
 CameraModel = collections.namedtuple("CameraModel", ["model_id", "model_name", "num_params"])
 Camera = collections.namedtuple("Camera", ["id", "model", "width", "height", "params"])
 BaseImage = collections.namedtuple("Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
@@ -275,7 +242,6 @@ def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
     data = fid.read(num_bytes)
     return struct.unpack(endian_character + format_char_sequence, data)
 
-
 def read_colmap_points3D_text(path):
     """
     Read points3D.txt file from COLMAP output.
@@ -285,7 +251,7 @@ def read_colmap_points3D_text(path):
     xyzs = []
     rgbs = []
     errors = []
-
+    
     # Single file read
     with open(path, "r") as fid:
         for line in fid:
@@ -296,14 +262,11 @@ def read_colmap_points3D_text(path):
                 xyzs.append([float(x) for x in elems[1:4]])
                 rgbs.append([int(x) for x in elems[4:7]])
                 errors.append(float(elems[7]))
-
+    
     # Convert lists to numpy arrays all at once
-    return (
-        np.array(xyzs, dtype=np.float64),
-        np.array(rgbs, dtype=np.int32),
-        np.array(errors, dtype=np.float64).reshape(-1, 1),
-    )
-
+    return (np.array(xyzs, dtype=np.float64),
+            np.array(rgbs, dtype=np.int32),
+            np.array(errors, dtype=np.float64).reshape(-1, 1))
 
 def read_colmap_points3D_binary(path_to_model_file):
     """
@@ -314,10 +277,10 @@ def read_colmap_points3D_binary(path_to_model_file):
     xyzs = []
     rgbs = []
     errors = []
-
+    
     with open(path_to_model_file, "rb") as fid:
         num_points = read_next_bytes(fid, 8, "Q")[0]
-
+        
         for _ in range(num_points):
             # Read the point data
             binary_point_line_properties = read_next_bytes(fid, num_bytes=43, format_char_sequence="QdddBBBd")
@@ -325,90 +288,105 @@ def read_colmap_points3D_binary(path_to_model_file):
             xyzs.append(binary_point_line_properties[1:4])
             rgbs.append(binary_point_line_properties[4:7])
             errors.append(binary_point_line_properties[7])
-
+            
             # Skip track length and elements as they're not used
             track_length = read_next_bytes(fid, num_bytes=8, format_char_sequence="Q")[0]
             fid.seek(8 * track_length, 1)
 
     # Convert lists to numpy arrays all at once
-    return (
-        np.array(xyzs, dtype=np.float64),
-        np.array(rgbs, dtype=np.int32),
-        np.array(errors, dtype=np.float64).reshape(-1, 1),
-    )
+    return (np.array(xyzs, dtype=np.float64),
+            np.array(rgbs, dtype=np.int32),
+            np.array(errors, dtype=np.float64).reshape(-1, 1))
+
+
 
 
 def read_colmap_intrinsics_text(path):
     """
     Read camera intrinsics from a COLMAP text file.
+    
     Args:
         path: Path to the cameras.txt file
+        
     Returns:
-        Dict of Camera objects indexed by camera ID
+        List of Camera objects sorted by camera ID
     """
-    cameras = {}
+    cameras = []
     with open(path, "r") as fid:
         # Skip comment lines at the start
         lines = (line.strip() for line in fid)
         lines = (line for line in lines if line and not line.startswith("#"))
+        
         for line in lines:
             # Unpack elements directly using split with maxsplit
             camera_id, model, width, height, *params = line.split()
-            camera_id = int(camera_id)
-            width, height = int(width), int(height)
-            assert camera_id not in cameras, f"Camera ID {camera_id} already exists"
-            cameras[camera_id] = Camera(
-                id=camera_id,
+            cameras.append(Camera(
+                id=int(camera_id),
                 model=model,
-                width=width,
-                height=height,
-                params=np.array([float(p) for p in params]),
-            )
-    return cameras
+                width=int(width),
+                height=int(height),
+                params=np.array([float(p) for p in params])
+            ))
+    
+    return sorted(cameras, key=lambda x: x.id)
 
 
 def read_colmap_intrinsics_binary(path_to_model_file):
     """
     Read camera intrinsics from a COLMAP binary file.
+    
     Args:
         path_to_model_file: Path to the cameras.bin file
+        
     Returns:
-        Dict of Camera objects indexed by camera ID
+        List of Camera objects sorted by camera ID
+        
     Raises:
         ValueError: If the number of cameras read doesn't match the expected count
         KeyError: If an invalid camera model ID is encountered
     """
-    cameras = {}
+    cameras = []
     with open(path_to_model_file, "rb") as fid:
         # Read number of cameras
         num_cameras = read_next_bytes(fid, 8, "Q")[0]
+        
         for _ in range(num_cameras):
             # Read fixed-size camera properties
-            camera_id, model_id, width, height = read_next_bytes(fid, num_bytes=24, format_char_sequence="iiQQ")
+            camera_id, model_id, width, height = read_next_bytes(
+                fid, 
+                num_bytes=24, 
+                format_char_sequence="iiQQ"
+            )
+            
             # Get camera model information
             try:
                 camera_model = CAMERA_MODEL_IDS[model_id]
             except KeyError:
                 raise KeyError(f"Invalid camera model ID: {model_id}")
+                
             # Read camera parameters
             params = read_next_bytes(
-                fid,
+                fid, 
                 num_bytes=8 * camera_model.num_params,
-                format_char_sequence="d" * camera_model.num_params,
+                format_char_sequence="d" * camera_model.num_params
             )
+            
             # Create camera object
-            assert camera_id not in cameras, f"Camera ID {camera_id} already exists"
-            cameras[camera_id] = Camera(
+            cameras.append(Camera(
                 id=camera_id,
                 model=camera_model.model_name,
                 width=width,
                 height=height,
-                params=np.array(params),
-            )
+                params=np.array(params)
+            ))
+    
     # Verify camera count
-    assert len(cameras) == num_cameras, f"Expected {num_cameras} cameras, but read {len(cameras)}"
-    return cameras
-
+    if len(cameras) != num_cameras:
+        raise ValueError(
+            f"Expected {num_cameras} cameras, but read {len(cameras)}"
+        )
+    
+    return sorted(cameras, key=lambda x: x.id)
 
 def qvec_to_so3(qvec):
     return np.array(
@@ -431,19 +409,20 @@ def qvec_to_so3(qvec):
         ]
     )
 
-
 class Image(BaseImage):
     def qvec_to_so3(self):
         return qvec_to_so3(self.qvec)
-
-
+    
 def read_colmap_extrinsics_binary(path_to_model_file):
     """
     Read camera extrinsics from a COLMAP binary file.
+    
     Args:
         path_to_model_file: Path to the images.bin file
+        
     Returns:
         List of Image objects sorted by image name
+        
     Raises:
         ValueError: If string parsing or data reading fails
     """
@@ -451,12 +430,19 @@ def read_colmap_extrinsics_binary(path_to_model_file):
     with open(path_to_model_file, "rb") as fid:
         # Read number of registered images
         num_reg_images = read_next_bytes(fid, 8, "Q")[0]
+        
         for _ in range(num_reg_images):
             # Read image properties (id, rotation, translation, camera_id)
-            props = read_next_bytes(fid, num_bytes=64, format_char_sequence="idddddddi")
+            props = read_next_bytes(
+                fid, 
+                num_bytes=64, 
+                format_char_sequence="idddddddi"
+            )
+            
             image_id, *qvec_tvec, camera_id = props
             qvec = np.array(qvec_tvec[:4])
             tvec = np.array(qvec_tvec[4:7])
+            
             # Read image name (null-terminated string)
             image_name = ""
             while True:
@@ -467,38 +453,48 @@ def read_colmap_extrinsics_binary(path_to_model_file):
                     image_name += current_char.decode("utf-8")
                 except UnicodeDecodeError:
                     raise ValueError(f"Invalid character in image name at position {len(image_name)}")
+            
             # Read 2D points
             num_points2D = read_next_bytes(fid, 8, "Q")[0]
             point_data = read_next_bytes(
                 fid,
                 num_bytes=24 * num_points2D,
-                format_char_sequence="ddq" * num_points2D,
+                format_char_sequence="ddq" * num_points2D
             )
+            
             # Parse point data into coordinates and IDs
-            xys = np.array([(point_data[i], point_data[i + 1]) for i in range(0, len(point_data), 3)])
-            point3D_ids = np.array([int(point_data[i + 2]) for i in range(0, len(point_data), 3)])
+            xys = np.array([
+                (point_data[i], point_data[i + 1])
+                for i in range(0, len(point_data), 3)
+            ])
+            point3D_ids = np.array([
+                int(point_data[i + 2])
+                for i in range(0, len(point_data), 3)
+            ])
+            
             # Create image object
-            images.append(
-                Image(
-                    id=image_id,
-                    qvec=qvec,
-                    tvec=tvec,
-                    camera_id=camera_id,
-                    name=image_name,
-                    xys=xys,
-                    point3D_ids=point3D_ids,
-                )
-            )
+            images.append(Image(
+                id=image_id,
+                qvec=qvec,
+                tvec=tvec,
+                camera_id=camera_id,
+                name=image_name,
+                xys=xys,
+                point3D_ids=point3D_ids,
+            ))
+    
     return sorted(images, key=lambda x: x.name)
-
 
 def read_colmap_extrinsics_text(path):
     """
     Read camera extrinsics from a COLMAP text file.
+    
     Args:
         path: Path to the images.txt file
+        
     Returns:
         List of Image objects sorted by image name
+        
     Raises:
         ValueError: If file format is invalid or data parsing fails
     """
@@ -506,12 +502,8 @@ def read_colmap_extrinsics_text(path):
     with open(path, "r") as fid:
         # Skip comment lines and get valid lines
         lines = (line.strip() for line in fid)
-        # This update handles cases in images.txt where no 2D points are associated with an image.
-        # In such cases, some entries contain only:
-        # IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
-        # and do not include the usual POINTS2D[] line (which normally lists (X, Y, POINT3D_ID)).
-        # The following logic checks for missing points line and handles it properly:
-        lines = (line for line in lines if line == "" or not line.startswith("#"))
+        lines = (line for line in lines if line and not line.startswith("#"))
+        
         # Process lines in pairs (image info + points info)
         try:
             while True:
@@ -519,108 +511,49 @@ def read_colmap_extrinsics_text(path):
                 image_line = next(lines, None)
                 if image_line is None:
                     break
+                    
                 # Parse image properties
                 elems = image_line.split()
                 if len(elems) < 10:  # Minimum required elements
                     raise ValueError(f"Invalid image line format: {image_line}")
+                
                 image_id = int(elems[0])
                 qvec = np.array([float(x) for x in elems[1:5]])
                 tvec = np.array([float(x) for x in elems[5:8]])
                 camera_id = int(elems[8])
                 image_name = elems[9]
+                
                 # Read points line
                 points_line = next(lines, None)
                 if points_line is None:
                     raise ValueError(f"Missing points data for image {image_name}")
+                
                 # Parse 2D points and 3D point IDs
                 point_elems = points_line.split()
                 if len(point_elems) % 3 != 0:
                     raise ValueError(f"Invalid points format for image {image_name}")
-                xys = np.array(
-                    [(float(point_elems[i]), float(point_elems[i + 1])) for i in range(0, len(point_elems), 3)]
-                )
-                point3D_ids = np.array([int(point_elems[i + 2]) for i in range(0, len(point_elems), 3)])
+                
+                xys = np.array([
+                    (float(point_elems[i]), float(point_elems[i + 1]))
+                    for i in range(0, len(point_elems), 3)
+                ])
+                point3D_ids = np.array([
+                    int(point_elems[i + 2])
+                    for i in range(0, len(point_elems), 3)
+                ])
+                
                 # Create image object
-                images.append(
-                    Image(
-                        id=image_id,
-                        qvec=qvec,
-                        tvec=tvec,
-                        camera_id=camera_id,
-                        name=image_name,
-                        xys=xys,
-                        point3D_ids=point3D_ids,
-                    )
-                )
+                images.append(Image(
+                    id=image_id,
+                    qvec=qvec,
+                    tvec=tvec,
+                    camera_id=camera_id,
+                    name=image_name,
+                    xys=xys,
+                    point3D_ids=point3D_ids,
+                ))
+                
         except (ValueError, IndexError) as e:
             raise ValueError(f"Error parsing extrinsics file: {e}")
+    
     return sorted(images, key=lambda x: x.name)
-
-
-def worker_init_fn(worker_id):
-    """
-    Worker initialization function for DataLoader multiprocessing.
-
-    This function ensures that each worker process has a proper CUDA context
-    and random number generator state, which is especially important on Windows.
-    """
-    import random
-
-    import numpy as np
-    import torch
-
-    # Set random seeds for reproducibility
-    worker_seed = torch.initial_seed() % 2**32
-    random.seed(worker_seed)
-    np.random.seed(worker_seed)
-    torch.manual_seed(worker_seed)
-
-    # Initialize CUDA context in worker process
-    if torch.cuda.is_available():
-        torch.cuda.set_device(torch.cuda.current_device())
-        # Force CUDA context creation by doing a small operation
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-
-def configure_dataloader_for_platform(dataloader_kwargs: dict) -> dict:
-    """
-    Configure DataLoader kwargs for the current platform.
-
-    Args:
-        dataloader_kwargs: Dictionary of DataLoader arguments
-        force_windows_multiprocessing: If True, allow multiprocessing on Windows despite potential issues
-
-    Returns:
-        Updated DataLoader kwargs
-    """
-    kwargs = dataloader_kwargs.copy()
-
-    if "num_workers" in kwargs:
-        original_num_workers = kwargs["num_workers"]
-        kwargs["num_workers"] = original_num_workers
-
-        # Adjust persistent_workers based on actual num_workers
-        if "persistent_workers" in kwargs:
-            kwargs["persistent_workers"] = kwargs["num_workers"] > 0
-
-        # On Windows with multiprocessing, add worker initialization function
-        if platform.system() == "Windows" and kwargs["num_workers"] > 0:
-            kwargs["worker_init_fn"] = worker_init_fn
-
-    return kwargs
-
-
-def get_worker_id():
-    """Get current worker ID for thread-local caching."""
-    import threading
-
-    # Get worker ID from current process/thread
-    try:
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            return f"worker_{worker_info.id}"
-        else:
-            return "main_process"
-    except:
-        return f"thread_{threading.get_ident()}"

@@ -15,9 +15,6 @@
 
 #!/bin/bash
 
-set -e
-
-
 RESULT_DIR=$1
 if [[ -z $RESULT_DIR ]]; then
     echo "Error: Result directory is not provided. Aborting execution."

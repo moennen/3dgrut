@@ -20,6 +20,7 @@
 namespace threedgut {
 
 struct OpenCVPinholeProjectionParameters {
+    tcnn::vec2 nearFar;
     tcnn::vec2 principalPoint;
     tcnn::vec2 focalLength;
     tcnn::vec<6> radialCoeffs;
@@ -34,19 +35,6 @@ struct OpenCVFisheyeProjectionParameters {
     float maxAngle;
 };
 
-struct FThetaProjectionParameters {
-    tcnn::vec2 principalPoint;
-    enum PolynomialType {
-        PIXELDIST_TO_ANGLE,
-        ANGLE_TO_PIXELDIST,
-    } referencePoly;
-    static constexpr size_t PolynomialDegree = 6;
-    tcnn::vec<PolynomialDegree> pixeldistToAnglePoly; // backward polynomial
-    tcnn::vec<PolynomialDegree> angleToPixeldistPoly; // forward polynomial
-    float maxAngle;
-    tcnn::vec<3> linear_cde; // Coefficients of the constrained linear term :math:`\begin{bmatrix} c & d \\ e & 1 \end{bmatrix}` transforming between sensor coordinates (in mm) to image coordinates (in px) (float32, [3,])
-};
-
 struct CameraModelParameters {
     enum ShutterType {
         RollingTopToBottomShutter,
@@ -59,7 +47,6 @@ struct CameraModelParameters {
     enum ModelType {
         OpenCVPinholeModel,
         OpenCVFisheyeModel,
-        FThetaModel,
         EmptyModel,
         Unsupported
     } modelType = EmptyModel;
@@ -67,7 +54,6 @@ struct CameraModelParameters {
     union {
         OpenCVPinholeProjectionParameters ocvPinholeParams;
         OpenCVFisheyeProjectionParameters ocvFisheyeParams;
-        FThetaProjectionParameters fthetaParams;
     };
 };
 

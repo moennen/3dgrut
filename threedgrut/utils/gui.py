@@ -22,10 +22,11 @@ import polyscope.imgui as psim
 import torch
 
 from threedgrut.datasets.protocols import Batch, DatasetVisualization
-from threedgrut.datasets.utils import DEFAULT_DEVICE, fov2focal
+from threedgrut.datasets.utils import fov2focal, DEFAULT_DEVICE
 from threedgrut.utils.logger import logger
-from threedgrut.utils.misc import to_np
 from threedgrut.utils.timer import CudaTimer
+from threedgrut.utils.misc import to_np
+
 
 trajectory = []
 
@@ -38,8 +39,7 @@ class GUI:
         if not self.update_from_device:
             logger.info("polyscope set to host2device mode.")
         else:  # device2device
-            from threedgrut.gui.ps_extension import initialize_cugl_interop
-
+            from threedgrt_tracer.gui.ps_extension import initialize_cugl_interop
             initialize_cugl_interop()
             logger.info("polyscope set to device2device mode.")
 
@@ -95,16 +95,14 @@ class GUI:
             self.viz_render_subsample = 4
 
         self.train_dataset = train_dataset
-
         self.model = model
-        self.model.build_acc()
-
         ps.init()
         self.ps_point_cloud = ps.register_point_cloud(
             "centers", to_np(model.positions), radius=1e-3, point_render_mode="quad"
         )
         self.ps_point_cloud_buffer = self.ps_point_cloud.get_buffer("points")
 
+        # Only implemented for NeRF and Colmap dataset
         if isinstance(train_dataset, DatasetVisualization):
             train_dataset.create_dataset_camera_visualization()
         if isinstance(val_dataset, DatasetVisualization):
@@ -433,8 +431,6 @@ class GUI:
                 self.viz_render_subsample = max(self.viz_render_subsample, 1)
 
             _, self.viz_render_train_view = psim.Checkbox("render w/ train=True", self.viz_render_train_view)
-
-            psim.TreePop()
 
         if self.live_update:
             self.update_render_view_viz()
