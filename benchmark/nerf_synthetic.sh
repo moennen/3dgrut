@@ -15,9 +15,6 @@
 
 #!/bin/bash
 
-set -e
-
-
 CONFIG=$1
 if [[ -z $CONFIG ]]; then
     echo "Configuration is not provided. Aborting execution."
@@ -25,8 +22,7 @@ if [[ -z $CONFIG ]]; then
     exit 1
 fi
 
-RESULT_DIR=${RESULT_DIR:-"results/nerf_synthetic"}
-EXTRA_ARGS=${@:2} # any extra arguments to pass to the script
+RESULT_DIR=results/nerf_synthetic
 
 # if the result directory already exists, warn user and aport execution
 if [ -d "$RESULT_DIR" ]; then
@@ -35,7 +31,6 @@ if [ -d "$RESULT_DIR" ]; then
 fi
 
 mkdir -p $RESULT_DIR
-export TORCH_EXTENSIONS_DIR=$RESULT_DIR/.cache
 
 SCENE_LIST="chair  drums  ficus  hotdog  lego  materials  mic  ship"
 
@@ -47,7 +42,6 @@ do
     nvidia-smi > $RESULT_DIR/train_$SCENE.log
     CUDA_VISIBLE_DEVICES=0 python train.py --config-name $CONFIG \
         use_wandb=False with_gui=False out_dir=$RESULT_DIR \
-        path=data/nerf_synthetic/$SCENE experiment_name=$SCENE \
-        $EXTRA_ARGS >> $RESULT_DIR/train_$SCENE.log
+        path=data/nerf_synthetic/$SCENE experiment_name=$SCENE >> $RESULT_DIR/train_$SCENE.log
 
 done
