@@ -1,5 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
-// All rights reserved. SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,9 @@
 
 #include <optix.h>
 
-void computeMeshFaceBuffer(uint32_t fNum, const float3 *verts,
-                           const int3 *faces, float3 *fPrimVrt, int3 *fPrimTri,
+void computeMeshFaceBuffer(uint32_t fNum,
+                           const float3* __restrict__ verts,
+                           const int3* __restrict__ faces,
+                           float3* fPrimVrt,
+                           int3* fPrimTri,
                            cudaStream_t stream);
