@@ -26,18 +26,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from ncore.data import (
-    OpenCVFisheyeCameraModelParameters,
-    OpenCVPinholeCameraModelParameters,
-    ShutterType,
-)
 
-from threedgrut.export.accessor import GaussianExportAccessor
 from threedgrut.export.base import ExportableModel, ModelExporter
-from threedgrut.export.transforms import (
-    estimate_normalizing_transform,
-    get_3dgrut_to_usdz_coordinate_transform,
-)
+from threedgrut.export.accessor import GaussianExportAccessor
+from threedgrut.export.transforms import estimate_normalizing_transform
 from threedgrut.export.usd.stage_utils import (
     NamedSerialized,
     NamedUSDStage,
@@ -45,9 +37,14 @@ from threedgrut.export.usd.stage_utils import (
     initialize_usd_stage,
     write_to_usdz,
 )
-from threedgrut.export.usd.writers.background import export_background_to_usd
 from threedgrut.export.usd.writers.base import create_gaussian_writer
 from threedgrut.export.usd.writers.camera import export_cameras_to_usd
+from threedgrut.export.usd.writers.background import export_background_to_usd
+from threedgrut.datasets.camera_models import (
+    OpenCVPinholeCameraModelParameters,
+    OpenCVFisheyeCameraModelParameters,
+    ShutterType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,38 +52,38 @@ logger = logging.getLogger(__name__)
 def _extract_camera_params_from_dataset(dataset) -> Optional[List]:
     """
     Extract per-frame camera parameters from a dataset.
-
+    
     Handles different dataset types:
     - ColmapDataset: intrinsics dict keyed by camera_id, use get_intrinsics_idx() per frame
     - NeRFDataset: single intrinsics list [fx, fy, cx, cy] for all frames
-
+    
     Returns:
         List of CameraModelParameters (one per frame), or None if extraction fails
     """
     num_frames = len(dataset)
     camera_params = []
-
+    
     # Check if dataset has ColmapDataset-style intrinsics (dict with camera params)
-    if hasattr(dataset, "intrinsics") and isinstance(dataset.intrinsics, dict):
+    if hasattr(dataset, 'intrinsics') and isinstance(dataset.intrinsics, dict):
         # ColmapDataset: intrinsics is dict[camera_id] = (params_dict, rays_o, rays_d, camera_name)
         for frame_idx in range(num_frames):
             try:
                 # Get camera ID for this frame
                 camera_id = dataset.get_intrinsics_idx(frame_idx)
                 params_tuple = dataset.intrinsics.get(camera_id)
-
+                
                 if params_tuple is None:
                     logger.warning(f"No intrinsics found for frame {frame_idx}, camera_id {camera_id}")
                     camera_params.append(None)
                     continue
-
+                
                 params_dict, _, _, camera_name = params_tuple
-
+                
                 # Reconstruct CameraModelParameters from dict
                 if camera_name == "OpenCVPinholeCameraModelParameters":
                     params = OpenCVPinholeCameraModelParameters(
-                        resolution=np.array(params_dict["resolution"], dtype=np.uint64),
-                        shutter_type=ShutterType[params_dict["shutter_type"]],
+                        resolution=np.array(params_dict["resolution"], dtype=np.int64),
+                        shutter_type=ShutterType(params_dict["shutter_type"]),
                         principal_point=np.array(params_dict["principal_point"], dtype=np.float32),
                         focal_length=np.array(params_dict["focal_length"], dtype=np.float32),
                         radial_coeffs=np.array(params_dict["radial_coeffs"], dtype=np.float32),
@@ -95,8 +92,8 @@ def _extract_camera_params_from_dataset(dataset) -> Optional[List]:
                     )
                 elif camera_name == "OpenCVFisheyeCameraModelParameters":
                     params = OpenCVFisheyeCameraModelParameters(
-                        resolution=np.array(params_dict["resolution"], dtype=np.uint64),
-                        shutter_type=ShutterType[params_dict["shutter_type"]],
+                        resolution=np.array(params_dict["resolution"], dtype=np.int64),
+                        shutter_type=ShutterType(params_dict["shutter_type"]),
                         principal_point=np.array(params_dict["principal_point"], dtype=np.float32),
                         focal_length=np.array(params_dict["focal_length"], dtype=np.float32),
                         radial_coeffs=np.array(params_dict["radial_coeffs"], dtype=np.float32),
@@ -106,41 +103,41 @@ def _extract_camera_params_from_dataset(dataset) -> Optional[List]:
                     logger.warning(f"Unknown camera model type: {camera_name}")
                     camera_params.append(None)
                     continue
-
+                
                 camera_params.append(params)
-
+                
             except Exception as e:
                 logger.warning(f"Failed to extract camera params for frame {frame_idx}: {e}")
                 camera_params.append(None)
-
+        
         return camera_params
-
+    
     # Check for NeRFDataset-style intrinsics (simple list [fx, fy, cx, cy])
-    elif hasattr(dataset, "intrinsics") and isinstance(dataset.intrinsics, list):
+    elif hasattr(dataset, 'intrinsics') and isinstance(dataset.intrinsics, list):
         # NeRFDataset: single intrinsics for all frames
         intrinsics_list = dataset.intrinsics
         if len(intrinsics_list) != 4:
             logger.warning(f"Expected intrinsics list [fx, fy, cx, cy], got {len(intrinsics_list)} elements")
             return None
-
+        
         fx, fy, cx, cy = intrinsics_list
-
+        
         # Get resolution from dataset (NeRFDataset stores image_w, image_h)
-        if hasattr(dataset, "image_w") and hasattr(dataset, "image_h"):
+        if hasattr(dataset, 'image_w') and hasattr(dataset, 'image_h'):
             width, height = dataset.image_w, dataset.image_h
         else:
             # Try to infer from K matrix
-            if hasattr(dataset, "K"):
+            if hasattr(dataset, 'K'):
                 # K is 3x3, principal point should be roughly at center
                 width = int(cx * 2)
                 height = int(cy * 2)
             else:
                 logger.warning("Cannot determine image resolution for NeRF dataset")
                 return None
-
+        
         # Create a single OpenCVPinhole params (no distortion for NeRF synthetic)
         params = OpenCVPinholeCameraModelParameters(
-            resolution=np.array([width, height], dtype=np.uint64),
+            resolution=np.array([width, height], dtype=np.int64),
             shutter_type=ShutterType.GLOBAL,
             principal_point=np.array([cx, cy], dtype=np.float32),
             focal_length=np.array([fx, fy], dtype=np.float32),
@@ -148,10 +145,10 @@ def _extract_camera_params_from_dataset(dataset) -> Optional[List]:
             tangential_coeffs=np.zeros(2, dtype=np.float32),
             thin_prism_coeffs=np.zeros(4, dtype=np.float32),
         )
-
+        
         # Same params for all frames
         return [params] * num_frames
-
+    
     return None
 
 
@@ -174,37 +171,26 @@ class USDExporter(ModelExporter):
     def __init__(
         self,
         half_precision: bool = False,
-        half_geometry: bool = False,
-        half_features: bool = False,
         export_cameras: bool = True,
         export_background: bool = True,
         apply_normalizing_transform: bool = True,
         sorting_mode_hint: str = "cameraDistance",
-        linear_srgb: bool = False,
     ):
         """
         Initialize the USD exporter.
 
         Args:
-            half_precision: If True, use half for both geometry and features (backward compat).
-            half_geometry: Use half precision for positions, orientations, scales (LightField).
-            half_features: Use half precision for opacities and SH coefficients (LightField).
+            half_precision: Use half-precision floats (smaller files)
             export_cameras: Include camera poses in export
             export_background: Include background/environment in export
             apply_normalizing_transform: Apply transform to normalize scene orientation
-            sorting_mode_hint: Sorting hint for rendering ("cameraDistance", "zDepth" per UsdVol schema)
-            linear_srgb: If True, set prim color space to lin_rec709_scene; else srgb_rec709_display
+            sorting_mode_hint: Sorting hint for rendering ("cameraDistance", "zAxis", etc.)
         """
-        if half_precision:
-            half_geometry = True
-            half_features = True
-        self.half_geometry = half_geometry
-        self.half_features = half_features
+        self.half_precision = half_precision
         self.export_cameras = export_cameras
         self.export_background = export_background
         self.apply_normalizing_transform = apply_normalizing_transform
         self.sorting_mode_hint = sorting_mode_hint
-        self.linear_srgb = linear_srgb
 
     def _create_default_stage(self, referenced_stages: List[NamedUSDStage]) -> NamedUSDStage:
         """
@@ -223,8 +209,8 @@ class USDExporter(ModelExporter):
             filename_stem = Path(ref_stage.filename).stem
             prim_path = f"/World/{filename_stem}"
             prim = stage.OverridePrim(prim_path)
-            # Reference the file (bare filename for in-package resolution; same as NuRec)
-            prim.GetReferences().AddReference(ref_stage.filename)
+            # Reference the file (relative path within USDZ)
+            prim.GetReferences().AddReference(f"./{ref_stage.filename}")
 
         return NamedUSDStage(filename="default.usda", stage=stage)
 
@@ -257,7 +243,7 @@ class USDExporter(ModelExporter):
         accessor = GaussianExportAccessor(model, conf)
         attrs = accessor.get_attributes(preactivation=False)
         caps = accessor.get_capabilities()
-
+        
         logger.info(f"Schema: LightField (post-activation)")
 
         logger.info(f"Exporting {attrs.num_gaussians} Gaussians, SH degree {caps.sh_degree}")
@@ -275,10 +261,7 @@ class USDExporter(ModelExporter):
         # Create main USD stage
         stage = initialize_usd_stage(up_axis="Y")
 
-        apply_coordinate_transform = kwargs.get("apply_coordinate_transform", False)
-        coordinate_transform = get_3dgrut_to_usdz_coordinate_transform() if apply_coordinate_transform else None
-
-        # Create Gaussian content root with optional normalizing and coordinate transform
+        # Create Gaussian content root with optional normalizing transform
         gaussians_root = create_gaussian_model_root(
             stage,
             flip_x_axis=False,
@@ -286,7 +269,6 @@ class USDExporter(ModelExporter):
             flip_z_axis=False,
             root_path="/World/Gaussians",
             normalizing_transform=normalizing_transform if self.apply_normalizing_transform else None,
-            coordinate_transform=coordinate_transform,
         )
 
         # Create Gaussian writer (LightField schema)
@@ -294,10 +276,8 @@ class USDExporter(ModelExporter):
             stage=stage,
             capabilities=caps,
             content_root_path=gaussians_root,
-            half_geometry=self.half_geometry,
-            half_features=self.half_features,
+            half_precision=self.half_precision,
             sorting_mode_hint=self.sorting_mode_hint,
-            linear_srgb=self.linear_srgb,
         )
 
         # Write Gaussians
@@ -321,7 +301,7 @@ class USDExporter(ModelExporter):
 
                 # Extract per-frame camera parameters from dataset
                 camera_params = _extract_camera_params_from_dataset(dataset)
-
+                
                 if camera_params is not None:
                     logger.info(f"Extracted camera params for {len(camera_params)} frames")
                 else:
@@ -392,19 +372,12 @@ class USDExporter(ModelExporter):
         Returns:
             Configured USDExporter instance
         """
-        export_conf = getattr(conf, "export_usd", None) or conf
-        half_precision = getattr(export_conf, "half_precision", False)
-        half_geometry = getattr(export_conf, "half_geometry", False)
-        half_features = getattr(export_conf, "half_features", False)
-        if half_precision:
-            half_geometry = True
-            half_features = True
+        export_conf = getattr(conf, 'export_usd', None) or conf
+
         return cls(
-            half_geometry=half_geometry,
-            half_features=half_features,
-            export_cameras=getattr(export_conf, "export_cameras", True),
-            export_background=getattr(export_conf, "export_background", True),
-            apply_normalizing_transform=getattr(export_conf, "apply_normalizing_transform", True),
-            sorting_mode_hint=getattr(export_conf, "sorting_mode_hint", "cameraDistance"),
-            linear_srgb=getattr(export_conf, "linear_srgb", False),
+            half_precision=getattr(export_conf, 'half_precision', False),
+            export_cameras=getattr(export_conf, 'export_cameras', True),
+            export_background=getattr(export_conf, 'export_background', True),
+            apply_normalizing_transform=getattr(export_conf, 'apply_normalizing_transform', True),
+            sorting_mode_hint=getattr(export_conf, 'sorting_mode_hint', 'cameraDistance'),
         )

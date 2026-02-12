@@ -49,24 +49,11 @@ class GaussianUSDWriter(ABC):
         stage: Usd.Stage,
         capabilities: ModelCapabilities,
         content_root_path: str = "/World/Gaussians",
-        linear_srgb: bool = False,
     ):
         self.stage = stage
         self.capabilities = capabilities
         self.content_root_path = content_root_path
-        self.linear_srgb = linear_srgb
         self.prim: Optional[Usd.Prim] = None
-
-    def apply_color_space_to_prim(self, prim: Usd.Prim) -> None:
-        """Apply ColorSpaceAPI and set color space based on linear_srgb flag.
-
-        Per USD color space conventions:
-        - lin_rec709_scene: Linear Rec.709 (post-processed/linear RGB data)
-        - srgb_rec709_display: sRGB Rec.709 (gamma-encoded data)
-        """
-        color_space = "lin_rec709_scene" if self.linear_srgb else "srgb_rec709_display"
-        color_space_api = Usd.ColorSpaceAPI.Apply(prim)
-        color_space_api.CreateColorSpaceNameAttr().Set(color_space)
 
     @abstractmethod
     def create_prim(self, num_gaussians: int) -> Usd.Prim:
@@ -114,22 +101,18 @@ class GaussianUSDWriter(ABC):
         """
         min_bounds = np.min(positions, axis=0)
         max_bounds = np.max(positions, axis=0)
-        return Vt.Vec3fArray(
-            [
-                Gf.Vec3f(float(min_bounds[0]), float(min_bounds[1]), float(min_bounds[2])),
-                Gf.Vec3f(float(max_bounds[0]), float(max_bounds[1]), float(max_bounds[2])),
-            ]
-        )
+        return Vt.Vec3fArray([
+            Gf.Vec3f(float(min_bounds[0]), float(min_bounds[1]), float(min_bounds[2])),
+            Gf.Vec3f(float(max_bounds[0]), float(max_bounds[1]), float(max_bounds[2])),
+        ])
 
 
 def create_gaussian_writer(
     stage: Usd.Stage,
     capabilities: ModelCapabilities,
     content_root_path: str = "/World/Gaussians",
-    half_geometry: bool = False,
-    half_features: bool = False,
+    half_precision: bool = False,
     sorting_mode_hint: str = "cameraDistance",
-    linear_srgb: bool = False,
 ) -> GaussianUSDWriter:
     """Factory function to create USD Gaussian writer.
 
@@ -137,10 +120,8 @@ def create_gaussian_writer(
         stage: USD stage to write to
         capabilities: Model capabilities descriptor
         content_root_path: Root path for content
-        half_geometry: Use half precision for positions, orientations, scales (LightField)
-        half_features: Use half precision for opacities and SH coefficients (LightField)
+        half_precision: Use half-precision (float16) for LightField schema
         sorting_mode_hint: Sorting mode hint for LightField schema
-        linear_srgb: If True, set prim color space to lin_rec709_scene; else srgb_rec709_display
 
     Returns:
         Configured GaussianUSDWriter instance (LightField schema)
@@ -151,8 +132,6 @@ def create_gaussian_writer(
         stage=stage,
         capabilities=capabilities,
         content_root_path=content_root_path,
-        half_geometry=half_geometry,
-        half_features=half_features,
+        half_precision=half_precision,
         sorting_mode_hint=sorting_mode_hint,
-        linear_srgb=linear_srgb,
     )

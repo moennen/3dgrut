@@ -30,15 +30,15 @@ import msgpack
 import numpy as np
 import torch
 
-from threedgrut.export.accessor import GaussianExportAccessor
 from threedgrut.export.base import ExportableModel, ModelExporter
+from threedgrut.export.accessor import GaussianExportAccessor
 from threedgrut.export.transforms import estimate_normalizing_transform
+from threedgrut.export.usd.nurec.templates import NamedSerialized, fill_3dgut_template
 from threedgrut.export.usd.nurec.serializer import (
     serialize_nurec_usd,
     serialize_usd_default_layer,
     write_to_usdz,
 )
-from threedgrut.export.usd.nurec.templates import NamedSerialized, fill_3dgut_template
 from threedgrut.utils.logger import logger
 
 
@@ -99,9 +99,7 @@ class NuRecExporter(ModelExporter):
         if conf is None:
             conf = _get_default_nurec_conf()
         if conf.render.method not in ["3dgut", "3dgrt"]:
-            raise ValueError(
-                f"NuRec export requires render.method to be '3dgut' or '3dgrt', got '{conf.render.method}'"
-            )
+            raise ValueError(f"NuRec export requires render.method to be '3dgut' or '3dgrt', got '{conf.render.method}'")
 
         # Use accessor to get model data
         accessor = GaussianExportAccessor(model, conf)
@@ -172,15 +170,8 @@ class NuRecExporter(ModelExporter):
 
         model_file = NamedSerialized(filename=output_path.stem + ".nurec", serialized=buffer.getvalue())
 
-        apply_coordinate_transform = kwargs.get("apply_coordinate_transform", False)
-
         # Create USD representations
-        gauss_usd = serialize_nurec_usd(
-            model_file,
-            attrs.positions,
-            normalizing_transform,
-            apply_coordinate_transform=apply_coordinate_transform,
-        )
+        gauss_usd = serialize_nurec_usd(model_file, attrs.positions, normalizing_transform)
         default_usd = serialize_usd_default_layer(gauss_usd)
 
         # Write the final USDZ file
