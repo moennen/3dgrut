@@ -25,13 +25,15 @@ from threedgrut.datasets.protocols import Batch, DatasetVisualization
 from threedgrut.datasets.utils import DEFAULT_DEVICE, fov2focal
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import to_np
+from threedgrut.utils.render import apply_background, apply_feature_decoder
 from threedgrut.utils.timer import CudaTimer
 
 
 class ViserGUI:
-    def __init__(self, conf, model, train_dataset, val_dataset, scene_bbox):
+    def __init__(self, conf, model, train_dataset, val_dataset, scene_bbox, feature_decoder=None):
         self.conf = conf
         self.model = model
+        self.feature_decoder = feature_decoder
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.scene_bbox = scene_bbox
@@ -226,6 +228,9 @@ class ViserGUI:
         with torch.no_grad():
             self.render_timer.start()
             outputs = self.model(inputs, train=self.viz_render_train_view)
+            if self.feature_decoder is not None:
+                outputs = apply_feature_decoder(self.feature_decoder, outputs, inputs, training=False)
+            outputs = apply_background(self.model.background, outputs, inputs, training=False)
             self.render_timer.end()
             self.render_width = window_w
             self.render_height = window_h
