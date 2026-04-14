@@ -10,3 +10,8 @@ defaults:
 
 model:
   feature_type: "nht"
+
+# Match reference NHT regularization (neural-harmonic-textures/gsplat/examples/simple_trainer_nht.py)
+loss:
+  lambda_opacity: 0.02
+  lambda_scale: 0.005
