@@ -13,10 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This file contains SH-specific CUDA backward pass helpers.
+// For learned features mode (FEATURE_TRANSFORM_TYPE != 0), this file compiles but provides no functions.
+// Learned features use Slang autodiff instead of these CUDA helpers.
+
 #include <optix.h>
 
 #include <3dgrt/mathUtils.h>
 #include <3dgrt/particleDensity.h>
+
+// Only define SH-specific functions for SH mode
+#if !defined(FEATURE_TRANSFORM_TYPE) || FEATURE_TRANSFORM_TYPE == 0
 
 void quaternionWXYZToMatrix(const float4& q, float33& ret) {
     const float r = q.x;
@@ -719,3 +726,5 @@ __device__ inline void processHitBwd(
         transmittance = nextTransmit;
     }
 }
+
+#endif // FEATURE_TRANSFORM_TYPE == 0

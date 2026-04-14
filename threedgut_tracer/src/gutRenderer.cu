@@ -39,7 +39,7 @@ namespace {
 using namespace threedgut;
 
 constexpr int featuresDim() {
-    return model_ExternalParams::FeaturesDim;
+    return model_ExternalParams::RayFeatureDim;
 }
 
 // identify tiles start/end indices in the sorted tile/depth keys buffer
@@ -243,7 +243,7 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
                                                         const vec3* sensorRayDirectionCudaPtr,
                                                         float* worldHitCountCudaPtr,
                                                         float* worldHitDistanceCudaPtr,
-                                                        vec4* radianceDensityCudaPtr,
+                                                        tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
                                                         int* particlesVisibilityCudaPtr,
                                                         Parameters& parameters,
                                                         int cudaDeviceIndex,
@@ -400,10 +400,10 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
 threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters& params,
                                                          const vec3* sensorRayOriginCudaPtr,
                                                          const vec3* sensorRayDirectionCudaPtr,
-                                                         const float* worldHitDistanceCudaPtr,         //
-                                                         const float* worldHitDistanceGradientCudaPtr, // TODO: not implemented yet
-                                                         const vec4* radianceDensityCudaPtr,           //
-                                                         const vec4* radianceDensityGradientCudaPtr,   // TODO: not implemented yet
+                                                         const float* worldHitDistanceCudaPtr,
+                                                         const float* worldHitDistanceGradientCudaPtr,
+                                                         const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
+                                                         const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityGradientCudaPtr,
                                                          vec3* worldRayOriginGradientCudaPtr,          // TODO: not implemented yet
                                                          vec3* worldRayDirectionGradientCudaPtr,       // TODO: not implemented yet
                                                          Parameters& parameters,
@@ -454,8 +454,8 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
             sensorPoseToMat(sensorPoseInv),
             (const float*)worldHitDistanceCudaPtr,             //
             (const float*)worldHitDistanceGradientCudaPtr,     // TODO: not implemented yet
-            (const tcnn::vec4*)radianceDensityCudaPtr,         //
-            (const tcnn::vec4*)radianceDensityGradientCudaPtr, // TODO: not implemented yet
+            radianceDensityCudaPtr,
+            radianceDensityGradientCudaPtr,
             (tcnn::vec3*)worldRayOriginGradientCudaPtr,        // TODO: not implemented yet
             (tcnn::vec3*)worldRayDirectionGradientCudaPtr,     // TODO: not implemented yet
             (const tcnn::vec2*)m_forwardContext->particlesProjectedPosition.data(),

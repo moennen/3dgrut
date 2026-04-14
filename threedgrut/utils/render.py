@@ -14,6 +14,8 @@
 # limitations under the License.
 
 
+import torch
+
 ## NOTE: SPH code from gaussian-splatting, from plenoctree, from ???
 C0 = 0.28209479177387814
 C1 = 0.4886025119029199
@@ -46,3 +48,102 @@ def RGB2SH(rgb):
 
 def SH2RGB(sh):
     return sh * C0 + 0.5
+
+
+def apply_feature_decoder(
+    feature_decoder,
+    outputs: dict,
+    gpu_batch,
+    training: bool = False,
+) -> dict:
+    """Apply feature decoder to N-dimensional feature map."""
+    if feature_decoder is None:
+        return outputs
+
+    feature_map = outputs["pred_rgb"]  # [B, H, W, N] alpha-blended features
+    alpha = outputs["pred_opacity"]    # [B, H, W] or [B, H, W, 1]
+    B, H, W, N = feature_map.shape
+
+    R = gpu_batch.T_to_world[:, :3, :3]  # [B, 3, 3] c2w rotation
+    rays_dir_cam = gpu_batch.rays_dir  # [B, H, W, 3]
+    rays_dir_world = torch.einsum("bij,bhwj->bhwi", R, rays_dir_cam)
+    rays_dir_world = torch.nn.functional.normalize(rays_dir_world, dim=-1)
+
+    features_flat = feature_map.contiguous().view(-1, N)
+    ray_dir_flat = rays_dir_world.contiguous().view(-1, 3)
+    if alpha.dim() == 3:
+        alpha = alpha.unsqueeze(-1)  # [B, H, W, 1]
+    alpha_flat = alpha.contiguous().view(-1, 1)
+
+    rgb_flat = feature_decoder(features_flat, ray_dir_flat, alpha=alpha_flat)
+    outputs["pred_rgb"] = rgb_flat.view(B, H, W, 3)
+
+    if training and hasattr(feature_decoder, "regularization_loss"):
+        outputs["decoder_reg_loss"] = feature_decoder.regularization_loss()
+
+    return outputs
+
+
+def apply_background(background, outputs: dict, gpu_batch, training: bool = False) -> dict:
+    """Apply background composite to a 3-channel pred_rgb.
+
+    Background application was moved out of the tracers so it can run after the feature decoder
+    for NHT mode. For SH the tracers return 3-channel RGB directly; for NHT they return N-channel
+    features that are first decoded to RGB by apply_feature_decoder, then composited here.
+    Skip if pred_rgb is not yet 3-channel (i.e. features not yet decoded).
+    """
+    if background is None or outputs["pred_rgb"].shape[-1] != 3:
+        return outputs
+    pred_rgb, pred_opacity = background(
+        gpu_batch.T_to_world.contiguous(),
+        gpu_batch.rays_dir.contiguous(),
+        outputs["pred_rgb"],
+        outputs["pred_opacity"],
+        training,
+    )
+    outputs["pred_rgb"] = pred_rgb
+    return outputs
+
+
+def apply_post_processing(
+    post_processing,
+    outputs: dict,
+    gpu_batch,
+    training: bool = False,
+) -> dict:
+    """Apply post-processing to rendered output.
+
+    Args:
+        post_processing: Post-processing module
+        outputs: Model outputs including pred_rgb
+        gpu_batch: Batch containing camera_idx, frame_idx, pixel_coords, exposure
+        training: If True, use actual frame_idx; if False, use -1 for novel view mode
+
+    Returns:
+        Updated outputs dict with post-processed pred_rgb
+    """
+    assert outputs["pred_rgb"].shape[0] == 1, "Post-processing requires batch_size=1"
+
+    pred_rgb = outputs["pred_rgb"]
+    camera_idx = gpu_batch.camera_idx
+    frame_idx = gpu_batch.frame_idx if training else -1
+    H, W = pred_rgb.shape[1], pred_rgb.shape[2]
+
+    # Flatten: [1, H, W, 3] -> [H*W, 3]
+    # Ensure contiguous memory for CUDA kernels
+    pred_rgb_flat = pred_rgb.contiguous().view(-1, 3)
+    pixel_coords_flat = gpu_batch.pixel_coords.contiguous().view(-1, 2)
+
+    # Apply post-processing
+    pred_rgb_pp = post_processing(
+        pred_rgb_flat,
+        pixel_coords_flat,
+        resolution=(W, H),
+        camera_idx=camera_idx,
+        frame_idx=frame_idx,
+        exposure_prior=gpu_batch.exposure,
+    )
+
+    # Reshape back: [H*W, 3] -> [1, H, W, 3]
+    outputs["pred_rgb"] = pred_rgb_pp.view(pred_rgb.shape)
+    return outputs

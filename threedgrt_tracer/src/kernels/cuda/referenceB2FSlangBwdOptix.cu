@@ -185,7 +185,7 @@ extern "C" __global__ void __intersection__is() {
                                                                  : particleDensityHitCustom(optixGetWorldRayOrigin(),
                                                                                             optixGetWorldRayDirection(),
                                                                                             optixGetPrimitiveIndex(),
-                                                                                            {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, true}},
+                                                                                            {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, false}},
                                                                                             optixGetRayTmin(),
                                                                                             optixGetRayTmax(),
                                                                                             params.hitMaxParticleSquaredDistance,

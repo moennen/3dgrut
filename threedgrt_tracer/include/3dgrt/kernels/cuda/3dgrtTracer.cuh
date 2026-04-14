@@ -38,7 +38,8 @@ struct RayHit {
 using RayPayload = RayHit[PipelineParameters::MaxNumHitPerTrace];
 
 struct RayData {
-    float3 radiance;
+    float radiance[RAY_FEATURE_DIM];
+
     float density;
     float3 normal;
     float hitDistance;
@@ -46,7 +47,11 @@ struct RayData {
     float hitCount; // TODO (operel): convert to uint32
 
     __device__ void initialize() {
-        radiance = make_float3(0.0f);
+        // Zero-initialize all features
+        #pragma unroll
+        for (int i = 0; i < RAY_FEATURE_DIM; ++i) {
+            radiance[i] = 0.0f;
+        }
         density = 0.0;
         normal = make_float3(0.f);
         hitDistance = 0.f;
@@ -161,25 +166,30 @@ static __device__ __inline__ void traceVolumetricGS(
             const RayHit rayHit = rayPayload[i];
 
             if ((rayHit.particleId != RayHit::InvalidParticleId) && (rayTransmittance > params.minTransmittance)) {
+                float3 canonicalIntersection = make_float3(0.f);
                 const float hitWeight = particleDensityProcessHitFwdFromBuffer(
                     rayOrigin,
                     rayDirection,
                     rayHit.particleId,
-                    {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, true}},
+                    {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, false}},
                     &rayTransmittance,
                     &rayData.hitDistance,
+                    &canonicalIntersection,
 #ifdef ENABLE_NORMALS
-                    true, &rayData->normal
+                    true, &rayData.normal
 #else
                     false, nullptr
 #endif
                 );
 
-                particleFeaturesIntegrateFwdFromBuffer(rayDirection,
-                                                       hitWeight,
-                                                       rayHit.particleId,
-                                                       {{(float3*)params.particleRadiance, nullptr, true}, params.sphDegree},
-                                                       &rayData.radiance);
+                particleFeaturesIntegrateFwdFromBuffer(
+                    rayDirection,
+                    canonicalIntersection,
+                    hitWeight,
+                    rayHit.particleId,
+                    (float*)params.particleRadiance,
+                    params.sphDegree,
+                    rayData.radiance);
 
                 rayLastHitDistance = fmaxf(rayLastHitDistance, rayHit.distance);
 
@@ -205,7 +215,7 @@ static __device__ __inline__ void intersectVolumetricGS() {
                                                                  : particleDensityHitCustom(optixGetWorldRayOrigin(),
                                                                                             optixGetWorldRayDirection(),
                                                                                             optixGetPrimitiveIndex(),
-                                                                                            {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, true}},
+                                                                                            {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, false}},
                                                                                             optixGetRayTmin(),
                                                                                             optixGetRayTmax(),
                                                                                             params.hitMaxParticleSquaredDistance,
@@ -249,6 +259,12 @@ static __device__ __inline__ void anyhitSortVolumetricGS() {
         compareAndSwapHitPayloadValue(hit, 30, 31);
 
         // ignore all inserted hits, expect if the last one
+        if (__uint_as_float(optixGetPayload_31()) > optixGetRayTmax()) {
+            optixIgnoreIntersection();
+        }
+    }
+}
+
         if (__uint_as_float(optixGetPayload_31()) > optixGetRayTmax()) {
             optixIgnoreIntersection();
         }

@@ -299,7 +299,7 @@ class Tracer:
     def build_acc(self, gaussians, rebuild=True):
         pass  # no-op for 3DGUT
 
-    def render(self, gaussians, gpu_batch: Batch, train=False, frame_id=0):
+    def render(self, gaussians, gpu_batch: Batch, train=False, frame_id=0, return_features_first3: bool = False):
         rays_o = gpu_batch.rays_ori
         rays_d = gpu_batch.rays_dir
 
@@ -327,14 +327,12 @@ class Tracer:
                 poses,
             )
 
-            pred_rgb = pred_rgba[..., :3].unsqueeze(0).contiguous()
-            pred_opacity = pred_rgba[..., 3:].unsqueeze(0).contiguous()
+            # pred_rgba is [..., RAY_FEATURE_DIM + 1]: features (or RGB) + density
+            ray_feature_dim = gaussians.ray_feature_dim
+            pred_rgb = pred_rgba[..., :ray_feature_dim].unsqueeze(0).contiguous()
+            pred_opacity = pred_rgba[..., ray_feature_dim:].unsqueeze(0).contiguous()
             pred_dist = pred_dist.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
-
-            pred_rgb, pred_opacity = gaussians.background(
-                gpu_batch.T_to_world.contiguous(), rays_d, pred_rgb, pred_opacity, train
-            )
 
             timings = self.tracer_wrapper.collect_times()
 

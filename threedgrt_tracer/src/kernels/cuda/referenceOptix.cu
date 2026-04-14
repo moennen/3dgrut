@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <3dgrt/kernels/slang/gaussianParticles.cuh>
 #include <3dgrt/pipelineParameters.h>
-#include <3dgrt/kernels/cuda/gaussianParticles.cuh>
 // clang-format on
 
 extern "C" {
@@ -109,9 +109,14 @@ extern "C" __global__ void __raygen__rg() {
     float3 rayOrigin    = params.rayWorldOrigin(idx);
     float3 rayDirection = params.rayWorldDirection(idx);
 
-    float3 rayRadiance     = make_float3(0.0f);
-    float rayTransmittance = 1.0f;
-    float rayHitDistance   = 0.f;
+    FixedArray<float, RAY_FEATURE_DIM> rayRadiance;
+#pragma unroll
+    for (int i = 0; i < RAY_FEATURE_DIM; i++) {
+        rayRadiance[i] = 0.0f;
+    }
+    float rayTransmittance       = 1.0f;
+    float rayHitDistance         = 0.f;
+    float3 canonicalIntersection = make_float3(0.f);
 #ifdef ENABLE_NORMALS
     float3 rayNormal = make_float3(0.f);
 #endif
@@ -136,42 +141,47 @@ extern "C" __global__ void __raygen__rg() {
             const RayHit rayHit = rayPayload[i];
 
             if ((rayHit.particleId != RayHit::InvalidParticleId) && (rayTransmittance > params.minTransmittance)) {
-                const bool acceptedHit = processHit<PipelineParameters::ParticleKernelDegree, PipelineParameters::SurfelPrimitive>(
+                const float hitWeight = particleDensityProcessHitFwdFromBuffer(
                     rayOrigin,
                     rayDirection,
                     rayHit.particleId,
-                    params.particleDensity,
-                    params.particleRadiance,
-                    params.hitMinGaussianResponse,
-                    params.alphaMinThreshold,
-                    params.sphDegree,
+                    {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, false}},
                     &rayTransmittance,
-                    &rayRadiance,
                     &rayHitDistance,
+                    &canonicalIntersection,
 #ifdef ENABLE_NORMALS
-                    &rayNormal
+                    true, &rayNormal
 #else
-                    nullptr
+                    false, nullptr
 #endif
                 );
-                
-                // NOTE(qi): Race condition here, but as we are writing the same value, it seems it is safe.            
-                if (acceptedHit) {
+
+                particleFeaturesIntegrateFwdFromBuffer(rayDirection,
+                                                       canonicalIntersection,
+                                                       hitWeight,
+                                                       rayHit.particleId,
+                                                       const_cast<float*>(params.particleRadiance),
+                                                       params.sphDegree,
+                                                       &rayRadiance);
+
+                // NOTE(qi): Race condition here, but as we are writing the same value, it seems it is safe.
+                if (hitWeight > 0.f) {
                     params.particleVisibility[rayHit.particleId] = 1;
                 }
 
                 rayLastHitDistance = fmaxf(rayLastHitDistance, rayHit.distance);
 
 #ifdef ENABLE_HIT_COUNTS
-                rayHitsCount += acceptedHit ? 1.0f : 0.f;
+                rayHitsCount += hitWeight > 0.f ? 1.0f : 0.f;
 #endif
             }
         }
     }
 
-    params.rayRadiance[idx.z][idx.y][idx.x][0]    = rayRadiance.x;
-    params.rayRadiance[idx.z][idx.y][idx.x][1]    = rayRadiance.y;
-    params.rayRadiance[idx.z][idx.y][idx.x][2]    = rayRadiance.z;
+#pragma unroll
+    for (int i = 0; i < RAY_FEATURE_DIM; i++) {
+        params.rayRadiance[idx.z][idx.y][idx.x][i] = rayRadiance[i];
+    }
     params.rayDensity[idx.z][idx.y][idx.x][0]     = 1 - rayTransmittance;
     params.rayHitDistance[idx.z][idx.y][idx.x][0] = rayHitDistance;
     params.rayHitDistance[idx.z][idx.y][idx.x][1] = rayLastHitDistance;
@@ -187,21 +197,20 @@ extern "C" __global__ void __raygen__rg() {
 
 extern "C" __global__ void __intersection__is() {
     float hitDistance;
-    const bool intersect = PipelineParameters::InstancePrimitive ? intersectInstanceParticle(optixGetObjectRayOrigin(),
-                                                                                             optixGetObjectRayDirection(),
-                                                                                             optixGetInstanceIndex(),
-                                                                                             optixGetRayTmin(),
-                                                                                             optixGetRayTmax(),
-                                                                                             params.hitMaxParticleSquaredDistance,
-                                                                                             hitDistance)
-                                                                 : intersectCustomParticle(optixGetWorldRayOrigin(),
-                                                                                           optixGetWorldRayDirection(),
-                                                                                           optixGetPrimitiveIndex(),
-                                                                                           params.particleDensity,
-                                                                                           optixGetRayTmin(),
-                                                                                           optixGetRayTmax(),
-                                                                                           params.hitMaxParticleSquaredDistance,
-                                                                                           hitDistance);
+    const bool intersect = PipelineParameters::InstancePrimitive ? particleDensityHitInstance(optixGetObjectRayOrigin(),
+                                                                                              optixGetObjectRayDirection(),
+                                                                                              optixGetRayTmin(),
+                                                                                              optixGetRayTmax(),
+                                                                                              params.hitMaxParticleSquaredDistance,
+                                                                                              &hitDistance)
+                                                                 : particleDensityHitCustom(optixGetWorldRayOrigin(),
+                                                                                            optixGetWorldRayDirection(),
+                                                                                            optixGetPrimitiveIndex(),
+                                                                                            {{(gaussianParticle_RawParameters_0*)params.particleDensity, nullptr, false}},
+                                                                                            optixGetRayTmin(),
+                                                                                            optixGetRayTmax(),
+                                                                                            params.hitMaxParticleSquaredDistance,
+                                                                                            &hitDistance);
     if (intersect) {
         optixReportIntersection(hitDistance, 0);
     }

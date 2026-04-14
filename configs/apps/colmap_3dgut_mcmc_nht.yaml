@@ -1,0 +1,12 @@
+# @package _global_
+# NHT (Neural Harmonic Textures) variant for colmap datasets with 3DGUT and MCMC
+
+defaults:
+  - /base_mcmc
+  - /dataset: colmap
+  - /initialization: colmap
+  - /render: 3dgut
+  - _self_
+
+model:
+  feature_type: "nht"

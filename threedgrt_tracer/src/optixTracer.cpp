@@ -215,6 +215,10 @@ std::vector<std::string> OptixTracer::generateDefines(
         defines.emplace_back("-DSPH_MAX_NUM_COEFFS=" + std::to_string((_state->particleRadianceSphDegree + 1) * (_state->particleRadianceSphDegree + 1)));
         defines.emplace_back("-DPARTICLE_PRIMITIVE_TYPE=" + std::to_string(_state->gPrimType));
         defines.emplace_back("-DPARTICLE_PRIMITIVE_CLAMPED=" + std::to_string(particleKernelDensityClamping ? 1 : 0));
+        // Feature dims: use C++ defines so JIT OptiX pipeline sees same values as extension build
+        defines.emplace_back("-DPARTICLE_FEATURE_DIM=" + std::to_string(PipelineParameters::ParticleFeatureDim));
+        defines.emplace_back("-DRAY_FEATURE_DIM=" + std::to_string(PipelineParameters::RayFeatureDim));
+        defines.emplace_back("-DFEATURE_TRANSFORM_TYPE=" + std::to_string(PipelineParameters::FeatureTransformType));
     }
     return defines;
 }
@@ -727,7 +731,8 @@ void OptixTracer::buildBVH(torch::Tensor mogPos,
         } else if (_state->gPrimType == MOGTracingSphere) {
             _state->gPrimNumVert = 0;
             _state->gPrimNumTri  = 1; // number of primtive per gaussians
-            reallocatePrimGeomBuffer(cudaStream);
+            reallocateBuffer(&_state->gPrimVrt, _state->gPrimVrtSz, sizeof(float3) * gNum, cudaStream);
+            reallocateBuffer(&_state->gPrimTri, _state->gPrimTriSz, sizeof(float) * gNum, cudaStream);
 
             computeGaussianEnclosingSphere(gNum,
                                            getPtr<float3>(mogPos),
@@ -861,14 +866,14 @@ OptixTracer::trace(uint32_t frameNumber,
                    int sphDegree,
                    float minTransmittance) {
 
-    const torch::TensorOptions opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    torch::Tensor rayRad            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
-    torch::Tensor rayDns            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
-    torch::Tensor rayHit            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 2}, opts);
-    torch::Tensor rayNrm            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
-    torch::Tensor rayHitsCount      = torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
+    const torch::TensorOptions opts  = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::Tensor rayRad            = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), static_cast<int64_t>(PipelineParameters::RayFeatureDim)}, opts);
+    torch::Tensor rayDns             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
+    torch::Tensor rayHit             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 2}, opts);
+    torch::Tensor rayNrm             = torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 3}, opts);
+    torch::Tensor rayHitsCount       = torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
     torch::Tensor particleVisibility = torch::zeros({particleDensity.size(0), 1}, opts);
-    
+
     PipelineParameters paramsHost;
     paramsHost.handle = _state->gasHandle;
     paramsHost.aabb   = _state->gasAABB;

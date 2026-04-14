@@ -167,10 +167,11 @@ class Tracer:
         DEFAULT = NONE
 
     def __init__(self, conf):
-
         self.device = "cuda"
         self.conf = conf
         self.num_update_bvh = 0
+        feature_type = conf.model.feature_type.lower()
+        self.feature_transform_type = 0 if feature_type == "sh" else 1
 
         logger.info(f'🔆 Creating Optix tracing pipeline.. Using CUDA path: "{torch.utils.cpp_extension.CUDA_HOME}"')
         torch.zeros(1, device=self.device)  # Create a dummy tensor to force cuda context init
@@ -213,7 +214,7 @@ class Tracer:
             )
             self.num_update_bvh = 0 if rebuild_bvh else self.num_update_bvh + 1
 
-    def render(self, gaussians, gpu_batch: Batch, train=False, frame_id=0):
+    def render(self, gaussians, gpu_batch: Batch, train=False, frame_id=0, return_features_first3: bool = False):
         num_gaussians = gaussians.num_gaussians
         with torch.cuda.nvtx.range(f"model.forward({num_gaussians} gaussians)"):
 
@@ -238,10 +239,6 @@ class Tracer:
 
             if self.frame_timer is not None:
                 self.frame_timer.end()
-
-            pred_rgb, pred_opacity = gaussians.background(
-                gpu_batch.T_to_world.contiguous(), gpu_batch.rays_dir.contiguous(), pred_rgb, pred_opacity, train
-            )
 
         if self.frame_timer is not None:
             self.timings["forward_render"] = self.frame_timer.timing()

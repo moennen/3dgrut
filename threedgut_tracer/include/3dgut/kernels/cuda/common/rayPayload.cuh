@@ -113,13 +113,15 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
                                        const tcnn::vec3* __restrict__ sensorRayOriginPtr,
                                        float* __restrict__ worldCountPtr,
                                        float* __restrict__ worldHitDistancePtr,
-                                       tcnn::vec4* __restrict__ radianceDensityPtr,
+                                       tcnn::vec<RAY_FEATURE_DIM + 1>* __restrict__ radianceDensityPtr,
                                        const tcnn::mat4x3& sensorToWorldTransform) {
     if (!ray.isValid()) {
         return;
     }
 
-    radianceDensityPtr[ray.idx] = {ray.features[0], ray.features[1], ray.features[2], (1.0f - ray.transmittance)};
+    static_assert(RAY_FEATURE_DIM == TRayPayload::FeatDim, "RAY_FEATURE_DIM must equal TRayPayload::FeatDim");
+    threedgut::sliceVec<0, TRayPayload::FeatDim>(radianceDensityPtr[ray.idx]) = ray.features;
+    radianceDensityPtr[ray.idx][RAY_FEATURE_DIM] = (1.0f - ray.transmittance);
 
     worldHitDistancePtr[ray.idx] = ray.hitT;
 
