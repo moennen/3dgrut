@@ -10,3 +10,10 @@ defaults:
 
 model:
   feature_type: "nht"
+
+# Match reference NHT loss: L1(0.9) + SSIM(0.1) (benchmark uses --ssim_lambda 0.1)
+loss:
+  use_l1: true
+  lambda_l1: 0.9
+  use_ssim: true
+  lambda_ssim: 0.1

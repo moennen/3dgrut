@@ -32,6 +32,7 @@ class FeatureDecoder(nn.Module):
         num_layers: int = 4,
         dir_encoding: str = "SphericalHarmonics",
         dir_encoding_degree: int = 3,
+        sh_scale: float = 1.0,
         output_activation: str = "Sigmoid",
         ema_decay: float = 0.0,
         ema_start_step: int = 0,
@@ -44,6 +45,9 @@ class FeatureDecoder(nn.Module):
             num_layers: Number of hidden layers in the MLP (default 4)
             dir_encoding: Direction encoding type ("SphericalHarmonics" or "Frequency")
             dir_encoding_degree: Degree for direction encoding (SH degree or frequency bands; default 3)
+            sh_scale: Scale applied to ray directions before SH/Frequency encoding: (v*scale+1)/2 maps
+                      to tcnn [0,1] input. scale=1 is standard; scale=3 (reference default) extends the
+                      effective range, similar to using higher-frequency SH.
             output_activation: Output layer activation ("Sigmoid" for [0,1] RGB, or "ReLU")
             ema_decay: If > 0, keep EMA shadow of parameters (decay factor). 0 = no EMA.
             ema_start_step: Global step at which to start updating EMA.
@@ -52,6 +56,7 @@ class FeatureDecoder(nn.Module):
         self.ray_feature_dim = ray_feature_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.sh_scale = sh_scale
         self.output_activation = output_activation
         self._ema_decay = ema_decay
         self._ema_start_step = ema_start_step
@@ -179,8 +184,9 @@ class FeatureDecoder(nn.Module):
             alpha_safe = alpha.clamp(min=1e-8)
             features = features / alpha_safe
 
-        # SphericalHarmonics expects directions in unit cube (v+1)/2
-        dirs_unit_cube = (ray_directions + 1.0) * 0.5
+        # tcnn SH mapping: (v * sh_scale + 1) * 0.5; sh_scale=1 is standard, sh_scale=3 (reference
+        # default) extends effective frequency range (similar to higher-degree SH).
+        dirs_unit_cube = (ray_directions * self.sh_scale + 1.0) * 0.5
         full_input = torch.cat([features, dirs_unit_cube], dim=-1)
         rgb = self.network(full_input)
 
@@ -200,5 +206,6 @@ class FeatureDecoder(nn.Module):
             f"ray_feature_dim={self.ray_feature_dim}, "
             f"hidden_dim={self.hidden_dim}, "
             f"num_layers={self.num_layers}, "
+            f"sh_scale={self.sh_scale}, "
             f"output_activation={self.output_activation}"
         )

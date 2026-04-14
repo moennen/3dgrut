@@ -68,7 +68,7 @@ model:
     increase_step: 1 # sh: how many degrees unmasked per step | mlp: how many dims unmasked per step
 
   nht_features:
-    dim: 48
+    dim: 64
     activation:
       type: "siren"
       num_frequencies: 1
@@ -76,10 +76,11 @@ model:
 
   nht_decoder:
     enabled: true
-    hidden_dim: 64
-    num_layers: 2
+    hidden_dim: 128
+    num_layers: 3
     dir_encoding: "SphericalHarmonics"
     dir_encoding_degree: 3
+    sh_scale: 3.0
     output_activation: "Sigmoid"
     learning_rate: 0.0008
     reg_weight: 0.0

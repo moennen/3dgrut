@@ -328,9 +328,10 @@ class Tracer:
             )
 
             # pred_rgba is [..., RAY_FEATURE_DIM + 1]: features (or RGB) + density
+            # May be fp16 when FEATURE_OUTPUT_HALF=1; opacity is always converted to fp32.
             ray_feature_dim = gaussians.ray_feature_dim
             pred_rgb = pred_rgba[..., :ray_feature_dim].unsqueeze(0).contiguous()
-            pred_opacity = pred_rgba[..., ray_feature_dim:].unsqueeze(0).contiguous()
+            pred_opacity = pred_rgba[..., ray_feature_dim:].float().unsqueeze(0).contiguous()
             pred_dist = pred_dist.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
 

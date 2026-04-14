@@ -69,7 +69,10 @@ def apply_feature_decoder(
     rays_dir_world = torch.einsum("bij,bhwj->bhwi", R, rays_dir_cam)
     rays_dir_world = torch.nn.functional.normalize(rays_dir_world, dim=-1)
 
-    features_flat = feature_map.contiguous().view(-1, N)
+    # Convert fp16 features to float32 for the decoder (CUDA accumulates in fp32,
+    # fp16 only reduces global memory bandwidth; decoder operates in float32)
+    features_float = feature_map.float() if feature_map.dtype == torch.float16 else feature_map
+    features_flat = features_float.contiguous().view(-1, N)
     ray_dir_flat = rays_dir_world.contiguous().view(-1, 3)
     if alpha.dim() == 3:
         alpha = alpha.unsqueeze(-1)  # [B, H, W, 1]

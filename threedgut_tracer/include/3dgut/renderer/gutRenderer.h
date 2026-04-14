@@ -22,6 +22,20 @@
 
 #include <memory>
 
+// Output element type for the radiance+density buffer.
+// FEATURE_OUTPUT_HALF=1: write __half (fp16) to halve memory bandwidth.
+// FEATURE_OUTPUT_HALF=0: write float (fp32, default).
+#ifndef FEATURE_OUTPUT_HALF
+#define FEATURE_OUTPUT_HALF 0
+#endif
+
+#if FEATURE_OUTPUT_HALF
+#include <cuda_fp16.h>
+using TRadianceDensityElem = __half;
+#else
+using TRadianceDensityElem = float;
+#endif
+
 namespace threedgut {
 
 class GUTRenderer {
@@ -67,7 +81,7 @@ public:
                          const tcnn::vec3* sensorRayDirectionCudaPtr,
                          float* worldHitCountCudaPtr,
                          float* worldHitDistanceCudaPtr,
-                         tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
+                         TRadianceDensityElem* radianceDensityCudaPtr,
                          int* particlesVisibilityCudaPtr,
                          Parameters& parameters,
                          int cudaDeviceIndex,
@@ -78,8 +92,8 @@ public:
                           const tcnn::vec3* sensorRayDirectionCudaPtr,
                           const float* worldHitDistanceCudaPtr,
                           const float* worldHitDistanceGradientCudaPtr,
-                          const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
-                          const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityGradientCudaPtr,
+                          const TRadianceDensityElem* radianceDensityCudaPtr,
+                          const TRadianceDensityElem* radianceDensityGradientCudaPtr,
                           tcnn::vec3* worldRayOriginGradientCudaPtr,
                           tcnn::vec3* worldRayDirectionGradientCudaPtr,
                           Parameters& parameters,

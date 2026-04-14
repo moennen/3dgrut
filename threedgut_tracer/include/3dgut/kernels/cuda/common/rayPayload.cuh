@@ -107,21 +107,40 @@ __device__ __inline__ RayPayloadT initializeRay(const threedgut::RenderParameter
     return ray;
 }
 
+// Output element type for the radiance+density buffer.
+// FEATURE_OUTPUT_HALF=1: write __half (fp16) to halve memory bandwidth.
+// FEATURE_OUTPUT_HALF=0: write float (fp32, default).
+#if FEATURE_OUTPUT_HALF
+using TRadianceDensityElem = __half;
+#else
+using TRadianceDensityElem = float;
+#endif
+
 template <typename TRayPayload>
 __device__ __inline__ void finalizeRay(const TRayPayload& ray,
                                        const threedgut::RenderParameters& params,
                                        const tcnn::vec3* __restrict__ sensorRayOriginPtr,
                                        float* __restrict__ worldCountPtr,
                                        float* __restrict__ worldHitDistancePtr,
-                                       tcnn::vec<RAY_FEATURE_DIM + 1>* __restrict__ radianceDensityPtr,
+                                       TRadianceDensityElem* __restrict__ radianceDensityPtr,
                                        const tcnn::mat4x3& sensorToWorldTransform) {
     if (!ray.isValid()) {
         return;
     }
 
     static_assert(RAY_FEATURE_DIM == TRayPayload::FeatDim, "RAY_FEATURE_DIM must equal TRayPayload::FeatDim");
-    threedgut::sliceVec<0, TRayPayload::FeatDim>(radianceDensityPtr[ray.idx]) = ray.features;
-    radianceDensityPtr[ray.idx][RAY_FEATURE_DIM] = (1.0f - ray.transmittance);
+    const uint32_t base = ray.idx * (RAY_FEATURE_DIM + 1);
+#if FEATURE_OUTPUT_HALF
+    #pragma unroll
+    for (int i = 0; i < TRayPayload::FeatDim; ++i)
+        radianceDensityPtr[base + i] = __float2half(ray.features[i]);
+    radianceDensityPtr[base + RAY_FEATURE_DIM] = __float2half(1.0f - ray.transmittance);
+#else
+    #pragma unroll
+    for (int i = 0; i < TRayPayload::FeatDim; ++i)
+        radianceDensityPtr[base + i] = ray.features[i];
+    radianceDensityPtr[base + RAY_FEATURE_DIM] = (1.0f - ray.transmittance);
+#endif
 
     worldHitDistancePtr[ray.idx] = ray.hitT;
 

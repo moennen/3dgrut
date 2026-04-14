@@ -243,7 +243,7 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
                                                         const vec3* sensorRayDirectionCudaPtr,
                                                         float* worldHitCountCudaPtr,
                                                         float* worldHitDistanceCudaPtr,
-                                                        tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
+                                                        TRadianceDensityElem* radianceDensityCudaPtr,
                                                         int* particlesVisibilityCudaPtr,
                                                         Parameters& parameters,
                                                         int cudaDeviceIndex,
@@ -402,8 +402,8 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
                                                          const vec3* sensorRayDirectionCudaPtr,
                                                          const float* worldHitDistanceCudaPtr,
                                                          const float* worldHitDistanceGradientCudaPtr,
-                                                         const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityCudaPtr,
-                                                         const tcnn::vec<RAY_FEATURE_DIM + 1>* radianceDensityGradientCudaPtr,
+                                                         const TRadianceDensityElem* radianceDensityCudaPtr,
+                                                         const TRadianceDensityElem* radianceDensityGradientCudaPtr,
                                                          vec3* worldRayOriginGradientCudaPtr,          // TODO: not implemented yet
                                                          vec3* worldRayDirectionGradientCudaPtr,       // TODO: not implemented yet
                                                          Parameters& parameters,

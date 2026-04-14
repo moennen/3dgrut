@@ -485,6 +485,7 @@ class Trainer3DGRUT:
         num_layers = getattr(dec, "num_layers", 4)
         dir_encoding = getattr(dec, "dir_encoding", "SphericalHarmonics")
         dir_encoding_degree = getattr(dec, "dir_encoding_degree", 3)
+        sh_scale = getattr(dec, "sh_scale", 1.0)
         output_activation = getattr(dec, "output_activation", "Sigmoid")
         ema_decay = getattr(dec_conf, "ema_decay", 0.0)
         ema_start_step = getattr(dec_conf, "ema_start_step", 0)
@@ -495,6 +496,7 @@ class Trainer3DGRUT:
             num_layers=num_layers,
             dir_encoding=dir_encoding,
             dir_encoding_degree=dir_encoding_degree,
+            sh_scale=sh_scale,
             output_activation=output_activation,
             ema_decay=ema_decay,
             ema_start_step=ema_start_step,

@@ -24,3 +24,5 @@ splat: # 3DGUT-specific settings
   # rendering
   k_buffer_size: 0  # 0 means unsorted
   global_z_order: true
+  # Feature output dtype: false=float32, true=float16 (fp16 halves memory bandwidth for NHT features)
+  feature_output_half: true
