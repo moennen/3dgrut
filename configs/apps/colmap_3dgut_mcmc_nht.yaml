@@ -17,3 +17,4 @@ loss:
   lambda_l1: 0.9
   use_ssim: true
   lambda_ssim: 0.1
+

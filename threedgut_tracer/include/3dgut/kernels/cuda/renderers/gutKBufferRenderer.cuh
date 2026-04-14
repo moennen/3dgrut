@@ -526,6 +526,10 @@ struct GUTKBufferRenderer : Params {
                         break;
                     }
 
+                    // Thread-private feature gradient buffer for warp reduction.
+                    // Zero-initialized: non-hitting threads contribute 0 to the warp sum.
+                    float featureLocalGrad[Particles::ParticleFeatureDim] = {};
+
                     if (ray.isAlive()) {
                         float hitAlpha = 0.f;
                         float hitT     = 0.f;
@@ -539,16 +543,18 @@ struct GUTKBufferRenderer : Params {
                             float hitAlphaGrad = 0.f;
                             float3 canonicalIntersectionGrad = make_float3(0.f, 0.f, 0.f);
 
-                            // NB: processing front-to-back backToFrontBwd is equivalent to back-to-front frontToBackBwd
-                            particles.template featuresIntegrateBwdToBuffer<false>(ray.direction,
-                                                                                    canonicalIntersection,
-                                                                                    canonicalIntersectionGrad,
-                                                                                    hitAlpha,
-                                                                                    hitAlphaGrad,
-                                                                                    particleData.idx,
-                                                                                    hitFeatures,
-                                                                                    ray.featuresBackward,
-                                                                                    ray.featuresGradient);
+                            // NB: processing front-to-back backToFrontBwd is equivalent to back-to-front frontToBackBwd.
+                            // Write feature grad to thread-private local buffer (no atomics); warp reduction follows below.
+                            particles.featuresIntegrateBwdToLocalGrad(ray.direction,
+                                                                       canonicalIntersection,
+                                                                       canonicalIntersectionGrad,
+                                                                       hitAlpha,
+                                                                       hitAlphaGrad,
+                                                                       particleData.idx,
+                                                                       hitFeatures,
+                                                                       ray.featuresBackward,
+                                                                       ray.featuresGradient,
+                                                                       featureLocalGrad);
 
                             particles.template densityProcessHitBwdToBuffer<false>(ray.origin,
                                                                                     ray.direction,
@@ -569,6 +575,11 @@ struct GUTKBufferRenderer : Params {
                             ray.kill();
                         }
                     }
+
+                    // Warp reduction: all 32 threads (alive or not) participate in __shfl_xor_sync.
+                    // Non-hitting threads contribute featureLocalGrad=0 → correct, no spurious gradient.
+                    // Reduces 32×ParticleFeatureDim atomics per particle to ParticleFeatureDim atomics.
+                    particles.featureLocalGradWarpReduceAndWrite(particleData.idx, featureLocalGrad, tileThreadIdx);
                 }
             }
         } else {

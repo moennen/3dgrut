@@ -227,6 +227,8 @@ def setup_3dgut(conf):
     slang_build_env["PATH"] += os.path.join(slang_dir, "bin")
     slang_build_inc_dir = os.path.join(os.path.dirname(__file__), "include", "3dgut")
 
+    slang_out_path = os.path.join(build_dir, "threedgutSlang.cuh")
+    slang_tmp_path = slang_out_path + ".tmp"
     subprocess.check_call(
         [
             "slangc",
@@ -244,10 +246,16 @@ def setup_3dgut(conf):
             *defines,
             f"{os.path.join(slang_build_inc_dir,'threedgut.slang')}",
             "-o",
-            f"{os.path.join(build_dir,'threedgutSlang.cuh')}",
+            slang_tmp_path,
         ],
         env=slang_build_env,
     )
+    # Only overwrite if content changed: preserves timestamp and avoids spurious ninja rebuilds
+    import shutil
+    if not os.path.exists(slang_out_path) or open(slang_tmp_path, "rb").read() != open(slang_out_path, "rb").read():
+        shutil.move(slang_tmp_path, slang_out_path)
+    else:
+        os.remove(slang_tmp_path)
 
     # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]

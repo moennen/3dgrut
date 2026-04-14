@@ -30,4 +30,5 @@ def l2_loss(network_output, gt):
 @torch.cuda.nvtx.range("ssim")
 def ssim(img1, img2, window_size=11, size_average=True):
     # predicted_image, gt_image: [BS, CH, H, W], predicted_image is differentiable
-    return fused_ssim(img1, img2, padding="valid")
+    # fused_ssim requires float32; cast here to handle fp16 feature_output_half=true paths
+    return fused_ssim(img1.float(), img2.float(), padding="valid")

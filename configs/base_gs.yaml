@@ -9,7 +9,9 @@ experiment_name: ""
 resume: ""
 out_dir: "./runs"
 n_iterations: 30000
+seed_initialization: 42
 with_gui: false
+with_viser_gui: false
 gui_update_from_device: true
 val_frequency: 5000
 num_workers: 24
@@ -138,6 +140,9 @@ scheduler:
     type: cosine
     decay_final: 0.001
     max_steps: 30000
+
+post_processing:
+  method: null
 
 loss:
   use_l1: true

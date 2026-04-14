@@ -76,9 +76,10 @@ class Renderer:
         dataset = datasets.make_test(name=conf.dataset.type, config=conf)
 
         # Configure DataLoader arguments for the current platform
+        num_workers = getattr(conf, "num_workers", 8)
         dataloader_kwargs = configure_dataloader_for_platform(
             {
-                "num_workers": 8,
+                "num_workers": num_workers,
                 "batch_size": 1,
                 "shuffle": False,
                 "collate_fn": None,

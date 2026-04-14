@@ -354,6 +354,67 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
         }
     }
 
+    // NHT warp reduction step 1: compute feature grad into a thread-private local buffer.
+    // featureLocalGrad must be zero-initialized (size ExtParams::ParticleFeatureDim) before calling.
+    // Follow with featureLocalGradWarpReduceAndWrite (called by ALL warp threads) to write to global buffer.
+    __forceinline__ __device__ void featuresIntegrateBwdToLocalGrad(const tcnn::vec3& incidentDirection,
+                                                                     const float3& canonicalIntersection,
+                                                                     float3& canonicalIntersectionGrad,
+                                                                     float alpha,
+                                                                     float& alphaGrad,
+                                                                     uint32_t particleIdx,
+                                                                     const TFeaturesVec& features,
+                                                                     TFeaturesVec& integratedFeatures,
+                                                                     TFeaturesVec& integratedFeaturesGrad,
+                                                                     float* featureLocalGrad) const {
+        if constexpr (TDifferentiable) {
+            // Pointer offset trick: shift featureLocalGrad back by particleOffset so Slang's
+            // _gradPtr[interpPointOffset + i] writes land in featureLocalGrad[0..ParticleFeatureDim-1].
+            // interpPointOffset = particleOffset + interpPointIdx*InterpPointFeatureDim, so:
+            // (featureLocalGrad - particleOffset)[interpPointOffset + i]
+            //     = featureLocalGrad[interpPointIdx*InterpPointFeatureDim + i]
+            const uint32_t particleOffset = particleIdx * ExtParams::ParticleFeatureDim;
+            particleFeaturesIntegrateBwdToBuffer(
+                *reinterpret_cast<const float3*>(&incidentDirection),
+                canonicalIntersection,
+                &canonicalIntersectionGrad,
+                alpha,
+                &alphaGrad,
+                particleIdx,
+                m_featureRawParameters.ptr,
+                featureLocalGrad - particleOffset,   // shifted: writes to featureLocalGrad[0..ParticleFeatureDim-1]
+                m_featureActiveShDegree,
+                true,                                // exclusiveGradient=true → += without atomics
+                *reinterpret_cast<const FixedArray<float, RAY_FEATURE_DIM>*>(&features),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeatures),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeaturesGrad));
+        }
+    }
+
+    // NHT warp reduction step 2: warp-reduce featureLocalGrad and atomicAdd to global gradient buffer.
+    // MUST be called by ALL threads in the warp (including non-hitting threads with featureLocalGrad=0)
+    // to satisfy __shfl_xor_sync requirements.
+    __forceinline__ __device__ void featureLocalGradWarpReduceAndWrite(uint32_t particleIdx,
+                                                                        float* featureLocalGrad,
+                                                                        uint32_t tileThreadIdx) const {
+        if constexpr (TDifferentiable) {
+#pragma unroll
+            for (int mask = 1; mask < warpSize; mask *= 2) {
+#pragma unroll
+                for (int i = 0; i < ExtParams::ParticleFeatureDim; i++) {
+                    featureLocalGrad[i] += __shfl_xor_sync(0xffffffff, featureLocalGrad[i], mask);
+                }
+            }
+            if ((tileThreadIdx & (warpSize - 1)) == 0) {
+                const uint32_t particleOffset = particleIdx * ExtParams::ParticleFeatureDim;
+#pragma unroll
+                for (int i = 0; i < ExtParams::ParticleFeatureDim; i++) {
+                    atomicAdd(&m_featureRawParameters.gradPtr[particleOffset + i], featureLocalGrad[i]);
+                }
+            }
+        }
+    }
+
     template <bool PerRayRadiance>
     __forceinline__ __device__ bool processHitFwd(const tcnn::vec3& rayOrigin,
                                                   const tcnn::vec3& rayDirection,
