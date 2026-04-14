@@ -74,7 +74,7 @@ model:
     activation:
       type: "none"
       num_frequencies: 1
-    interpolation_type: "none"
+    interpolation_type: "barycentric"
 
   nht_decoder:
     enabled: true
