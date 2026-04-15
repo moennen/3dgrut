@@ -323,7 +323,7 @@ SplatRaster::traceBwd(uint32_t frameNumber, int numActiveFeatures,
         reinterpret_cast<float*>(voidDataPtr(rayHitDistance)),
         reinterpret_cast<float*>(voidDataPtr(rayHitDistanceGradient)),
         reinterpret_cast<const TRadianceDensityElem*>(voidDataPtr(rayRadianceDensity)),
-        reinterpret_cast<const TRadianceDensityElem*>(voidDataPtr(rayRadianceDensityGradient)),
+        reinterpret_cast<const float*>(voidDataPtr(rayRadianceDensityGradient)),
         rayBackpropagation ? reinterpret_cast<tcnn::vec3*>(voidDataPtr(rayOriginGradient)) : nullptr,
         rayBackpropagation ? reinterpret_cast<tcnn::vec3*>(voidDataPtr(rayDirectionGradient)) : nullptr,
         m_parameters, cudaDeviceIndex, cudaStream);

@@ -403,7 +403,7 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
                                                          const float* worldHitDistanceCudaPtr,
                                                          const float* worldHitDistanceGradientCudaPtr,
                                                          const TRadianceDensityElem* radianceDensityCudaPtr,
-                                                         const TRadianceDensityElem* radianceDensityGradientCudaPtr,
+                                                         const float* radianceDensityGradientCudaPtr,
                                                          vec3* worldRayOriginGradientCudaPtr,          // TODO: not implemented yet
                                                          vec3* worldRayDirectionGradientCudaPtr,       // TODO: not implemented yet
                                                          Parameters& parameters,

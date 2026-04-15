@@ -34,7 +34,7 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
                                                         const float* __restrict__ worldHitDistancePtr,
                                                         const float* __restrict__ worldHitDistanceGradientPtr,
                                                         const TRadianceDensityElem* __restrict__ featuresDensityPtr,
-                                                        const TRadianceDensityElem* __restrict__ featuresDensityGradientPtr,
+                                                        const float* __restrict__ featuresDensityGradientPtr,
                                                         const tcnn::mat4x3& sensorToWorldTransform) {
 
     // NB : no backpropagation through the forward ray initialization / finalization
@@ -46,14 +46,17 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
     if (ray.isAlive()) {
         constexpr uint32_t stride = RayPayloadT::FeatDim + 1;
         const uint32_t base = ray.idx * stride;
+        // Forward features: fp16 when FEATURE_OUTPUT_HALF=1, fp32 otherwise.
+        // Gradient buffer: always fp32 — keeps backward numerically stable regardless
+        // of forward dtype (matches reference NHT implementation behavior).
 #if FEATURE_OUTPUT_HALF
         #pragma unroll
         for (int i = 0; i < RayPayloadT::FeatDim; ++i) {
             ray.featuresBackward[i] = __half2float(featuresDensityPtr[base + i]);
-            ray.featuresGradient[i] = __half2float(featuresDensityGradientPtr[base + i]);
+            ray.featuresGradient[i] = featuresDensityGradientPtr[base + i];
         }
         ray.transmittanceBackward = 1.f - __half2float(featuresDensityPtr[base + RayPayloadT::FeatDim]);
-        ray.transmittanceGradient = -1.f * __half2float(featuresDensityGradientPtr[base + RayPayloadT::FeatDim]);
+        ray.transmittanceGradient = -1.f * featuresDensityGradientPtr[base + RayPayloadT::FeatDim];
 #else
         #pragma unroll
         for (int i = 0; i < RayPayloadT::FeatDim; ++i) {

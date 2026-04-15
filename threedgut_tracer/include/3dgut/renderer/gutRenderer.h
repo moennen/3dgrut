@@ -93,7 +93,7 @@ public:
                           const float* worldHitDistanceCudaPtr,
                           const float* worldHitDistanceGradientCudaPtr,
                           const TRadianceDensityElem* radianceDensityCudaPtr,
-                          const TRadianceDensityElem* radianceDensityGradientCudaPtr,
+                          const float* radianceDensityGradientCudaPtr,
                           tcnn::vec3* worldRayOriginGradientCudaPtr,
                           tcnn::vec3* worldRayDirectionGradientCudaPtr,
                           Parameters& parameters,

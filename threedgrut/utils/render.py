@@ -50,6 +50,28 @@ def SH2RGB(sh):
     return sh * C0 + 0.5
 
 
+class _Fp16ToFp32SafeGrad(torch.autograd.Function):
+    """fp16→fp32 cast whose backward returns fp32 (not fp16).
+
+    When feature_output_half=True the feature buffer is fp16. The plain .float()
+    backward would cast the decoder's fp32 gradient back to fp16, causing a
+    roundtrip fp32→fp16→fp32 with quantization loss (and potential overflow for
+    large gradients). This function returns the gradient as fp32 directly.
+
+    The CUDA backward kernel receives a fp32 gradient buffer (see
+    rayPayloadBackward.cuh and tracer.py where .float() is applied), matching
+    the behavior of the reference NHT implementation.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        return x.float()
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return grad  # keep fp32 — tracer.py enforces fp32 before passing to CUDA
+
+
 def apply_feature_decoder(
     feature_decoder,
     outputs: dict,
@@ -69,9 +91,14 @@ def apply_feature_decoder(
     rays_dir_world = torch.einsum("bij,bhwj->bhwi", R, rays_dir_cam)
     rays_dir_world = torch.nn.functional.normalize(rays_dir_world, dim=-1)
 
-    # Convert fp16 features to float32 for the decoder (CUDA accumulates in fp32,
-    # fp16 only reduces global memory bandwidth; decoder operates in float32)
-    features_float = feature_map.float() if feature_map.dtype == torch.float16 else feature_map
+    # Convert fp16 features to fp32 for the decoder.
+    # When the feature map is fp16 (feature_output_half=True), use _Fp16ToFp32SafeGrad
+    # whose backward returns fp32 (not fp16), avoiding a lossy fp32→fp16→fp32 roundtrip.
+    # tracer.py then ensures the fp32 gradient is passed directly to the CUDA backward kernel.
+    if feature_map.dtype == torch.float16:
+        features_float = _Fp16ToFp32SafeGrad.apply(feature_map)
+    else:
+        features_float = feature_map
     features_flat = features_float.contiguous().view(-1, N)
     ray_dir_flat = rays_dir_world.contiguous().view(-1, 3)
     if alpha.dim() == 3:

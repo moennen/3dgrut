@@ -114,7 +114,7 @@ class MCMCStrategy(BaseStrategy):
         alive_idxs = torch.where(densities > self.conf.strategy.opacity_threshold)[0]
         n_dead_gaussians = len(dead_idxs)
 
-        if n_dead_gaussians:
+        if n_dead_gaussians and len(alive_idxs) > 0:
             sampled_idxs, new_densities, new_scales = self.sample_new_gaussians(n_dead_gaussians, alive_idxs)
 
             def update_param_fn(name: str, param: torch.Tensor) -> torch.Tensor:

@@ -25,4 +25,5 @@ splat: # 3DGUT-specific settings
   k_buffer_size: 0  # 0 means unsorted
   global_z_order: true
   # Feature output dtype: false=float32, true=float16 (fp16 halves memory bandwidth for NHT features)
+  # The gradient buffer is always fp32 regardless of this setting (see rayPayloadBackward.cuh).
   feature_output_half: true

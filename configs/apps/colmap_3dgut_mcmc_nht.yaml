@@ -13,6 +13,8 @@ model:
 
 # Match reference NHT regularization (neural-harmonic-textures/gsplat/examples/simple_trainer_nht.py)
 loss:
+  use_opacity: true
   lambda_opacity: 0.02
+  use_scale: true
   lambda_scale: 0.005
 

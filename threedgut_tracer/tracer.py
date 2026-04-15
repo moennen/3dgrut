@@ -258,7 +258,7 @@ class Tracer:
                 sensor_poses.T_world_sensors[0],
                 sensor_poses.T_world_sensors[1],
                 ray_radiance_density,
-                ray_radiance_density_grd,
+                ray_radiance_density_grd.float(),  # gradient buffer is always fp32 (see rayPayloadBackward.cuh)
                 ray_hit_distance,
                 ray_hit_distance_grd,
             )

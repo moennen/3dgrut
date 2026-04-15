@@ -470,6 +470,10 @@ class Trainer3DGRUT:
             self.feature_decoder_scheduler = None
             return
 
+        # feature_output_half=True is safe with NHT: the forward feature buffer is fp16
+        # (memory bandwidth saving), but the gradient buffer is always fp32 (see tracer.py
+        # and rayPayloadBackward.cuh). This matches the reference NHT implementation.
+
         dec_conf = conf.model.nht_decoder
         if not getattr(dec_conf, "enabled", True):
             self.feature_decoder = None
