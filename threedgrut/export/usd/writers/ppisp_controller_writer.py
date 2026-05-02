@@ -46,14 +46,57 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# Names must match ppisp_controller.slang's bindings and ppisp_controller.slang.usda.
+# Names must match the controller bindings and *.usda files in
+# threedgrut/export/usd/ppisp_spg/.
 CONTROLLER_INPUT_RENDER_VAR = "HdrColor"
 CONTROLLER_OUTPUT_NAME = "ControllerParams"
 PRIOR_EXPOSURE_INPUT = "priorExposure"
 WEIGHTS_INPUT = "weights"
 
-CONTROLLER_USDA_FILE = "ppisp_controller.slang.usda"
-CONTROLLER_SLANG_FILE = "ppisp_controller.slang"
+# Default backend: "cuda".
+#
+# The "slang" backend authors a Shader prim that references
+# ``ppisp_controller.slang(.usda)``. SPG's slang plugin currently has no
+# binding path from a USD ``float[]`` attribute to a
+# ``StructuredBuffer<float>`` ParameterBlock field, so the 241,961 trained
+# weights are silently dropped at dispatch and the controller runs against
+# zero memory. Kit logs this as
+# ``Failed to find parameter 'params:weights' in shader reflection``.
+# Stick with the slang backend only for slangpy/standalone validation, and
+# use ``backend="cuda"`` for any export consumed by Kit/Omniverse.
+CONTROLLER_BACKEND_CUDA = "cuda"
+CONTROLLER_BACKEND_SLANG = "slang"
+CONTROLLER_DEFAULT_BACKEND = CONTROLLER_BACKEND_CUDA
+
+# Per-backend sidecar / source file names.
+_BACKEND_FILES = {
+    CONTROLLER_BACKEND_CUDA: {
+        "source": "ppisp_controller.cu",
+        "lua":    "ppisp_controller.cu.lua",
+        "usda":   "ppisp_controller.cu.usda",
+    },
+    CONTROLLER_BACKEND_SLANG: {
+        "source": "ppisp_controller.slang",
+        "lua":    "ppisp_controller.slang.lua",
+        "usda":   "ppisp_controller.slang.usda",
+    },
+}
+
+# Kept for backward compatibility with callers that hardcoded the slang
+# variant (e.g. validate_controller.py / diagnose_controller.py).
+CONTROLLER_USDA_FILE = _BACKEND_FILES[CONTROLLER_BACKEND_SLANG]["usda"]
+CONTROLLER_SLANG_FILE = _BACKEND_FILES[CONTROLLER_BACKEND_SLANG]["source"]
+
+
+def _resolve_backend(backend: str | None) -> str:
+    if backend is None:
+        return CONTROLLER_DEFAULT_BACKEND
+    if backend not in _BACKEND_FILES:
+        raise ValueError(
+            f"Unknown PPISP controller backend {backend!r}; "
+            f"expected one of {sorted(_BACKEND_FILES)}"
+        )
+    return backend
 
 # Architecture sizes (mirror ppisp._PPISPController defaults / shader constants).
 EXPECTED_SIZES = {
@@ -208,13 +251,32 @@ def add_controller_shader_to_render_product(
     controller,
     *,
     prior_exposure: float | None = None,
+    backend: str | None = None,
 ) -> UsdShade.Shader:
     """Author the controller Shader prim and connect ``HdrColor`` → ``ControllerParams``.
+
+    ``backend`` selects the SPG implementation (``"cuda"`` -- default, or
+    ``"slang"`` for slangpy validation only; see the module-level
+    docstring for the slang-vs-cuda caveat).
 
     Returns the created Shader so the caller can wire its output into the
     PPISP shader. The PPISP shader is responsible for *consuming* the
     output via its dynamic-controller binding.
     """
+    backend = _resolve_backend(backend)
+    files = _BACKEND_FILES[backend]
+    if backend == CONTROLLER_BACKEND_SLANG:
+        log.warning(
+            "PPISP controller exported with backend=slang for camera %d. "
+            "SPG's slang plugin cannot bind the 241,961-float `weights` USD "
+            "attribute to a StructuredBuffer<float>; Kit will log "
+            "\"Failed to find parameter 'params:weights' in shader reflection\" "
+            "and the controller runs against zero memory. Use backend=cuda "
+            "for production exports; only keep slang for slangpy/standalone "
+            "validation.",
+            camera_index,
+        )
+
     render_product = stage.GetPrimAtPath(render_product_path)
     if not render_product.IsValid():
         raise ValueError(f"RenderProduct not found at path: {render_product_path}")
@@ -228,13 +290,13 @@ def add_controller_shader_to_render_product(
     shader_prim_name = f"PPISPController_{camera_index}"
     shader_path = f"{render_product_path}/{shader_prim_name}"
     shader = UsdShade.Shader.Define(stage, shader_path)
-    shader.GetPrim().GetReferences().AddReference(CONTROLLER_USDA_FILE)
+    shader.GetPrim().GetReferences().AddReference(files["usda"])
     shader.GetPrim().CreateAttribute(
         "info:implementationSource", Sdf.ValueTypeNames.Token, custom=False
     ).Set("sourceAsset")
     shader.GetPrim().CreateAttribute(
         "info:spg:sourceAsset", Sdf.ValueTypeNames.Asset, custom=False
-    ).Set(Sdf.AssetPath(CONTROLLER_SLANG_FILE))
+    ).Set(Sdf.AssetPath(files["source"]))
     shader.GetPrim().CreateAttribute(
         "info:spg:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token, custom=False
     ).Set("controllerProcess")
@@ -287,15 +349,19 @@ def add_controller_shader_to_render_product(
 # ---------------------------------------------------------------------------
 
 
-def get_controller_sidecars() -> List[NamedSerialized]:
-    """Load the shared controller SPG sidecar files.
+def get_controller_sidecars(backend: str | None = None) -> List[NamedSerialized]:
+    """Load the shared controller SPG sidecar files for ``backend``.
 
     Unlike the dynamic PPISP path, the controller does not need per-camera
-    sidecar generation: the weights live in USD attributes, so the slang /
-    lua / usda assets are identical for every camera.
+    sidecar generation: the weights live in USD attributes, so the
+    source / lua / usda assets are identical for every camera.
+
+    ``backend`` defaults to :data:`CONTROLLER_DEFAULT_BACKEND` (cuda).
     """
     from threedgrut.export.usd.ppisp_spg import _SPG_DIR
-    filenames = [CONTROLLER_SLANG_FILE, CONTROLLER_SLANG_FILE + ".lua", CONTROLLER_USDA_FILE]
+    backend = _resolve_backend(backend)
+    files = _BACKEND_FILES[backend]
+    filenames = [files["source"], files["lua"], files["usda"]]
     out: List[NamedSerialized] = []
     for name in filenames:
         path = _SPG_DIR / name

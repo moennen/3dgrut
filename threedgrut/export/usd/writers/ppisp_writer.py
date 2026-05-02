@@ -439,6 +439,7 @@ def add_ppisp_to_all_render_products(
     fixed_camera_index: int | None = None,
     fixed_frame_index: int | None = None,
     use_controller: bool = False,
+    controller_backend: str | None = None,
 ) -> List[Usd.Prim]:
     """Add PPISP shaders to every RenderProduct in the Render scope.
 
@@ -457,6 +458,9 @@ def add_ppisp_to_all_render_products(
             and wire its output into the PPISP shader, replacing the static /
             time-sampled exposure & colour inputs. Requires the controller
             sidecars to be packaged alongside the USD output.
+        controller_backend: SPG backend for the controller (``"cuda"`` or
+            ``"slang"``). Only meaningful when ``use_controller=True``.
+            ``None`` selects the writer-side default (currently cuda).
 
     Returns:
         List of created PPISP Shader prims.
@@ -515,6 +519,7 @@ def add_ppisp_to_all_render_products(
                     render_product_path=str(child.GetPath()),
                     camera_index=int(camera_index),
                     controller=controllers[int(camera_index)],
+                    backend=controller_backend,
                 )
 
         shader_prim = add_ppisp_shader_to_render_product(

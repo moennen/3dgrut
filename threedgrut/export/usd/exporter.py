@@ -280,6 +280,7 @@ class USDExporter(ModelExporter):
         post_processing_export_camera_id: int | None = None,
         post_processing_export_frame_id: int | None = None,
         ignore_ppisp_controller: bool = False,
+        ppisp_controller_backend: str | None = None,
         post_processing_bake_epochs: int = 1,
         post_processing_bake_learning_rate: float = 1.0e-3,
         post_processing_bake_camera_id: int = 0,
@@ -315,6 +316,10 @@ class USDExporter(ModelExporter):
                 to time-sampled exposure / colour USD attributes derived from
                 ``ppisp.exposure_params`` and ``ppisp.color_params``. No effect
                 on checkpoints that were trained without a controller.
+            ppisp_controller_backend: SPG implementation for the controller --
+                ``"cuda"`` (default) or ``"slang"``. The slang variant is
+                currently unusable in Kit because SPG can't bind the weight
+                buffer; keep it only for slangpy/standalone validation.
             post_processing_export_frame_id: Optional PPISP frame index to write
                 as static exposure/color inputs in omni-native mode.
             post_processing_bake_epochs: Number of sequential passes over the train/reference set.
@@ -358,6 +363,9 @@ class USDExporter(ModelExporter):
             None if post_processing_export_frame_id is None else int(post_processing_export_frame_id)
         )
         self.ignore_ppisp_controller = bool(ignore_ppisp_controller)
+        self.ppisp_controller_backend = (
+            None if ppisp_controller_backend is None else str(ppisp_controller_backend)
+        )
         self.post_processing_bake_epochs = int(post_processing_bake_epochs)
         self.post_processing_bake_learning_rate = float(post_processing_bake_learning_rate)
         self.post_processing_bake_camera_id = int(post_processing_bake_camera_id)
@@ -766,6 +774,7 @@ class USDExporter(ModelExporter):
                 fixed_camera_index=fixed_camera_id,
                 fixed_frame_index=fixed_frame_id,
                 use_controller=use_controller,
+                controller_backend=self.ppisp_controller_backend,
             )
         except Exception as e:
             logger.warning(f"Failed to add PPISP shaders: {e}")
@@ -776,7 +785,7 @@ class USDExporter(ModelExporter):
             from threedgrut.export.usd.writers.ppisp_controller_writer import (
                 get_controller_sidecars,
             )
-            for s in get_controller_sidecars():
+            for s in get_controller_sidecars(self.ppisp_controller_backend):
                 if not any(f.filename == s.filename for f in spg_files):
                     spg_files.append(s)
         else:
@@ -841,6 +850,12 @@ class USDExporter(ModelExporter):
                 "ignore-ppisp-controller",
                 "ignore_ppisp_controller",
                 False,
+            ),
+            ppisp_controller_backend=_get_export_config_value(
+                export_conf,
+                "ppisp-controller-backend",
+                "ppisp_controller_backend",
+                None,
             ),
             post_processing_bake_epochs=_get_export_config_value(
                 export_conf,
