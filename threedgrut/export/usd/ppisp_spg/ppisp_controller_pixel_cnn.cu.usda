@@ -13,6 +13,6 @@ def Shader "CudaPPISPControllerPixelCnn"
     # conv1/conv2/conv3 prefix). Authored per camera, defaulting empty.
     float[] inputs:weights = []
 
-    opaque inputs:Resized
+    opaque inputs:HdrColor
     opaque outputs:PixelFeatures
 }
