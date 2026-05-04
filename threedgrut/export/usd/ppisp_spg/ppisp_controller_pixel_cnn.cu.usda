@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    defaultPrim = "CudaPPISPControllerPixelCnn"
+)
+
+def Shader "CudaPPISPControllerPixelCnn"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:spg:sourceAsset = @ppisp_controller_pixel_cnn.cu@
+    uniform token info:spg:sourceAsset:subIdentifier = "pixelCnnProcess"
+
+    # Trained controller weights (full buffer; this node only reads the
+    # conv1/conv2/conv3 prefix). Authored per camera, defaulting empty.
+    float[] inputs:weights = []
+
+    opaque inputs:Resized
+    opaque outputs:PixelFeatures
+}

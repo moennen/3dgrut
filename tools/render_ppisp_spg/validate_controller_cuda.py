@@ -34,6 +34,7 @@ slangpy dependency.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import shutil
@@ -115,9 +116,11 @@ EXPECTED_SIZES, flatten_controller_weights = _load_writer_helpers()
 logger = logging.getLogger("validate_controller_cuda")
 
 
-REPO_ROOT     = Path(__file__).resolve().parents[2]
-CONTROLLER_CU = REPO_ROOT / "threedgrut/export/usd/ppisp_spg/ppisp_controller.cu"
-RUNNER_CU     = Path(__file__).resolve().parent / "_cuda_controller_runner.cu"
+REPO_ROOT      = Path(__file__).resolve().parents[2]
+SPG_DIR        = REPO_ROOT / "threedgrut/export/usd/ppisp_spg"
+CONTROLLER_CU  = SPG_DIR / "ppisp_controller.cu"
+RUNNER_CU      = Path(__file__).resolve().parent / "_cuda_controller_runner.cu"
+PIPELINE_RUNNER_CU = Path(__file__).resolve().parent / "_cuda_controller_pipeline_runner.cu"
 
 
 # ---------------------------------------------------------------------------
@@ -206,17 +209,23 @@ def _find_nvcc() -> str:
     )
 
 
-def _build_runner(work: Path, *, sm_arch: str = "sm_75", verbose: bool = False) -> Path:
-    """Compile _cuda_controller_runner.cu -> binary in ``work``."""
+def _build_runner(
+    work: Path,
+    src: Path,
+    name: str,
+    *,
+    sm_arch: str = "sm_75",
+    verbose: bool = False,
+) -> Path:
+    """Compile a controller runner .cu file to a binary in ``work``."""
     nvcc = _find_nvcc()
-    out = work / "controller_runner"
+    out = work / name
     cmd = [
         nvcc, "-O2", "-std=c++17",
         f"-arch={sm_arch}",
-        # The runner #includes "ppisp_controller.cu" -- give nvcc the
-        # path so the unqualified include resolves.
-        f"-I{CONTROLLER_CU.parent}",
-        str(RUNNER_CU),
+        # Runners #include the kernel .cu files unqualified.
+        f"-I{SPG_DIR}",
+        str(src),
         "-o", str(out),
     ]
     logger.info("Building CUDA runner: %s", " ".join(cmd))
@@ -230,6 +239,19 @@ def _build_runner(work: Path, *, sm_arch: str = "sm_75", verbose: bool = False) 
     return out
 
 
+def _hdr_to_rgba_bytes(work: Path, tag: str, hdr_image: np.ndarray) -> tuple[Path, int, int]:
+    h, w = hdr_image.shape[:2]
+    if hdr_image.shape[2] == 3:
+        rgba = np.empty((h, w, 4), dtype=np.float32)
+        rgba[..., :3] = hdr_image
+        rgba[..., 3] = 1.0
+    else:
+        rgba = hdr_image.astype(np.float32, copy=False)
+    hdr_path = work / f"{tag}.hdr.bin"
+    np.ascontiguousarray(rgba.astype(np.float32, copy=False)).tofile(hdr_path)
+    return hdr_path, w, h
+
+
 def _run_cuda_controller(
     runner: Path,
     work: Path,
@@ -238,19 +260,10 @@ def _run_cuda_controller(
     weights: np.ndarray,
     prior_exposure: float,
 ) -> np.ndarray:
-    h, w = hdr_image.shape[:2]
-    if hdr_image.shape[2] == 3:
-        rgba = np.empty((h, w, 4), dtype=np.float32)
-        rgba[..., :3] = hdr_image
-        rgba[..., 3] = 1.0
-    else:
-        rgba = hdr_image.astype(np.float32, copy=False)
-
-    hdr_path     = work / f"{tag}.hdr.bin"
-    weights_path = work / f"{tag}.weights.bin"
-    out_path     = work / f"{tag}.out.bin"
-
-    np.ascontiguousarray(rgba.astype(np.float32, copy=False)).tofile(hdr_path)
+    """Run the single-kernel CUDA controller."""
+    hdr_path, w, h = _hdr_to_rgba_bytes(work, tag, hdr_image)
+    weights_path   = work / f"{tag}.weights.bin"
+    out_path       = work / f"{tag}.out.bin"
     np.ascontiguousarray(weights.astype(np.float32, copy=False).reshape(-1)).tofile(weights_path)
 
     cmd = [str(runner), str(w), str(h), str(prior_exposure),
@@ -264,30 +277,145 @@ def _run_cuda_controller(
     return np.fromfile(out_path, dtype=np.float32, count=9)
 
 
+def _run_cuda_pipeline(
+    runner: Path,
+    work: Path,
+    tag: str,
+    hdr_image: np.ndarray,
+    weights: np.ndarray,
+    prior_exposure: float,
+    warmup: int,
+    iters: int,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Run the 2-stage CUDA pipeline (pixel CNN + pool/MLP) at full input
+    resolution. Returns (output[9], timings_dict_ms).
+    """
+    hdr_path, w, h = _hdr_to_rgba_bytes(work, tag, hdr_image)
+    weights_path   = work / f"{tag}.weights.bin"
+    out_path       = work / f"{tag}.out.bin"
+    np.ascontiguousarray(weights.astype(np.float32, copy=False).reshape(-1)).tofile(weights_path)
+
+    cmd = [str(runner), str(w), str(h), str(prior_exposure),
+           str(hdr_path), str(weights_path), str(out_path),
+           str(warmup), str(iters)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        raise RuntimeError(f"pipeline_runner failed (exit {proc.returncode})")
+
+    timings: dict[str, float] = {}
+    for line in proc.stdout.splitlines():
+        # Lines look like "pixel_cnn : 0.123 ms (avg over 5)"
+        if ":" in line and "ms" in line:
+            stage, rest = line.split(":", 1)
+            try:
+                ms = float(rest.strip().split()[0])
+                timings[stage.strip()] = ms
+            except (ValueError, IndexError):
+                pass
+    out = np.fromfile(out_path, dtype=np.float32, count=9)
+    return out, timings
+
+
+# ---------------------------------------------------------------------------
+# Torch timing (full-resolution forward pass)
+# ---------------------------------------------------------------------------
+
+
+def _torch_time_controller(ctrl, hdr_image: np.ndarray, prior_exposure: float,
+                           warmup: int, iters: int) -> tuple[np.ndarray, float]:
+    """Run the torch controller on GPU, time it via cudaEvents.
+
+    Returns (output[9], avg_ms_per_call).
+    """
+    import torch
+    if not torch.cuda.is_available():
+        # Fall back to CPU timing.
+        out = _torch_reference(ctrl, hdr_image, prior_exposure)
+        return out, float("nan")
+    ctrl = ctrl.to("cuda")
+    rgb = torch.from_numpy(hdr_image).float().to("cuda")
+    pe = torch.tensor([prior_exposure], dtype=torch.float32, device="cuda")
+    ev0 = torch.cuda.Event(enable_timing=True)
+    ev1 = torch.cuda.Event(enable_timing=True)
+    with torch.no_grad():
+        for _ in range(max(0, warmup)):
+            _ = ctrl(rgb, pe)
+        torch.cuda.synchronize()
+        ev0.record()
+        for _ in range(iters):
+            exposure, color = ctrl(rgb, pe)
+        ev1.record()
+        torch.cuda.synchronize()
+    ms = ev0.elapsed_time(ev1) / max(1, iters)
+    out = np.concatenate([
+        np.array([float(exposure)], dtype=np.float32),
+        color.detach().cpu().numpy().astype(np.float32),
+    ])
+    return out, ms
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
 
-def _validate_synthetic(args, work: Path, runner: Path) -> int:
+def _psnr(a: np.ndarray, b: np.ndarray, peak: float = 1.0) -> float:
+    diff = (a.astype(np.float64) - b.astype(np.float64))
+    mse = float((diff * diff).mean())
+    if mse <= 0.0:
+        return float("inf")
+    import math
+    return 10.0 * math.log10((peak * peak) / mse)
+
+
+def _validate_synthetic(args, work: Path, runner: Path,
+                        pipeline_runner: Path | None) -> int:
     ctrl = _make_test_controller(args.seed)
     rng = np.random.default_rng(args.seed)
     hdr = (rng.random((args.height, args.width, 3), dtype=np.float32) * 0.8 + 0.1)
+    weights  = flatten_controller_weights(ctrl)
 
     expected = _torch_reference(ctrl, hdr, args.prior)
-    weights  = flatten_controller_weights(ctrl)
-    actual   = _run_cuda_controller(runner, work, "synth", hdr, weights, args.prior)
 
-    diff = np.abs(actual - expected)
-    print(f"[synthetic seed={args.seed} {args.width}x{args.height}]")
-    print(f"  reference: {expected}")
-    print(f"  cuda:      {actual}")
-    print(f"  abs diff:  {diff}")
-    print(f"  max abs diff: {diff.max():.6g} (tol={args.tol})")
-    return 0 if diff.max() <= args.tol else 1
+    print(f"[synthetic seed={args.seed} {args.width}x{args.height}, prior={args.prior}]")
+
+    # ----- single-kernel CUDA -----
+    actual_single = _run_cuda_controller(runner, work, "synth", hdr, weights, args.prior)
+    diff_single = np.abs(actual_single - expected)
+    print(f"  single-kernel CUDA vs torch:")
+    print(f"    max abs diff: {diff_single.max():.6g}  PSNR: {_psnr(actual_single, expected):.2f} dB")
+
+    # ----- pipeline CUDA (full-res, 2 nodes) -----
+    if pipeline_runner is not None:
+        actual_pipe, timings = _run_cuda_pipeline(
+            pipeline_runner, work, "synth_pipe",
+            hdr, weights, args.prior,
+            args.warmup, args.iters,
+        )
+        diff_pipe = np.abs(actual_pipe - expected)
+        _, torch_ms = _torch_time_controller(
+            ctrl, hdr, args.prior, args.warmup, args.iters,
+        )
+
+        print(f"  pipeline CUDA (full-res, 2 nodes) vs torch:")
+        print(f"    max abs diff: {diff_pipe.max():.6g}  PSNR: {_psnr(actual_pipe, expected):.2f} dB")
+        print(f"  timings (avg over {args.iters} iters):")
+        for k in ("pixel_cnn", "pool_mlp", "total"):
+            if k in timings:
+                print(f"    cuda {k:<10s} {timings[k]:8.3f} ms")
+        print(f"    torch (GPU)        {torch_ms:8.3f} ms")
+        if torch_ms == torch_ms and "total" in timings and timings["total"] > 0:
+            print(f"    speedup vs torch:   {torch_ms / timings['total']:.2f}x")
+
+        return 0 if diff_pipe.max() <= args.tol else 1
+
+    return 0 if diff_single.max() <= args.tol else 1
 
 
-def _validate_checkpoint(args, work: Path, runner: Path) -> int:
+def _validate_checkpoint(args, work: Path, runner: Path,
+                         pipeline_runner: Path | None) -> int:
     """Mirror validate_trained.py's controller-drift section, but CUDA-side."""
     import torch
     from threedgrut.render import Renderer  # noqa: E402
@@ -319,11 +447,27 @@ def _validate_checkpoint(args, work: Path, runner: Path) -> int:
     )
 
     seen_cams: set[int] = set()
-    rows: List[Tuple[int, str, np.ndarray, np.ndarray, float]] = []
-    max_diff = 0.0
+
+    @dataclasses.dataclass
+    class _Row:
+        cam_idx: int
+        name: str
+        hw: tuple[int, int]
+        max_diff_single: float
+        psnr_single: float
+        max_diff_pipe: float | None = None
+        psnr_pipe: float | None = None
+        cuda_total_ms: float | None = None
+        cuda_cnn_ms: float | None = None
+        cuda_mlp_ms: float | None = None
+        torch_ms: float | None = None
+
+    rows: List[_Row] = []
 
     print(f"[checkpoint {args.checkpoint}]")
     print(f"  cameras: {len(cam_names)}, max-frames-per-camera={args.max_frames}")
+    if pipeline_runner is not None:
+        print(f"  pipeline mode: warmup={args.warmup}, iters={args.iters}")
 
     for frame_idx, batch in enumerate(val_dataloader):
         cam_idx = (val_dataset.get_camera_idx(frame_idx)
@@ -340,16 +484,40 @@ def _validate_checkpoint(args, work: Path, runner: Path) -> int:
             gt = gpu_batch.rgb_gt
             hdr_t = gt[0] if gt.dim() == 4 else gt
         hdr_np = hdr_t.detach().cpu().numpy().astype(np.float32)
+        H, W = hdr_np.shape[:2]
 
         ctrl = controllers[cam_idx]
         torch_out = _torch_reference(ctrl, hdr_np, prior_exposure=0.0)
         weights   = flatten_controller_weights(ctrl)
+
+        # Single-kernel CUDA (correctness baseline).
         cuda_out  = _run_cuda_controller(runner, work, f"cam{cam_idx}_f{frame_idx}",
                                          hdr_np, weights, prior_exposure=0.0)
-        diff      = np.abs(cuda_out - torch_out)
-        rows.append((cam_idx, cam_names[cam_idx] if cam_idx < len(cam_names) else f"cam_{cam_idx}",
-                     torch_out, cuda_out, float(diff.max())))
-        max_diff = max(max_diff, float(diff.max()))
+        diff_single = np.abs(cuda_out - torch_out)
+        row = _Row(
+            cam_idx=cam_idx,
+            name=cam_names[cam_idx] if cam_idx < len(cam_names) else f"cam_{cam_idx}",
+            hw=(H, W),
+            max_diff_single=float(diff_single.max()),
+            psnr_single=_psnr(cuda_out, torch_out),
+        )
+
+        # 2-stage pipeline + timing.
+        if pipeline_runner is not None:
+            cuda_pipe_out, timings = _run_cuda_pipeline(
+                pipeline_runner, work, f"pipe_cam{cam_idx}_f{frame_idx}",
+                hdr_np, weights, prior_exposure=0.0,
+                warmup=args.warmup, iters=args.iters,
+            )
+            row.max_diff_pipe = float(np.abs(cuda_pipe_out - torch_out).max())
+            row.psnr_pipe     = _psnr(cuda_pipe_out, torch_out)
+            row.cuda_total_ms = timings.get("total")
+            row.cuda_cnn_ms   = timings.get("pixel_cnn")
+            row.cuda_mlp_ms   = timings.get("pool_mlp")
+            _, row.torch_ms   = _torch_time_controller(
+                ctrl, hdr_np, 0.0, args.warmup, args.iters)
+
+        rows.append(row)
         seen_cams.add(cam_idx)
         if args.max_frames is not None and len(seen_cams) >= args.max_frames:
             break
@@ -357,14 +525,33 @@ def _validate_checkpoint(args, work: Path, runner: Path) -> int:
     if not rows:
         raise SystemExit("No validation frames produced.")
 
-    # Print one row per camera.
-    print(f"  {'cam':>4s} {'name':<24s} {'max|Δ|':>10s}  torch[0..3] -> cuda[0..3]")
-    for cam_idx, name, torch_out, cuda_out, mxd in rows:
-        print(f"  {cam_idx:4d} {name:<24s} {mxd:10.4g}  "
-              f"[{torch_out[0]:+.4f},{torch_out[1]:+.4f},{torch_out[2]:+.4f}] -> "
-              f"[{cuda_out[0]:+.4f},{cuda_out[1]:+.4f},{cuda_out[2]:+.4f}]")
-    print(f"  overall max abs diff = {max_diff:.6g} (tol={args.tol})")
-    return 0 if max_diff <= args.tol else 1
+    # Correctness summary.
+    print()
+    print(f"  {'cam':>4s} {'name':<24s} {'HxW':>11s} {'single max|Δ|':>14s} {'PSNR single':>12s}")
+    for r in rows:
+        hw = f"{r.hw[0]}x{r.hw[1]}"
+        print(f"  {r.cam_idx:4d} {r.name:<24s} {hw:>11s} {r.max_diff_single:14.4g} {r.psnr_single:12.2f}")
+
+    if pipeline_runner is not None and any(r.max_diff_pipe is not None for r in rows):
+        print()
+        print(f"  pipeline timing + correctness (avg over {args.iters} iters):")
+        print(f"  {'cam':>4s} {'name':<24s} {'pipe max|Δ|':>12s} {'PSNR pipe':>10s}  "
+              f"{'cnn':>8s} {'mlp':>8s} {'total':>8s}  "
+              f"{'torch':>8s}  {'speedup':>8s}")
+        for r in rows:
+            if r.max_diff_pipe is None:
+                continue
+            sp = (r.torch_ms / r.cuda_total_ms) if (r.cuda_total_ms and r.torch_ms) else float("nan")
+            print(
+                f"  {r.cam_idx:4d} {r.name:<24s} "
+                f"{r.max_diff_pipe:12.4g} {r.psnr_pipe:10.2f}  "
+                f"{r.cuda_cnn_ms:8.3f} {r.cuda_mlp_ms:8.3f} {r.cuda_total_ms:8.3f}  "
+                f"{r.torch_ms:8.3f}  {sp:7.2f}x"
+            )
+
+    overall_max = max(r.max_diff_single for r in rows)
+    print(f"  overall single-kernel max abs diff = {overall_max:.6g} (tol={args.tol})")
+    return 0 if overall_max <= args.tol else 1
 
 
 def main(argv=None) -> int:
@@ -386,6 +573,14 @@ def main(argv=None) -> int:
                         help="Override the dataset path stored in the checkpoint.")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="In --checkpoint mode, max distinct cameras to test.")
+    parser.add_argument("--pipeline", action="store_true",
+                        help="Also exercise the 2-kernel pipeline (pixel CNN + "
+                             "pool/MLP, full input resolution) and report per-stage "
+                             "timing + PSNR vs torch.")
+    parser.add_argument("--warmup", type=int, default=2,
+                        help="Pipeline warm-up iterations before timing.")
+    parser.add_argument("--iters", type=int, default=10,
+                        help="Pipeline iterations to time-average.")
     parser.add_argument("--keep-tmp", action="store_true",
                         help="Keep the working directory after the run.")
     parser.add_argument("--verbose", "-v", action="count", default=0)
@@ -395,10 +590,17 @@ def main(argv=None) -> int:
 
     work = Path(tempfile.mkdtemp(prefix="ppisp_cuda_val_"))
     try:
-        runner = _build_runner(work, sm_arch=args.sm_arch, verbose=args.verbose >= 2)
+        runner = _build_runner(work, RUNNER_CU, "controller_runner",
+                               sm_arch=args.sm_arch, verbose=args.verbose >= 2)
+        pipeline_runner = None
+        if args.pipeline:
+            pipeline_runner = _build_runner(
+                work, PIPELINE_RUNNER_CU, "controller_pipeline_runner",
+                sm_arch=args.sm_arch, verbose=args.verbose >= 2,
+            )
         if args.checkpoint is not None:
-            return _validate_checkpoint(args, work, runner)
-        return _validate_synthetic(args, work, runner)
+            return _validate_checkpoint(args, work, runner, pipeline_runner)
+        return _validate_synthetic(args, work, runner, pipeline_runner)
     finally:
         if args.keep_tmp:
             print(f"  (kept tmp at {work})")

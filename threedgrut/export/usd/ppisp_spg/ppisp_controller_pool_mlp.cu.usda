@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    defaultPrim = "CudaPPISPControllerPoolMlp"
+)
+
+def Shader "CudaPPISPControllerPoolMlp"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:spg:sourceAsset = @ppisp_controller_pool_mlp.cu@
+    uniform token info:spg:sourceAsset:subIdentifier = "poolMlpProcess"
+
+    # Optional EXIF-derived prior exposure (defaults to zero -> matches
+    # training-time inference).
+    float inputs:priorExposure = 0.0
+
+    # Trained controller weights (full buffer; this node only reads the
+    # trunk/heads suffix). Authored per camera.
+    float[] inputs:weights = []
+
+    # HdrColor is wired through to this stage so the lua can recover the
+    # (dsW, dsH) of the pixel-feature buffer without an extra parameter.
+    opaque inputs:HdrColor
+    opaque inputs:PixelFeatures
+    opaque outputs:ControllerParams
+}

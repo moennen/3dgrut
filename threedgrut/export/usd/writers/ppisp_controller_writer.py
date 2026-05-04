@@ -64,11 +64,15 @@ WEIGHTS_INPUT = "weights"
 # ``Failed to find parameter 'params:weights' in shader reflection``.
 # Stick with the slang backend only for slangpy/standalone validation, and
 # use ``backend="cuda"`` for any export consumed by Kit/Omniverse.
-CONTROLLER_BACKEND_CUDA = "cuda"
-CONTROLLER_BACKEND_SLANG = "slang"
-CONTROLLER_DEFAULT_BACKEND = CONTROLLER_BACKEND_CUDA
+CONTROLLER_BACKEND_CUDA          = "cuda"
+CONTROLLER_BACKEND_CUDA_PIPELINE = "cuda-pipeline"
+CONTROLLER_BACKEND_SLANG         = "slang"
+CONTROLLER_DEFAULT_BACKEND       = CONTROLLER_BACKEND_CUDA_PIPELINE
 
-# Per-backend sidecar / source file names.
+# Per-backend sidecar / source file names. The cuda-pipeline backend
+# spans two SPG nodes; ``files["nodes"]`` lists the (source, lua, usda)
+# triples in execution order. The single-node backends still expose
+# ``files["source"]/["lua"]/["usda"]`` for backward compatibility.
 _BACKEND_FILES = {
     CONTROLLER_BACKEND_CUDA: {
         "source": "ppisp_controller.cu",
@@ -79,6 +83,28 @@ _BACKEND_FILES = {
         "source": "ppisp_controller.slang",
         "lua":    "ppisp_controller.slang.lua",
         "usda":   "ppisp_controller.slang.usda",
+    },
+    CONTROLLER_BACKEND_CUDA_PIPELINE: {
+        # Pixel-CNN node: HdrColor -> PixelFeatures buffer
+        "nodes": [
+            {
+                "source":         "ppisp_controller_pixel_cnn.cu",
+                "lua":            "ppisp_controller_pixel_cnn.cu.lua",
+                "usda":           "ppisp_controller_pixel_cnn.cu.usda",
+                "subIdentifier":  "pixelCnnProcess",
+                "prim_suffix":    "PixelCnn",
+                "output_port":    "PixelFeatures",
+            },
+            # Pool/MLP node: PixelFeatures + HdrColor -> ControllerParams
+            {
+                "source":         "ppisp_controller_pool_mlp.cu",
+                "lua":            "ppisp_controller_pool_mlp.cu.lua",
+                "usda":           "ppisp_controller_pool_mlp.cu.usda",
+                "subIdentifier":  "poolMlpProcess",
+                "prim_suffix":    "PoolMlp",
+                "output_port":    "ControllerParams",
+            },
+        ],
     },
 }
 
@@ -244,49 +270,15 @@ def flatten_controller_weights(controller) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def add_controller_shader_to_render_product(
+def _author_single_node_controller(
     stage: Usd.Stage,
     render_product_path: str,
     camera_index: int,
     controller,
-    *,
-    prior_exposure: float | None = None,
-    backend: str | None = None,
+    backend: str,
+    prior_exposure: float | None,
 ) -> UsdShade.Shader:
-    """Author the controller Shader prim and connect ``HdrColor`` → ``ControllerParams``.
-
-    ``backend`` selects the SPG implementation (``"cuda"`` -- default, or
-    ``"slang"`` for slangpy validation only; see the module-level
-    docstring for the slang-vs-cuda caveat).
-
-    Returns the created Shader so the caller can wire its output into the
-    PPISP shader. The PPISP shader is responsible for *consuming* the
-    output via its dynamic-controller binding.
-    """
-    backend = _resolve_backend(backend)
     files = _BACKEND_FILES[backend]
-    if backend == CONTROLLER_BACKEND_SLANG:
-        log.warning(
-            "PPISP controller exported with backend=slang for camera %d. "
-            "SPG's slang plugin cannot bind the 241,961-float `weights` USD "
-            "attribute to a StructuredBuffer<float>; Kit will log "
-            "\"Failed to find parameter 'params:weights' in shader reflection\" "
-            "and the controller runs against zero memory. Use backend=cuda "
-            "for production exports; only keep slang for slangpy/standalone "
-            "validation.",
-            camera_index,
-        )
-
-    render_product = stage.GetPrimAtPath(render_product_path)
-    if not render_product.IsValid():
-        raise ValueError(f"RenderProduct not found at path: {render_product_path}")
-
-    # Mark HdrColor RenderVar input as an opaque AOV (no connection needed here).
-    input_var_path = f"{render_product_path}/{CONTROLLER_INPUT_RENDER_VAR}"
-    input_var_prim = stage.GetPrimAtPath(input_var_path)
-    if input_var_prim.IsValid():
-        input_var_prim.CreateAttribute("omni:rtx:aov", Sdf.ValueTypeNames.Opaque, custom=False)
-
     shader_prim_name = f"PPISPController_{camera_index}"
     shader_path = f"{render_product_path}/{shader_prim_name}"
     shader = UsdShade.Shader.Define(stage, shader_path)
@@ -312,11 +304,130 @@ def add_controller_shader_to_render_product(
     weights = flatten_controller_weights(controller)
     weights_input = shader.CreateInput(WEIGHTS_INPUT, Sdf.ValueTypeNames.FloatArray)
     weights_input.Set(Vt.FloatArray.FromNumpy(weights))
+    return shader
 
-    # Route the controller output through a RenderVar with omni:rtx:aov, so
-    # SPG resolves it the same way it resolves HdrColor / LdrColor. Direct
-    # Shader -> Shader connections work in slangpy but Kit's runtime walks
-    # AOV connections, not arbitrary UsdShade outputs.
+
+def _author_pipeline_controller(
+    stage: Usd.Stage,
+    render_product_path: str,
+    camera_index: int,
+    controller,
+    prior_exposure: float | None,
+) -> UsdShade.Shader:
+    """Author the 2-node CUDA pipeline (pixel CNN + pool/MLP).
+
+    Returns the *final* shader (pool/MLP), whose output:ControllerParams
+    drives the downstream RenderVar wiring identically to the single-node
+    backends.
+    """
+    files = _BACKEND_FILES[CONTROLLER_BACKEND_CUDA_PIPELINE]
+    nodes = files["nodes"]
+    weights = flatten_controller_weights(controller)
+    weights_vt = Vt.FloatArray.FromNumpy(weights)
+
+    # Stage 1: pixel CNN.
+    cnn_node = nodes[0]
+    cnn_path = f"{render_product_path}/PPISPController{cnn_node['prim_suffix']}_{camera_index}"
+    cnn = UsdShade.Shader.Define(stage, cnn_path)
+    cnn.GetPrim().GetReferences().AddReference(cnn_node["usda"])
+    cnn.GetPrim().CreateAttribute(
+        "info:implementationSource", Sdf.ValueTypeNames.Token, custom=False
+    ).Set("sourceAsset")
+    cnn.GetPrim().CreateAttribute(
+        "info:spg:sourceAsset", Sdf.ValueTypeNames.Asset, custom=False
+    ).Set(Sdf.AssetPath(cnn_node["source"]))
+    cnn.GetPrim().CreateAttribute(
+        "info:spg:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token, custom=False
+    ).Set(cnn_node["subIdentifier"])
+
+    cnn_hdr = cnn.CreateInput(CONTROLLER_INPUT_RENDER_VAR, Sdf.ValueTypeNames.Opaque)
+    cnn_hdr.GetAttr().SetConnections([Sdf.Path(f"../{CONTROLLER_INPUT_RENDER_VAR}.omni:rtx:aov")])
+    cnn.CreateOutput(cnn_node["output_port"], Sdf.ValueTypeNames.Opaque)
+    cnn.CreateInput(WEIGHTS_INPUT, Sdf.ValueTypeNames.FloatArray).Set(weights_vt)
+
+    # Stage 2: pool / MLP.
+    mlp_node = nodes[1]
+    mlp_path = f"{render_product_path}/PPISPController{mlp_node['prim_suffix']}_{camera_index}"
+    mlp = UsdShade.Shader.Define(stage, mlp_path)
+    mlp.GetPrim().GetReferences().AddReference(mlp_node["usda"])
+    mlp.GetPrim().CreateAttribute(
+        "info:implementationSource", Sdf.ValueTypeNames.Token, custom=False
+    ).Set("sourceAsset")
+    mlp.GetPrim().CreateAttribute(
+        "info:spg:sourceAsset", Sdf.ValueTypeNames.Asset, custom=False
+    ).Set(Sdf.AssetPath(mlp_node["source"]))
+    mlp.GetPrim().CreateAttribute(
+        "info:spg:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token, custom=False
+    ).Set(mlp_node["subIdentifier"])
+
+    mlp_hdr = mlp.CreateInput(CONTROLLER_INPUT_RENDER_VAR, Sdf.ValueTypeNames.Opaque)
+    mlp_hdr.GetAttr().SetConnections([Sdf.Path(f"../{CONTROLLER_INPUT_RENDER_VAR}.omni:rtx:aov")])
+    mlp_features = mlp.CreateInput(cnn_node["output_port"], Sdf.ValueTypeNames.Opaque)
+    mlp_features.GetAttr().SetConnections([cnn.GetPath().AppendProperty(f"outputs:{cnn_node['output_port']}")])
+    mlp.CreateOutput(CONTROLLER_OUTPUT_NAME, Sdf.ValueTypeNames.Opaque)
+    mlp.CreateInput(PRIOR_EXPOSURE_INPUT, Sdf.ValueTypeNames.Float).Set(float(prior_exposure or 0.0))
+    mlp.CreateInput(WEIGHTS_INPUT, Sdf.ValueTypeNames.FloatArray).Set(weights_vt)
+
+    return mlp
+
+
+def add_controller_shader_to_render_product(
+    stage: Usd.Stage,
+    render_product_path: str,
+    camera_index: int,
+    controller,
+    *,
+    prior_exposure: float | None = None,
+    backend: str | None = None,
+) -> UsdShade.Shader:
+    """Author the controller Shader prim(s) and connect HdrColor → ControllerParams.
+
+    ``backend`` selects the SPG implementation (``"cuda-pipeline"`` --
+    default, ``"cuda"`` -- single-kernel fallback, or ``"slang"`` --
+    slangpy validation only; see the module-level docstring for the
+    slang caveat).
+
+    For multi-node backends the returned Shader is the *final* prim of
+    the pipeline (the one whose ``outputs:ControllerParams`` the caller
+    will wire downstream).
+    """
+    backend = _resolve_backend(backend)
+    if backend == CONTROLLER_BACKEND_SLANG:
+        log.warning(
+            "PPISP controller exported with backend=slang for camera %d. "
+            "SPG's slang plugin cannot bind the 241,961-float `weights` USD "
+            "attribute to a StructuredBuffer<float>; Kit will log "
+            "\"Failed to find parameter 'params:weights' in shader reflection\" "
+            "and the controller runs against zero memory. Use backend=cuda "
+            "(or cuda-pipeline, the default) for production exports; only "
+            "keep slang for slangpy/standalone validation.",
+            camera_index,
+        )
+
+    render_product = stage.GetPrimAtPath(render_product_path)
+    if not render_product.IsValid():
+        raise ValueError(f"RenderProduct not found at path: {render_product_path}")
+
+    # Mark HdrColor RenderVar input as an opaque AOV (no connection needed here).
+    input_var_path = f"{render_product_path}/{CONTROLLER_INPUT_RENDER_VAR}"
+    input_var_prim = stage.GetPrimAtPath(input_var_path)
+    if input_var_prim.IsValid():
+        input_var_prim.CreateAttribute("omni:rtx:aov", Sdf.ValueTypeNames.Opaque, custom=False)
+
+    if backend == CONTROLLER_BACKEND_CUDA_PIPELINE:
+        shader = _author_pipeline_controller(
+            stage, render_product_path, camera_index, controller, prior_exposure,
+        )
+    else:
+        shader = _author_single_node_controller(
+            stage, render_product_path, camera_index, controller, backend, prior_exposure,
+        )
+
+    # Route the final controller output through a RenderVar with
+    # omni:rtx:aov, so SPG resolves it the same way it resolves
+    # HdrColor / LdrColor. Direct Shader -> Shader connections work in
+    # slangpy but Kit's runtime walks AOV connections, not arbitrary
+    # UsdShade outputs.
     var_path = f"{render_product_path}/{CONTROLLER_OUTPUT_NAME}"
     render_var = stage.DefinePrim(var_path, "RenderVar")
     render_var.CreateAttribute("sourceName", Sdf.ValueTypeNames.String).Set(CONTROLLER_OUTPUT_NAME)
@@ -337,9 +448,8 @@ def add_controller_shader_to_render_product(
             ordered_vars_rel.SetTargets(targets)
 
     log.debug(
-        "Authored PPISP controller shader at %s (camera %d, %d weights), "
-        "AOV RenderVar at %s",
-        shader_path, camera_index, weights.size, var_path,
+        "Authored PPISP controller (backend=%s) at camera %d, RenderVar at %s",
+        backend, camera_index, var_path,
     )
     return shader
 
@@ -361,9 +471,19 @@ def get_controller_sidecars(backend: str | None = None) -> List[NamedSerialized]
     from threedgrut.export.usd.ppisp_spg import _SPG_DIR
     backend = _resolve_backend(backend)
     files = _BACKEND_FILES[backend]
-    filenames = [files["source"], files["lua"], files["usda"]]
+    if "nodes" in files:
+        # Multi-node backend (cuda-pipeline): collect every node's trio.
+        filenames: List[str] = []
+        for node in files["nodes"]:
+            filenames += [node["source"], node["lua"], node["usda"]]
+    else:
+        filenames = [files["source"], files["lua"], files["usda"]]
     out: List[NamedSerialized] = []
+    seen: set[str] = set()
     for name in filenames:
+        if name in seen:
+            continue
+        seen.add(name)
         path = _SPG_DIR / name
         if path.exists():
             out.append(NamedSerialized(filename=name, serialized=path.read_bytes()))
