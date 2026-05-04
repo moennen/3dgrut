@@ -179,6 +179,17 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--ppisp-backend",
+        type=str,
+        choices=["cuda", "slang"],
+        default=None,
+        help=(
+            "SPG implementation for the per-pixel PPISP shader (vignette + colour + CRF). "
+            "'cuda' (default) routes through SPG's CUDA plugin. 'slang' uses the original "
+            "slang shader, which currently fails reflection for resource names in Kit."
+        ),
+    )
+    parser.add_argument(
         "--post-processing-bake-epochs",
         type=int,
         default=None,
@@ -459,6 +470,13 @@ def main():
                 export_conf,
                 "ppisp-controller-backend",
                 "ppisp_controller_backend",
+                None,
+            ),
+            ppisp_backend=_arg_or_conf(
+                args.ppisp_backend,
+                export_conf,
+                "ppisp-backend",
+                "ppisp_backend",
                 None,
             ),
             post_processing_bake_epochs=_arg_or_conf(

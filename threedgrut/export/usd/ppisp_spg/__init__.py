@@ -34,10 +34,15 @@ _SPG_STATIC_FILES = [
     "ppisp_usd_spg.slang.lua",
     "ppisp_usd_spg.slang.usda",
 ]
-_SPG_DYN_FILES = [
+_SPG_DYN_SLANG_FILES = [
     "ppisp_usd_spg_dyn.slang",
     "ppisp_usd_spg_dyn.slang.lua",
     "ppisp_usd_spg_dyn.slang.usda",
+]
+_SPG_DYN_CUDA_FILES = [
+    "ppisp_usd_spg_dyn.cu",
+    "ppisp_usd_spg_dyn.cu.lua",
+    "ppisp_usd_spg_dyn.cu.usda",
 ]
 
 
@@ -58,10 +63,22 @@ def get_ppisp_spg_files() -> List[NamedSerialized]:
     return _load_files(_SPG_STATIC_FILES)
 
 
-def get_ppisp_spg_dyn_files() -> List[NamedSerialized]:
-    """Load controller-aware PPISP SPG sidecar files.
+def get_ppisp_spg_dyn_files(backend: str | None = None) -> List[NamedSerialized]:
+    """Load controller-aware PPISP SPG sidecar files for ``backend``.
 
-    These accompany the per-camera ``ppisp_controller_<n>.slang`` and read
-    ``exposureOffset`` and the colour latents from the controller output.
+    ``backend`` is ``"cuda"`` (default; mirrors the controller-side default
+    and works around a slang-resource-reflection bug we hit in current Kit)
+    or ``"slang"``.
+
+    Both variants accept the same parameter schema and read the controller
+    output texture identically -- the choice is purely about which SPG
+    plugin executes the per-pixel filter.
     """
-    return _load_files(_SPG_DYN_FILES)
+    backend = (backend or "cuda").lower()
+    if backend == "cuda":
+        return _load_files(_SPG_DYN_CUDA_FILES)
+    if backend == "slang":
+        return _load_files(_SPG_DYN_SLANG_FILES)
+    raise ValueError(
+        f"Unknown ppisp backend {backend!r}; expected 'cuda' or 'slang'"
+    )

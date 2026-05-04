@@ -50,6 +50,12 @@ PPISP_SPG_USDA_FILE = "ppisp_usd_spg.slang.usda"
 PPISP_SPG_SLANG_FILE = "ppisp_usd_spg.slang"
 PPISP_SPG_DYN_USDA_FILE = "ppisp_usd_spg_dyn.slang.usda"
 PPISP_SPG_DYN_SLANG_FILE = "ppisp_usd_spg_dyn.slang"
+PPISP_SPG_DYN_CUDA_USDA_FILE   = "ppisp_usd_spg_dyn.cu.usda"
+PPISP_SPG_DYN_CUDA_SOURCE_FILE = "ppisp_usd_spg_dyn.cu"
+
+PPISP_BACKEND_CUDA  = "cuda"
+PPISP_BACKEND_SLANG = "slang"
+PPISP_DEFAULT_BACKEND = PPISP_BACKEND_CUDA
 PPISP_INPUT_RENDER_VAR = "HdrColor"
 PPISP_CONTROLLER_INPUT = "ControllerParams"
 PPISP_OUTPUT_RENDER_VAR = "PPISPColor"
@@ -118,6 +124,7 @@ def _create_shader_prim(
     render_product_path: str,
     *,
     controller_shader: UsdShade.Shader | None = None,
+    ppisp_backend: str | None = None,
 ) -> UsdShade.Shader:
     """Create the PPISP Shader prim on a RenderProduct.
 
@@ -138,8 +145,24 @@ def _create_shader_prim(
         raise ValueError(f"RenderProduct not found at path: {render_product_path}")
 
     use_dynamic = controller_shader is not None
-    usda_file = PPISP_SPG_DYN_USDA_FILE if use_dynamic else PPISP_SPG_USDA_FILE
-    slang_file = PPISP_SPG_DYN_SLANG_FILE if use_dynamic else PPISP_SPG_SLANG_FILE
+    if use_dynamic:
+        backend = (ppisp_backend or PPISP_DEFAULT_BACKEND).lower()
+        if backend == PPISP_BACKEND_CUDA:
+            usda_file  = PPISP_SPG_DYN_CUDA_USDA_FILE
+            slang_file = PPISP_SPG_DYN_CUDA_SOURCE_FILE
+        elif backend == PPISP_BACKEND_SLANG:
+            usda_file  = PPISP_SPG_DYN_USDA_FILE
+            slang_file = PPISP_SPG_DYN_SLANG_FILE
+        else:
+            raise ValueError(
+                f"Unknown ppisp backend {ppisp_backend!r}; expected "
+                f"{PPISP_BACKEND_CUDA!r} or {PPISP_BACKEND_SLANG!r}"
+            )
+    else:
+        # Static (controller-free) path is slang-only -- it has no buffer
+        # binding issues and there's no immediate motivation to port it.
+        usda_file  = PPISP_SPG_USDA_FILE
+        slang_file = PPISP_SPG_SLANG_FILE
     sub_identifier = "ppispProcessDyn" if use_dynamic else "ppispProcess"
 
     # Mark HdrColor RenderVar input as an opaque AOV (no connection needed here)
@@ -337,6 +360,7 @@ def add_ppisp_shader_to_render_product(
     frame_indices: List[int],
     fixed_frame_index: int | None = None,
     controller_shader: UsdShade.Shader | None = None,
+    ppisp_backend: str | None = None,
 ) -> Usd.Prim:
     """Add a PPISP Shader to a RenderProduct for one physical camera.
 
@@ -368,7 +392,11 @@ def add_ppisp_shader_to_render_product(
         log.warning(f"No frames for camera {camera_index} at {render_product_path}, skipping")
         return stage.GetPseudoRoot()
 
-    shader = _create_shader_prim(stage, render_product_path, controller_shader=controller_shader)
+    shader = _create_shader_prim(
+        stage, render_product_path,
+        controller_shader=controller_shader,
+        ppisp_backend=ppisp_backend,
+    )
     _set_vignetting_params(shader, ppisp, camera_index)
     _set_crf_params(shader, ppisp, camera_index)
     if controller_shader is not None:
@@ -440,6 +468,7 @@ def add_ppisp_to_all_render_products(
     fixed_frame_index: int | None = None,
     use_controller: bool = False,
     controller_backend: str | None = None,
+    ppisp_backend: str | None = None,
 ) -> List[Usd.Prim]:
     """Add PPISP shaders to every RenderProduct in the Render scope.
 
@@ -530,6 +559,7 @@ def add_ppisp_to_all_render_products(
             frame_indices=frame_indices,
             fixed_frame_index=fixed_frame_index,
             controller_shader=controller_shader,
+            ppisp_backend=ppisp_backend,
         )
         created.append(shader_prim)
 

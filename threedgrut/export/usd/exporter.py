@@ -281,6 +281,7 @@ class USDExporter(ModelExporter):
         post_processing_export_frame_id: int | None = None,
         ignore_ppisp_controller: bool = False,
         ppisp_controller_backend: str | None = None,
+        ppisp_backend: str | None = None,
         post_processing_bake_epochs: int = 1,
         post_processing_bake_learning_rate: float = 1.0e-3,
         post_processing_bake_camera_id: int = 0,
@@ -320,6 +321,11 @@ class USDExporter(ModelExporter):
                 ``"cuda"`` (default) or ``"slang"``. The slang variant is
                 currently unusable in Kit because SPG can't bind the weight
                 buffer; keep it only for slangpy/standalone validation.
+            ppisp_backend: SPG implementation for the per-pixel PPISP
+                shader (vignette + colour + CRF). ``"cuda"`` (default)
+                or ``"slang"``. The slang variant has been hitting an
+                empty-resource-name reflection failure in current Kit;
+                CUDA is the safe path.
             post_processing_export_frame_id: Optional PPISP frame index to write
                 as static exposure/color inputs in omni-native mode.
             post_processing_bake_epochs: Number of sequential passes over the train/reference set.
@@ -365,6 +371,9 @@ class USDExporter(ModelExporter):
         self.ignore_ppisp_controller = bool(ignore_ppisp_controller)
         self.ppisp_controller_backend = (
             None if ppisp_controller_backend is None else str(ppisp_controller_backend)
+        )
+        self.ppisp_backend = (
+            None if ppisp_backend is None else str(ppisp_backend)
         )
         self.post_processing_bake_epochs = int(post_processing_bake_epochs)
         self.post_processing_bake_learning_rate = float(post_processing_bake_learning_rate)
@@ -775,13 +784,14 @@ class USDExporter(ModelExporter):
                 fixed_frame_index=fixed_frame_id,
                 use_controller=use_controller,
                 controller_backend=self.ppisp_controller_backend,
+                ppisp_backend=self.ppisp_backend,
             )
         except Exception as e:
             logger.warning(f"Failed to add PPISP shaders: {e}")
             return
 
         if use_controller:
-            spg_files = list(get_ppisp_spg_dyn_files())
+            spg_files = list(get_ppisp_spg_dyn_files(self.ppisp_backend))
             from threedgrut.export.usd.writers.ppisp_controller_writer import (
                 get_controller_sidecars,
             )
@@ -855,6 +865,12 @@ class USDExporter(ModelExporter):
                 export_conf,
                 "ppisp-controller-backend",
                 "ppisp_controller_backend",
+                None,
+            ),
+            ppisp_backend=_get_export_config_value(
+                export_conf,
+                "ppisp-backend",
+                "ppisp_backend",
                 None,
             ),
             post_processing_bake_epochs=_get_export_config_value(
