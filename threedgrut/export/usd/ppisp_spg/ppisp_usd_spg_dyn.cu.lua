@@ -21,9 +21,16 @@ function ppispProcessDyn(inputs, outputs, params)
     -- uchar4 surface (matches the slang variant's slang.uchar4 output).
     outputs["PPISPColor"] = cuda.image(width, height, cuda.uchar4)
 
+    -- USD vector params (float2 etc.) MUST come through cuda.array(...) so
+    -- SPG packs them as a const T* device pointer; cuda.float2(...) is
+    -- the scalar by-value path (only the first float gets marshalled,
+    -- the rest is garbage memory once the kernel dereferences as a
+    -- pointer -> cudaErrorIllegalAddress). See kit-galois
+    -- AllTypesTest.cu.lua and SpgCudaNodePlugin.cpp:appendParameterArgument.
     local function vec2(name)
         local p = params[name]
-        return p and cuda.float2(p) or cuda.float2(0.0, 0.0)
+        assert(p, "ppispProcessDyn: missing required vector param '" .. name .. "'")
+        return cuda.array(p, cuda.float)
     end
 
     return cuda.kernel({
