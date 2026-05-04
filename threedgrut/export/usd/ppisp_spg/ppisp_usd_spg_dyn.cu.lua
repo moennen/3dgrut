@@ -29,7 +29,7 @@ function ppispProcessDyn(inputs, outputs, params)
     -- AllTypesTest.cu.lua and SpgCudaNodePlugin.cpp:appendParameterArgument.
     local function vec2(name)
         local p = params[name]
-        assert(p, "ppispProcessDyn: missing required vector param '" .. name .. "'")
+        assert(p, "ppispProcessDyn: missing vector param '" .. name .. "'")
         return cuda.array(p, cuda.float)
     end
 
