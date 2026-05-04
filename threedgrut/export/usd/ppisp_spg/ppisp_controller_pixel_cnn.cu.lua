@@ -23,9 +23,15 @@ function pixelCnnProcess(inputs, outputs, params)
     local dsH = math.max(1, math.floor(inH / INPUT_DOWNSAMPLING))
     local dsW = math.max(1, math.floor(inW / INPUT_DOWNSAMPLING))
 
-    -- 1D buffer holding [dy * dsW + dx][c]. The next node sees a flat
-    -- float buffer through cuda.array().
-    outputs["PixelFeatures"] = cuda.empty({ dsH * dsW * CNN_FEATURE_DIM }, cuda.float)
+    -- The next node consumes this through cuda.array() (flat float
+    -- buffer of dsH*dsW*64 elements). We *declare* the shape as 2D
+    -- {dsH, dsW * 64} so SPG's auto-derived grid stays inside CUDA's
+    -- 65535 limit. SPG ignores the lua's block/grid hints and pulls
+    -- launch dims from outputs.front().desc.shape; a 1D shape of
+    -- dsH*dsW*64 elements would produce grid.y = millions and the
+    -- launch would fail with CUDA_ERROR_INVALID_VALUE.
+    outputs["PixelFeatures"] = cuda.empty(
+        { dsH, dsW * CNN_FEATURE_DIM }, cuda.float)
 
     return cuda.kernel({
         args = {

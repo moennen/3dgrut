@@ -60,8 +60,14 @@ extern "C" __global__ void poolMlpProcess(
     __shared__ float gsHiddenA[MLP_HIDDEN_DIM];    //  128 floats =  0.5 KB
     __shared__ float gsHiddenB[MLP_HIDDEN_DIM];    //  128 floats =  0.5 KB
 
-    const int tid = threadIdx.x;
-    const int nthreads = blockDim.x;
+    // Linearize the thread index across all of blockDim. SPG ignores the
+    // lua's block hint and auto-derives launch dims from the output
+    // shape -- for our 1x9 output that gives a (16, 16, 1) block, so
+    // we cannot rely on threadIdx.x being the only varying axis.
+    const int tid = threadIdx.z * blockDim.y * blockDim.x
+                  + threadIdx.y * blockDim.x
+                  + threadIdx.x;
+    const int nthreads = blockDim.x * blockDim.y * blockDim.z;
 
     // Stage B: AdaptiveAvgPool2d -> Flatten (channel-major).
     //
