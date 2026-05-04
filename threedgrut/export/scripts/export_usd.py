@@ -167,6 +167,18 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--ppisp-controller-backend",
+        type=str,
+        choices=["cuda-pipeline", "cuda", "slang"],
+        default=None,
+        help=(
+            "SPG implementation for the PPISP controller. 'cuda-pipeline' (default) "
+            "splits the controller into 2 SPG nodes for full-GPU saturation. 'cuda' "
+            "uses a single-kernel implementation (slower but simpler). 'slang' is "
+            "for slangpy validation only -- SPG can't bind the weight buffer in Kit."
+        ),
+    )
+    parser.add_argument(
         "--post-processing-bake-epochs",
         type=int,
         default=None,
@@ -442,6 +454,13 @@ def main():
                 None,
             ),
             ignore_ppisp_controller=args.ignore_ppisp_controller,
+            ppisp_controller_backend=_arg_or_conf(
+                args.ppisp_controller_backend,
+                export_conf,
+                "ppisp-controller-backend",
+                "ppisp_controller_backend",
+                None,
+            ),
             post_processing_bake_epochs=_arg_or_conf(
                 args.post_processing_bake_epochs,
                 export_conf,
