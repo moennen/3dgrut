@@ -33,6 +33,7 @@ CAP_MAX=1000000
 DATA_ROOT=/mnt/gogn/data/nerf_datasets/nerf_360
 RESULT_ROOT=results/nht_gsplat_parity
 GSPLAT_REPO=/mnt/dev/neural-harmonic-textures
+GSPLAT_TORCH_CUDA_ARCH_LIST=8.9
 ```
 
 For 3dgrut-only A/B rows, pass Hydra overrides after the script name:
@@ -44,6 +45,14 @@ MODE=3dgrut EXP_ID=e01_knn_init_scale \
 ```
 
 Each run writes `summary.json`, command files, train logs, render logs, and metrics under `results/nht_gsplat_parity/<EXP_ID>/`.
+
+The gsplat reference runner sets an explicit CUDA build environment for correctness and reproducibility:
+
+- `CUDA_HOME` defaults to the active conda/micromamba prefix when available.
+- CUDA headers are added through `CPATH` and `CPLUS_INCLUDE_PATH`.
+- CUDA libraries are added through `LIBRARY_PATH` and `LD_LIBRARY_PATH`.
+- `TORCH_CUDA_ARCH_LIST` defaults to native Ada `8.9`, override with `GSPLAT_TORCH_CUDA_ARCH_LIST`.
+- `TORCH_EXTENSIONS_DIR` defaults to `results/nht_gsplat_parity/.torch_extensions_gsplat` to avoid stale global JIT artifacts.
 
 ## Known Reference Points
 
@@ -77,7 +86,7 @@ Run one change at a time against the same 7K bonsai baseline. Record raw PSNR/SS
 
 | Exp | Difference IDs | Change | Iterations | Expected Signal | Status | Result |
 | --- | --- | --- | ---: | --- | --- | --- |
-| E00 | Baseline | Current 3dgrut NHT bonsai config and gsplat NHT reference, both at 7K iterations. | 7K | Establish local comparison points. | Ready | TBD |
+| E00 | Baseline | Current 3dgrut NHT bonsai config and gsplat NHT reference, both at 7K iterations. | 7K | Establish local comparison points. | Done | 3dgrut: 29.3969 / 0.9181 / 0.3121 / 8.77 ms. gsplat: 30.9817 / 0.9322 / 0.2800 / 9.43 ms. |
 | E01 | D03 | Set `initialization.use_observation_points=false` to use SFM KNN scale. | 7K | Tests whether initial scale explains early accuracy gap. | Not run | TBD |
 | E02 | D02 | Keep raw coordinates, but scale configured position LR and final LR by `1.28054 / 4.12053 ~= 0.311`. | 7K | Isolates effective scene-scale LR and MCMC-noise mismatch. | Not run | TBD |
 | E03 | D01, D02 | Apply reference world normalization to dataset poses and COLMAP init points; use reference scene scale. | 7K | Tests full coordinate-system parity. | Not run | TBD |
@@ -92,7 +101,8 @@ Use this table to append completed A/B results.
 
 | Date | Exp | Commit | Command/Config | PSNR | SSIM | LPIPS | Frame Time | Notes |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| TBD | E00 | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| 2026-06-07 | E00 | `14bd2907` | 3dgrut: `MODE=all` initial run, gsplat rerun after env fix: `MODE=gsplat ALLOW_EXISTING=1 MAX_STEPS=7000 FEATURE_DIM=48 CAP_MAX=1000000` | 29.3969 | 0.9181 | 0.3121 | 8.77 ms | 3dgrut current baseline. Metrics: `results/nht_gsplat_parity/e00_reference/3dgrut_current/bonsai/eval/bonsai/bonsai-0706_104953/metrics.json`. |
+| 2026-06-07 | E00 | `14bd2907` | `MODE=gsplat ALLOW_EXISTING=1 MAX_STEPS=7000 FEATURE_DIM=48 CAP_MAX=1000000 GSPLAT_TORCH_CUDA_ARCH_LIST=8.9` | 30.9817 | 0.9322 | 0.2800 | 9.43 ms | gsplat reference at step 6999, 1M Gaussians, color refinement from step 4000. Metrics: `results/nht_gsplat_parity/e00_reference/gsplat_reference/stats/val_step6999.json`. |
 
 ## Testing Rules
 
