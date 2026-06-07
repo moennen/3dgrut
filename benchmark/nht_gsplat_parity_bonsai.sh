@@ -15,6 +15,7 @@ RESULT_ROOT=${RESULT_ROOT:-results/nht_gsplat_parity}
 CONFIG=${CONFIG:-apps/colmap_3dgut_mcmc_nht}
 ALLOW_EXISTING=${ALLOW_EXISTING:-0}
 PYTHON=${PYTHON:-python}
+GSPLAT_TORCH_CUDA_ARCH_LIST=${GSPLAT_TORCH_CUDA_ARCH_LIST:-8.9}
 NHT_FEATURES_BWD_LOCAL_GRAD_CUDA=${NHT_FEATURES_BWD_LOCAL_GRAD_CUDA:-1}
 THREEDGRUT_EXTRA_ARGS=("$@")
 
@@ -107,9 +108,37 @@ run_gsplat() {
         exit 1
     fi
 
+    local cuda_home="${CUDA_HOME:-${CONDA_PREFIX:-}}"
+    local cuda_include=""
+    local cuda_lib=""
+    if [[ -n "$cuda_home" ]]; then
+        if [[ -f "$cuda_home/targets/x86_64-linux/include/cuda_runtime.h" ]]; then
+            cuda_include="$cuda_home/targets/x86_64-linux/include"
+            cuda_lib="$cuda_home/targets/x86_64-linux/lib"
+        elif [[ -f "$cuda_home/include/cuda_runtime.h" ]]; then
+            cuda_include="$cuda_home/include"
+            cuda_lib="$cuda_home/lib64"
+        fi
+    fi
+    if [[ -z "$cuda_include" && -f /usr/local/cuda/targets/x86_64-linux/include/cuda_runtime.h ]]; then
+        cuda_home="/usr/local/cuda"
+        cuda_include="/usr/local/cuda/targets/x86_64-linux/include"
+        cuda_lib="/usr/local/cuda/targets/x86_64-linux/lib"
+    fi
+    if [[ -z "$cuda_include" ]]; then
+        echo "Could not find cuda_runtime.h. Set CUDA_HOME or activate an environment with CUDA headers." >&2
+        exit 1
+    fi
+
     local train_cmd=(
         env
         CUDA_VISIBLE_DEVICES="$GPU"
+        "CUDA_HOME=$cuda_home"
+        "CPATH=$cuda_include:${CPATH:-}"
+        "CPLUS_INCLUDE_PATH=$cuda_include:${CPLUS_INCLUDE_PATH:-}"
+        "LIBRARY_PATH=$cuda_lib:${LIBRARY_PATH:-}"
+        "LD_LIBRARY_PATH=$cuda_lib:${LD_LIBRARY_PATH:-}"
+        "TORCH_CUDA_ARCH_LIST=$GSPLAT_TORCH_CUDA_ARCH_LIST"
         "PYTHONPATH=$GSPLAT_REPO/gsplat:$GSPLAT_REPO:${PYTHONPATH:-}"
         "$PYTHON" "$trainer" default
         --disable_viewer
