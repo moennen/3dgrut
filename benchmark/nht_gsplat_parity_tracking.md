@@ -87,7 +87,7 @@ Run one change at a time against the same 7K bonsai baseline. Record raw PSNR/SS
 | Exp | Difference IDs | Change | Iterations | Expected Signal | Status | Result |
 | --- | --- | --- | ---: | --- | --- | --- |
 | E00 | Baseline | Current 3dgrut NHT bonsai config and gsplat NHT reference, both at 7K iterations. | 7K | Establish local comparison points. | Done | 3dgrut: 29.3969 / 0.9181 / 0.3121 / 8.77 ms. gsplat: 30.9817 / 0.9322 / 0.2800 / 9.43 ms. |
-| E01 | D03 | Set `initialization.use_observation_points=false` to use SFM KNN scale. | 7K | Tests whether initial scale explains early accuracy gap. | Not run | TBD |
+| E01 | D03 | Set `initialization.use_observation_points=false` to use SFM KNN scale. | 7K | Tests whether initial scale explains early accuracy gap. | Done | 3dgrut: 30.0035 / 0.9183 / 0.3054 / 9.19 ms. Improves E00 3dgrut by +0.6066 dB, still -0.9781 dB vs E00 gsplat. |
 | E02 | D02 | Keep raw coordinates, but scale configured position LR and final LR by `1.28054 / 4.12053 ~= 0.311`. | 7K | Isolates effective scene-scale LR and MCMC-noise mismatch. | Not run | TBD |
 | E03 | D01, D02 | Apply reference world normalization to dataset poses and COLMAP init points; use reference scene scale. | 7K | Tests full coordinate-system parity. | Not run | TBD |
 | E04 | D05 | Disable NHT half precision: `render.particle_feature_half=false`, `render.feature_output_half=false`. | 7K | Tests feature accumulation precision. | Not run | TBD |
@@ -103,6 +103,7 @@ Use this table to append completed A/B results.
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | 2026-06-07 | E00 | `14bd2907` | 3dgrut: `MODE=all` initial run, gsplat rerun after env fix: `MODE=gsplat ALLOW_EXISTING=1 MAX_STEPS=7000 FEATURE_DIM=48 CAP_MAX=1000000` | 29.3969 | 0.9181 | 0.3121 | 8.77 ms | 3dgrut current baseline. Metrics: `results/nht_gsplat_parity/e00_reference/3dgrut_current/bonsai/eval/bonsai/bonsai-0706_104953/metrics.json`. |
 | 2026-06-07 | E00 | `14bd2907` | `MODE=gsplat ALLOW_EXISTING=1 MAX_STEPS=7000 FEATURE_DIM=48 CAP_MAX=1000000 GSPLAT_TORCH_CUDA_ARCH_LIST=8.9` | 30.9817 | 0.9322 | 0.2800 | 9.43 ms | gsplat reference at step 6999, 1M Gaussians, color refinement from step 4000. Metrics: `results/nht_gsplat_parity/e00_reference/gsplat_reference/stats/val_step6999.json`. |
+| 2026-06-07 | E01 | `93bb6c3e` | `MODE=3dgrut EXP_ID=e01_knn_init_scale MAX_STEPS=7000 FEATURE_DIM=48 CAP_MAX=1000000 initialization.use_observation_points=false` | 30.0035 | 0.9183 | 0.3054 | 9.19 ms | KNN init scale improves PSNR by +0.6066 dB over E00 3dgrut, but first relocation jumps to 86.07%, suggesting a major initialization-scale change. Metrics: `results/nht_gsplat_parity/e01_knn_init_scale/3dgrut_current/bonsai/eval/bonsai/bonsai-0706_112446/metrics.json`. |
 
 ## Testing Rules
 
