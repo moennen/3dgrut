@@ -108,7 +108,10 @@ run_gsplat() {
     fi
 
     local train_cmd=(
-        env CUDA_VISIBLE_DEVICES="$GPU" "$PYTHON" "$trainer" default
+        env
+        CUDA_VISIBLE_DEVICES="$GPU"
+        "PYTHONPATH=$GSPLAT_REPO/gsplat:$GSPLAT_REPO:${PYTHONPATH:-}"
+        "$PYTHON" "$trainer" default
         --disable_viewer
         --disable_video
         --native_images_factor
