@@ -82,13 +82,13 @@ The gsplat reference runner sets an explicit CUDA build environment for correctn
 
 ## Planned A/B Experiments
 
-Run one change at a time against the same 7K bonsai baseline. Record raw PSNR/SSIM/LPIPS and frame time when available.
+Run cumulative alignment experiments against the same 7K bonsai scene. Each row after E00 keeps earlier accepted alignment knobs unless the row explicitly says it is isolated. Record raw PSNR/SSIM/LPIPS and frame time when available.
 
 | Exp | Difference IDs | Change | Iterations | Expected Signal | Status | Result |
 | --- | --- | --- | ---: | --- | --- | --- |
 | E00 | Baseline | Current 3dgrut NHT bonsai config and gsplat NHT reference, both at 7K iterations. | 7K | Establish local comparison points. | Done | 3dgrut: 29.3969 / 0.9181 / 0.3121 / 8.77 ms. gsplat: 30.9817 / 0.9322 / 0.2800 / 9.43 ms. |
 | E01 | D03 | Set `initialization.use_observation_points=false` to use SFM KNN scale. | 7K | Tests whether initial scale explains early accuracy gap. | Done | 3dgrut: 30.0035 / 0.9183 / 0.3054 / 9.19 ms. Improves E00 3dgrut by +0.6066 dB, still -0.9781 dB vs E00 gsplat. |
-| E02 | D02 | Keep raw coordinates, but scale configured position LR and final LR by `1.28054 / 4.12053 ~= 0.311`. | 7K | Isolates effective scene-scale LR and MCMC-noise mismatch. | Not run | TBD |
+| E02 | D02 | Keep E01 KNN init scale and scale configured position LR/final LR by `1.2805438282393957 / 4.120534491539002 = 0.3107712921`. | 7K | Isolates effective scene-scale LR and MCMC-noise mismatch. | Not run | TBD |
 | E03 | D01, D02 | Apply reference world normalization to dataset poses and COLMAP init points; use reference scene scale. | 7K | Tests full coordinate-system parity. | Not run | TBD |
 | E04 | D05 | Disable NHT half precision: `render.particle_feature_half=false`, `render.feature_output_half=false`. | 7K | Tests feature accumulation precision. | Not run | TBD |
 | E05 | D06 | Feed decoder ray directions produced by the renderer path instead of recomputing in Python. | 7K | Tests ray-direction boundary mismatch. | Not run | TBD |
@@ -107,7 +107,7 @@ Use this table to append completed A/B results.
 
 ## Testing Rules
 
-- Change only one variable per experiment unless the row explicitly groups coupled codepaths.
+- Change only one variable per experiment unless the row explicitly groups coupled codepaths; cumulative rows must list the inherited knobs in the command/config column.
 - Prefer bonsai 7K for quick signal, then rerun promising changes at 30K.
 - Keep raw and color-corrected metrics separate. The reference target above is raw.
 - Record whether the extension was rebuilt when changing compile-time render flags.
