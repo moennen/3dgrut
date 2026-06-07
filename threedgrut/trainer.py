@@ -335,7 +335,12 @@ class Trainer3DGRUT:
                         dtype=torch.float32,
                         device=self.device,
                     )
-                    model.init_from_colmap(conf.path, observer_points)
+                    colmap_world_transform = (
+                        train_dataset.get_colmap_world_transform()
+                        if hasattr(train_dataset, "get_colmap_world_transform")
+                        else None
+                    )
+                    model.init_from_colmap(conf.path, observer_points, colmap_world_transform)
                 case "fused_point_cloud":
                     observer_points = torch.tensor(
                         train_dataset.get_observer_points(),

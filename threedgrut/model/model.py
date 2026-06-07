@@ -311,7 +311,7 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
         else:
             raise ValueError(f"Unknown feature_type: {self.feature_type}")
 
-    def init_from_colmap(self, root_path: str, observer_pts):
+    def init_from_colmap(self, root_path: str, observer_pts, colmap_world_transform=None):
         # Special case for scannetpp dataset
         if self.conf.dataset.type == "scannetpp":
             points_file = os.path.join(root_path, "colmap", "points3D.txt")
@@ -348,6 +348,10 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
 
                 file_pts = torch.tensor(file_pts, dtype=torch.float32, device=self.device)
                 file_rgb = torch.tensor(file_rgb, dtype=torch.uint8, device=self.device)
+
+        if colmap_world_transform is not None:
+            transform = torch.tensor(colmap_world_transform, dtype=file_pts.dtype, device=self.device)
+            file_pts = file_pts @ transform[:3, :3].T + transform[:3, 3]
 
         assert file_rgb.dtype == torch.uint8, "Expecting RGB values to be in [0, 255] range"
         self.default_initialize_from_points(
