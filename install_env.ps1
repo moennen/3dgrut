@@ -155,6 +155,10 @@ Write-Host "Installing Python requirements from requirements.txt..." -Foreground
 pip install --no-build-isolation -r requirements.txt
 Check-LastCommand "Requirements installation"
 
+Write-Host "Installing tiny-cuda-nn Python bindings..." -ForegroundColor Yellow
+& ".\scripts\install_tinycudann.ps1"
+Check-LastCommand "tiny-cuda-nn Python bindings installation"
+
 # Install additional dependencies
 Write-Host "Installing Cython..." -ForegroundColor Yellow
 pip install cython

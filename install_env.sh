@@ -176,6 +176,7 @@ conda install -c conda-forge --override-channels mesa-libgl-devel-cos7-x86_64 -y
 git submodule update --init --recursive
 # Use --no-build-isolation so packages can access torch during build
 pip install --no-build-isolation -r requirements.txt
+bash scripts/install_tinycudann.sh
 pip install --no-build-isolation -e .
 
 echo "Setup completed successfully!"
