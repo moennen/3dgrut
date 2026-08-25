@@ -32,6 +32,15 @@ from torch.utils.data import Dataset
 from threedgrut.utils.logger import logger
 
 from .colmap_gsplat import normalize_world_space, scene_scale
+from .gt_geometry import (
+    find_gt_paths,
+    normalize_gt_normal,
+    read_gt_map,
+    resize_gt_map,
+    transform_gt_depth,
+    transform_gt_normal,
+    validate_scene_conventions,
+)
 from .protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
 from .utils import (
     compute_max_radius,
@@ -125,6 +134,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         camera_ids: Optional[list[int]] = None,
         normalize_world_space: bool = False,
         gsplat_image_downscale: bool = False,
+        load_depth_gt: bool = False,
+        load_normal_gt: bool = False,
     ):
         self.path = path
         self.device = device
@@ -137,6 +148,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.camera_ids = [int(camera_id) for camera_id in camera_ids] if camera_ids is not None else None
         self.normalize_world_space = bool(normalize_world_space)
         self.gsplat_image_downscale = gsplat_image_downscale
+        self.load_depth_gt = bool(load_depth_gt)
+        self.load_normal_gt = bool(load_normal_gt)
         self.world_normalization_transform = np.eye(4, dtype=np.float32)
 
         # Worker-based GPU cache for multiprocessing compatibility
@@ -195,8 +208,43 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         # Update the number of frames to only include the samples from the split
         self.n_frames = self.poses.shape[0]
 
+        self._resolve_gt_geometry_paths()
+
         # Clear existing worker caches to force recreation with new intrinsics
         self._worker_gpu_cache.clear()
+
+    def _resolve_gt_geometry_paths(self) -> None:
+        """Locate the ground-truth depth/normal map of every frame in the split.
+
+        Resolved after the split filter so the lists stay index-aligned with `image_paths`.
+        A requested-but-absent annotation is an error rather than a silent fallback: it
+        would otherwise surface much later as a metric quietly computed over no pixels.
+        """
+        self.depth_paths: list[Optional[str]] = []
+        self.normal_paths: list[Optional[str]] = []
+        self.depth_gt_available = False
+        self.normal_gt_available = False
+        if not (self.load_depth_gt or self.load_normal_gt):
+            return
+
+        validate_scene_conventions(self.path)
+        for enabled, folder, suffix, attribute in (
+            (self.load_depth_gt, "depths", "depth", "depth_paths"),
+            (self.load_normal_gt, "normals", "normal", "normal_paths"),
+        ):
+            if not enabled:
+                continue
+            paths = find_gt_paths(self.image_paths, self.path, folder, suffix)
+            missing = [image for image, gt in zip(self.image_paths, paths) if gt is None]
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)} of {len(paths)} frames in split '{self.split}' have no {suffix} "
+                    f"ground truth under {os.path.join(self.path, folder)} "
+                    f"(first missing: {os.path.basename(str(missing[0]))}). "
+                    f"Disable dataset.load_{suffix}_gt or complete the dataset."
+                )
+            setattr(self, attribute, paths)
+            setattr(self, f"{suffix}_gt_available", True)
 
     def _load_points_for_world_normalization(self) -> np.ndarray:
         points_candidates = [
@@ -726,11 +774,33 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = torch.from_numpy(np.array(Image.open(mask_path).convert("L"))).reshape(1, actual_h, actual_w, 1)
             output_dict["mask"] = mask
 
+        if self.depth_gt_available:
+            output_dict["depth_gt"] = torch.from_numpy(self._load_depth_gt(idx, actual_h, actual_w)).unsqueeze(0)
+
+        if self.normal_gt_available:
+            output_dict["normal_gt"] = torch.from_numpy(self._load_normal_gt(idx, actual_h, actual_w)).unsqueeze(0)
+
         # Add EXIF exposure if available for this frame
         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
             output_dict["exposure"] = torch.tensor(self.exif_exposures[idx], dtype=torch.float32)
 
         return output_dict
+
+    def _load_depth_gt(self, idx: int, height: int, width: int) -> np.ndarray:
+        """Ground-truth ray distance for frame `idx`, in the dataset's current world space."""
+        depth = resize_gt_map(read_gt_map(self.depth_paths[idx], 1), height, width)
+        if self.normalize_world_space:
+            depth = transform_gt_depth(depth, self.world_normalization_transform)
+        return np.ascontiguousarray(depth)
+
+    def _load_normal_gt(self, idx: int, height: int, width: int) -> np.ndarray:
+        """Ground-truth world-space normals for frame `idx`, in the dataset's current world space."""
+        normal = resize_gt_map(read_gt_map(self.normal_paths[idx], 3), height, width)
+        if self.normalize_world_space:
+            normal = transform_gt_normal(normal, self.world_normalization_transform)
+        else:
+            normal = normalize_gt_normal(normal)
+        return np.ascontiguousarray(normal)
 
     def get_gpu_batch_with_intrinsics(self, batch):
         """Add the intrinsics to the batch and move data to GPU."""
@@ -762,6 +832,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = batch["mask"][0].to(self.device, non_blocking=True) / 255.0
             mask = (mask > 0.5).to(torch.float32)
             sample["mask"] = mask
+
+        for key in ("depth_gt", "normal_gt"):
+            if key in batch:
+                sample[key] = batch[key][0].to(self.device, non_blocking=True)
 
         # Add exposure prior from EXIF if available (move to GPU)
         if "exposure" in batch and batch["exposure"][0] is not None:

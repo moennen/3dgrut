@@ -40,6 +40,11 @@ class Batch:
     pixel_coords: Optional[torch.Tensor] = None  # [B, H, W, 2] (x, y) with +0.5 center offset
     # Exposure prior from EXIF metadata (mean-normalized log2 exposure [1], None if unavailable)
     exposure: Optional[torch.Tensor] = None
+    # Ground-truth geometry, in the same world space as the poses. Depth is the Euclidean
+    # distance along the ray, with missing surfaces left at the dataset's sky sentinel;
+    # normals are world-space unit vectors, zero where no surface exists.
+    depth_gt: Optional[torch.Tensor] = None  # [B, H, W, 1]
+    normal_gt: Optional[torch.Tensor] = None  # [B, H, W, 3]
 
     def __post_init__(self):
         batch_size = self.T_to_world.shape[0]
@@ -58,6 +63,15 @@ class Batch:
             assert self.pixel_coords.ndim == 4, "pixel_coords must be a 4D tensor [B, H, W, 2]"
             assert self.pixel_coords.shape[0] == batch_size, "pixel_coords must have the same batch size"
             assert self.pixel_coords.shape[3] == 2, "pixel_coords last dimension must be 2 (x, y)"
+        for name, channels in (("depth_gt", 1), ("normal_gt", 3)):
+            gt = getattr(self, name)
+            if gt is None:
+                continue
+            assert gt.ndim == 4, f"{name} must be a 4D tensor [B, H, W, {channels}]"
+            assert gt.shape[0] == batch_size, f"{name} must have the same batch size"
+            assert gt.shape[3] == channels, f"{name} last dimension must be {channels}"
+            if self.rgb_gt is not None:
+                assert gt.shape[1:3] == self.rgb_gt.shape[1:3], f"{name} must match the rgb_gt resolution"
 
 
 class BoundedMultiViewDataset(Protocol):

@@ -102,6 +102,11 @@ def make(name: str, config, ray_jitter):
                 camera_ids=config.dataset.get("camera_ids", None),
                 normalize_world_space=config.dataset.get("normalize_world_space", False),
                 gsplat_image_downscale=gsplat_image_downscale,
+                # Ground-truth geometry is evaluation-only for now, so the training split
+                # does not pay a per-iteration map read for data nothing consumes. A
+                # training-side consumer (e.g. depth supervision) must opt in explicitly.
+                load_depth_gt=False,
+                load_normal_gt=False,
             )
             val_dataset = ColmapDataset(
                 config.path,
@@ -113,6 +118,8 @@ def make(name: str, config, ray_jitter):
                 camera_ids=config.dataset.get("camera_ids", None),
                 normalize_world_space=config.dataset.get("normalize_world_space", False),
                 gsplat_image_downscale=gsplat_image_downscale,
+                load_depth_gt=config.dataset.get("load_depth_gt", False),
+                load_normal_gt=config.dataset.get("load_normal_gt", False),
             )
         case "scannetpp":
             train_dataset = ScannetppDataset(
@@ -230,6 +237,8 @@ def make_test(name: str, config):
                 camera_ids=config.dataset.get("camera_ids", None),
                 normalize_world_space=config.dataset.get("normalize_world_space", False),
                 gsplat_image_downscale=gsplat_image_downscale,
+                load_depth_gt=config.dataset.get("load_depth_gt", False),
+                load_normal_gt=config.dataset.get("load_normal_gt", False),
             )
         case "scannetpp":
             dataset = ScannetppDataset(

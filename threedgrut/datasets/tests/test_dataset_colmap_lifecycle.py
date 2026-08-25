@@ -54,6 +54,8 @@ def test_reload_resets_stale_world_transform_when_normalization_is_disabled(monk
     dataset._all_exif_exposures = None
     dataset.test_split_interval = 0
     dataset.split = "train"
+    dataset.load_depth_gt = False
+    dataset.load_normal_gt = False
 
     def load_intrinsics_and_extrinsics() -> None:
         dataset.cam_intrinsics = {3: object()}

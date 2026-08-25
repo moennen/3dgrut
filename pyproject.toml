@@ -45,6 +45,8 @@ dependencies = [
     "msgpack",
     "numpy",
     "omegaconf",
+    # Reads the EXR depth/normal ground truth shipped with rendered COLMAP scenes.
+    "OpenEXR==3.4.14",
     "opencv-python",
     "piexif",
     "pytest",
