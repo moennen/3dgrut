@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import time
 from collections import defaultdict
@@ -1032,6 +1033,29 @@ class Trainer3DGRUT:
                 if self.feature_decoder is not None:
                     self.feature_decoder.restore_ema()
 
+    def write_train_stats(self, elapsed_s: float) -> str:
+        """Write training cost to `train_stats.json` in the run directory.
+
+        Quality alone cannot decide between configurations: a variant that improves
+        depth while halving throughput or doubling the primitive count is a different
+        trade, not a straight win. Peak memory is reported as allocated by torch, which
+        excludes the tracer's own buffers, so it is a lower bound rather than the whole
+        footprint.
+        """
+        stats = {
+            "n_steps": int(self.global_step),
+            "n_epochs": int(self.n_epochs),
+            "training_time_s": float(elapsed_s),
+            "iteration_speed": float(self.global_step / elapsed_s) if elapsed_s > 0 else 0.0,
+            "num_gaussians": int(self.model.num_gaussians),
+            "peak_memory_allocated_gb": torch.cuda.max_memory_allocated() / 1024**3,
+            "peak_memory_reserved_gb": torch.cuda.max_memory_reserved() / 1024**3,
+        }
+        path = os.path.join(self.tracking.output_dir, "train_stats.json")
+        with open(path, "w") as f:
+            json.dump(stats, f, indent=2)
+        return path
+
     @torch.cuda.nvtx.range(f"save_checkpoint")
     def save_checkpoint(self, last_checkpoint: bool = False):
         """Saves checkpoint to a path under {conf.out_dir}/{conf.experiment_name}.
@@ -1428,6 +1452,10 @@ class Trainer3DGRUT:
             iteration_speed=f"{self.global_step / stats['elapsed']:.2f} it/s",
         )
         logger.log_table(f"🎊 Training Statistics", record=table)
+
+        # Persist the same numbers next to the checkpoint. The ablation harness needs
+        # cost alongside quality, and scraping them back out of the log is brittle.
+        self.write_train_stats(elapsed_s=stats["elapsed"])
 
         # Perform testing
         self.on_training_end()
