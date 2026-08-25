@@ -180,7 +180,7 @@ SplatRaster::SplatRaster(const nlohmann::json& config)
 SplatRaster::~SplatRaster(void) {
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
                    torch::Tensor particleDensity,
                    torch::Tensor particleRadiance,
@@ -214,6 +214,11 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
     torch::Tensor rayHitCount            = torch::zeros({height, width, 1}, opts);
     torch::Tensor particleVisibility     = torch::zeros({numParticles, 1}, opts);
     torch::Tensor particleRadianceKernel = particleRadianceKernelTensor(particleRadiance);
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+    torch::Tensor rayHitNormal = torch::zeros({height, width, 3}, opts);
+#else
+    torch::Tensor rayHitNormal = torch::empty({0}, opts);
+#endif
 
     m_parameters.values.numParticles               = numParticles;
     m_parameters.values.radianceSphDegree          = numActiveFeatures;
@@ -249,7 +254,13 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         reinterpret_cast<int*>(voidDataPtr(particleVisibility)),
         m_parameters,
         cudaDeviceIndex,
-        cudaStream);
+        cudaStream,
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+        reinterpret_cast<tcnn::vec3*>(voidDataPtr(rayHitNormal))
+#else
+        nullptr
+#endif
+    );
 
     CUDA_CHECK_LAST(m_logger);
 
@@ -257,7 +268,8 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         timer->stop();
     }
 
-    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility);
+    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(
+        rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility, rayHitNormal);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

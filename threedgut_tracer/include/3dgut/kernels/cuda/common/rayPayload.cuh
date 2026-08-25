@@ -19,9 +19,42 @@
 #include <3dgut/kernels/cuda/common/random.cuh>
 #include <3dgut/renderer/renderParameters.h>
 
+// Optional per-hit / per-ray normal accumulator.
+//
+// Inherited rather than held as a member: an empty *member* still occupies a byte and
+// would pad the k-buffer hit record from 12 to 16 bytes even with normals compiled out,
+// inflating its register and shared-memory footprint by a third. An empty *base* is free
+// under the empty base optimization, so the disabled build keeps its exact layout.
+//
+// `normalPtr()` is a compile-time nullptr when disabled, which every consumer downstream
+// already reads as "skip this output".
+template <bool Enabled>
+struct OptionalNormal {
+    tcnn::vec3 normalVec;
+    __host__ __device__ __forceinline__ tcnn::vec3* normalPtr() {
+        return &normalVec;
+    }
+    __host__ __device__ __forceinline__ const tcnn::vec3* normalPtr() const {
+        return &normalVec;
+    }
+};
+
+template <>
+struct OptionalNormal<false> {
+    __host__ __device__ __forceinline__ tcnn::vec3* normalPtr() {
+        return nullptr;
+    }
+    __host__ __device__ __forceinline__ const tcnn::vec3* normalPtr() const {
+        return nullptr;
+    }
+};
+
+using TOptionalNormal = OptionalNormal<GAUSSIAN_PARTICLE_ENABLE_NORMAL>;
+
 template <int FeatN>
-struct RayPayload {
+struct RayPayload : TOptionalNormal {
     static constexpr uint32_t FeatDim = FeatN;
+    static constexpr bool HasNormals  = GAUSSIAN_PARTICLE_ENABLE_NORMAL;
 
     threedgut::TTimestamp timestamp;
     tcnn::vec3 origin;
@@ -89,6 +122,9 @@ __device__ __inline__ RayPayloadT initializeRay(const threedgut::RenderParameter
     ray.hitT          = 0.0f;
     ray.transmittance = 1.0f;
     ray.features      = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+    ray.normalVec = tcnn::vec3(0.0f);
+#endif
 
     ray.origin    = sensorToWorldTransform * tcnn::vec4(sensorRayOriginPtr[ray.idx], 1.0f);
     ray.direction = tcnn::mat3(sensorToWorldTransform) * sensorRayDirectionPtr[ray.idx];
@@ -139,6 +175,9 @@ __device__ __inline__ RayPayloadT initializeRayPerPixel(const threedgut::RenderP
     ray.hitT          = 0.0f;
     ray.transmittance = 1.0f;
     ray.features      = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+    ray.normal.vec = tcnn::vec3(0.0f);
+#endif
 
     ray.origin    = sensorToWorldTransform * tcnn::vec4(sensorRayOriginPtr[ray.idx], 1.0f);
     ray.direction = tcnn::mat3(sensorToWorldTransform) * sensorRayDirectionPtr[ray.idx];
@@ -164,7 +203,8 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
                                        float* __restrict__ worldCountPtr,
                                        float* __restrict__ worldHitDistancePtr,
                                        TFeatureDensityElem* __restrict__ featureDensityPtr,
-                                       const tcnn::mat4x3& sensorToWorldTransform) {
+                                       const tcnn::mat4x3& sensorToWorldTransform,
+                                       tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr) {
     if (!ray.isValid()) {
         return;
     }
@@ -186,6 +226,13 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
 #endif
 
     worldHitDistancePtr[ray.idx] = ray.hitT;
+
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+    // Raw alpha-premultiplied accumulation in the world frame; normalized in PyTorch.
+    if (worldHitNormalPtr != nullptr) {
+        worldHitNormalPtr[ray.idx] = ray.normalVec;
+    }
+#endif
 
 #if GAUSSIAN_ENABLE_HIT_COUNT
     worldCountPtr[ray.idx] = (float)ray.hitN;

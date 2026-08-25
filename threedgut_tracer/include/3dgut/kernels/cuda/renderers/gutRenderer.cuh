@@ -93,7 +93,8 @@ __global__ void render(threedgut::RenderParameters params,
                        const tcnn::vec4* __restrict__ particlesProjectedConicOpacityPtr,
                        const float* __restrict__ particlesGlobalDepthPtr,
                        const float* __restrict__ particlesPrecomputedFeaturesPtr,
-                       const uint64_t* __restrict__ parameterMemoryHandles) {
+                       const uint64_t* __restrict__ parameterMemoryHandles,
+                       tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr) {
 
     auto ray = initializeRay<TGUTRenderer::TRayPayload>(
         params, sensorRayOriginPtr, sensorRayDirectionPtr, sensorToWorldTransform);
@@ -111,7 +112,8 @@ __global__ void render(threedgut::RenderParameters params,
     // TGUTModel::eval(params, ray, {parameterMemoryHandles});
 
     // NB : finalize ray is not differentiable (has to be no-op when used in a differentiable renderer)
-    finalizeRay(ray, params, sensorRayOriginPtr, worldHitCountPtr, worldHitDistancePtr, featureDensityPtr, sensorToWorldTransform);
+    finalizeRay(ray, params, sensorRayOriginPtr, worldHitCountPtr, worldHitDistancePtr, featureDensityPtr,
+                sensorToWorldTransform, worldHitNormalPtr);
 }
 
 #if FINE_GRAINED_LOAD_BALANCING

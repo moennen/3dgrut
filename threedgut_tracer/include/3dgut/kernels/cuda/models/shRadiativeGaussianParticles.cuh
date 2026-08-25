@@ -122,7 +122,7 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                            depth,
                                            &integratedDepth,
                                            normal != nullptr,
-                                           normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(&normal),
+                                           normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(normal),
                                            reinterpret_cast<float3*>(integratedNormal));
     }
 

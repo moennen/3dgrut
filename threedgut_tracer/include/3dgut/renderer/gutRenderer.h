@@ -81,7 +81,8 @@ public:
                          int* particlesVisibilityCudaPtr,
                          Parameters& parameters,
                          int cudaDeviceIndex,
-                         cudaStream_t cudaStream);
+                         cudaStream_t cudaStream,
+                         tcnn::vec3* worldHitNormalCudaPtr = nullptr);
 
     Status renderBackward(const RenderParameters& params,
                           const tcnn::vec3* sensorRayOriginCudaPtr,

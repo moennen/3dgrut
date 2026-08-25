@@ -23,6 +23,15 @@ from threedgrut.utils import jit
 # ----------------------------------------------------------------------------
 #
 def setup_3dgut(conf):
+    # The load-balanced kernel accumulates in a warp-cooperative loop that never touches
+    # the normal accumulator, so combining the two would silently yield all-zero normals.
+    if conf.render.enable_normals and getattr(conf.render.splat, "fine_grained_load_balancing", False):
+        raise ValueError(
+            "render.enable_normals is not supported with render.splat.fine_grained_load_balancing: "
+            "the load-balanced kernel does not accumulate normals and would return zeros. "
+            "Disable one of the two."
+        )
+
     include_paths = []
     prefix = os.path.dirname(__file__)
     include_paths.append(os.path.join(prefix, "include"))

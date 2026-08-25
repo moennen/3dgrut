@@ -247,7 +247,8 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
                                                         int* particlesVisibilityCudaPtr,
                                                         Parameters& parameters,
                                                         int cudaDeviceIndex,
-                                                        cudaStream_t cudaStream) {
+                                                        cudaStream_t cudaStream,
+                                                        vec3* worldHitNormalCudaPtr) {
 
     if (!m_forwardContext) {
         m_forwardContext = std::make_unique<GutRenderForwardContext>(cudaStream);
@@ -412,7 +413,8 @@ threedgut::Status threedgut::GUTRenderer::renderForward(const RenderParameters& 
             (const tcnn::vec4*)m_forwardContext->particlesProjectedConicOpacity.data(),
             (const float*)m_forwardContext->particlesGlobalDepth.data(),
             (const float*)m_forwardContext->particlesPrecomputedFeatures.data(),
-            parameters.m_dptrParametersBuffer);
+            parameters.m_dptrParametersBuffer,
+            (tcnn::vec3*)worldHitNormalCudaPtr);
 #endif
         CUDA_CHECK_STREAM_RETURN(cudaStream, m_logger);
     }

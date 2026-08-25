@@ -27,12 +27,18 @@ struct HitParticleT;
 
 // Base / SH case: common per-hit state only.
 template <>
-struct HitParticleT<false> {
+struct HitParticleT<false> : TOptionalNormal {
     static constexpr float InvalidHitT = -1.0f;
     int idx                            = -1;
     float hitT                         = InvalidHitT;
     float alpha                        = 0.0f;
 };
+
+// The k-buffer holds K of these per ray, so any growth costs registers and shared memory
+// on the hot path. Pin the disabled layout so the normal accumulator cannot regress into
+// occupying storage when it is compiled out.
+static_assert(GAUSSIAN_PARTICLE_ENABLE_NORMAL || sizeof(HitParticleT<false>) == 3 * sizeof(float),
+              "compiling normals out must not grow the k-buffer hit record");
 
 // NHT case extends with the per-ray canonical intersection point used by the
 // feature evaluation. Plain (non-virtual) inheritance: layout is base fields
@@ -201,7 +207,9 @@ struct GUTKBufferRenderer : Params {
                 particles.densityIntegrateHit(hitParticle.alpha,
                                               ray.transmittance,
                                               hitParticle.hitT,
-                                              ray.hitT);
+                                              ray.hitT,
+                                              hitParticle.normalPtr(),
+                                              ray.normalPtr());
 
             // `if constexpr` branches so the SH specialization of Hit (which
             // has no `canonicalIntersection` member) is not instantiated with
@@ -324,7 +332,8 @@ struct GUTKBufferRenderer : Params {
                                          particleData.densityParameters,
                                          hitParticle.alpha,
                                          hitParticle.hitT,
-                                         canonicalIntersectionSlot<Params::PerRayParticleFeatures>(hitParticle, canonicalScratch)) &&
+                                         canonicalIntersectionSlot<Params::PerRayParticleFeatures>(hitParticle, canonicalScratch),
+                                         hitParticle.normalPtr()) &&
                     (hitParticle.hitT > ray.tMinMax.x) &&
                     (hitParticle.hitT < ray.tMinMax.y)) {
 

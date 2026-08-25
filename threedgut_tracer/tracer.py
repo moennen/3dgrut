@@ -185,19 +185,21 @@ class Tracer:
                 * sensor_poses.timestamps_us[0]
             )
 
-            ray_features_density, ray_hit_distance, ray_hit_count, mog_visibility = tracer_wrapper.trace(
-                frame_id,
-                n_active_features,
-                particle_density,
-                particle_features,
-                ray_ori.contiguous(),
-                ray_dir.contiguous(),
-                ray_time.contiguous(),
-                sensor_params,
-                sensor_poses.timestamps_us[0],
-                sensor_poses.timestamps_us[1],
-                sensor_poses.T_world_sensors[0],
-                sensor_poses.T_world_sensors[1],
+            ray_features_density, ray_hit_distance, ray_hit_count, mog_visibility, ray_hit_normal = (
+                tracer_wrapper.trace(
+                    frame_id,
+                    n_active_features,
+                    particle_density,
+                    particle_features,
+                    ray_ori.contiguous(),
+                    ray_dir.contiguous(),
+                    ray_time.contiguous(),
+                    sensor_params,
+                    sensor_poses.timestamps_us[0],
+                    sensor_poses.timestamps_us[1],
+                    sensor_poses.T_world_sensors[0],
+                    sensor_poses.T_world_sensors[1],
+                )
             )
 
             ctx.save_for_backward(
@@ -221,6 +223,9 @@ class Tracer:
                 ray_hit_distance,
                 ray_hit_count,
                 mog_visibility,
+                # Empty unless normals are compiled in. Not differentiable: the forward
+                # port carries the buffer only, so no gradient flows back through it.
+                ray_hit_normal,
             )
 
         @staticmethod
@@ -230,6 +235,7 @@ class Tracer:
             ray_hit_distance_grd,
             ray_hit_count_grd_UNUSED,
             mog_visibility_grd_UNUSED,
+            ray_hit_normal_grd_UNUSED,
         ):
             (
                 ray_ori,
@@ -314,6 +320,7 @@ class Tracer:
                 pred_dist,
                 hits_count,
                 mog_visibility,
+                pred_normals,
             ) = Tracer._Autograd.apply(
                 self.tracer_wrapper,
                 frame_id,
@@ -335,6 +342,7 @@ class Tracer:
             pred_opacity = pred_features_alpha[..., ray_feature_dim:].unsqueeze(0).contiguous()
             pred_dist = pred_dist.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
+            pred_normals = self.__resolve_normals(pred_normals, pred_features)
 
             timings = self.tracer_wrapper.collect_times()
 
@@ -342,11 +350,27 @@ class Tracer:
             "pred_features": pred_features,
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
-            "pred_normals": torch.nn.functional.normalize(torch.ones_like(pred_features), dim=3),
+            "pred_normals": pred_normals,
             "hits_count": hits_count,
             "frame_time_ms": timings["forward_render"] if "forward_render" in timings else 0.0,
             "mog_visibility": mog_visibility,
         }
+
+    def __resolve_normals(self, ray_hit_normal: torch.Tensor, pred_features: torch.Tensor) -> torch.Tensor:
+        """Unit-length world-space normals, or the legacy constant when normals are off.
+
+        The kernel accumulates alpha-premultiplied normals, so the magnitude carries the
+        coverage of the ray and only the direction is meaningful. Rays that hit nothing
+        accumulate exactly zero and stay zero rather than being normalized into an
+        arbitrary direction, so consumers can tell "no surface" from "a surface facing
+        somewhere". `enable_normals=false` builds return an empty tensor, in which case
+        the previous placeholder is preserved for backwards compatibility.
+        """
+        if not self.conf.render.enable_normals or ray_hit_normal.numel() == 0:
+            return torch.nn.functional.normalize(torch.ones_like(pred_features), dim=3)
+        normals = ray_hit_normal.unsqueeze(0).contiguous()
+        magnitude = normals.norm(dim=3, keepdim=True)
+        return torch.where(magnitude > 1e-6, normals / magnitude.clamp_min(1e-6), torch.zeros_like(normals))
 
     @staticmethod
     def __fov2focal(fov_radians: float, pixels: int):

@@ -19,7 +19,7 @@ namespace gaussianParticle
     static const float MinParticleKernelDensity = GAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY;
     static const float MaxParticleAlpha = GAUSSIAN_PARTICLE_MAX_ALPHA;
     static const float MinParticleAlpha = GAUSSIAN_PARTICLE_MIN_ALPHA;
-    static const bool EnableNormal = false;
+    static const bool EnableNormal = GAUSSIAN_PARTICLE_ENABLE_NORMAL;
     static const bool Surfel = GAUSSIAN_PARTICLE_SURFEL;
 };
 
