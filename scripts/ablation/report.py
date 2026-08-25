@@ -57,6 +57,10 @@ NORMAL_COLUMNS = [
 # for "not measured" rather than an impossibly fast render; show it as absent.
 UNMEASURED_WHEN_ZERO = {"mean_inference_time_ms"}
 
+# Metrics in world units. Averaging these across scenes is dominated by whichever scene
+# is physically largest, so the scale-free ones are what a ranking should rest on.
+SCALE_DEPENDENT = {"depth_rmse", "depth_mae", "depth_bias"}
+
 COST_COLUMNS = [
     ("iteration_speed", "it/s", "{:.1f}", None),
     ("training_time_s", "train_s", "{:.0f}", None),
@@ -186,7 +190,17 @@ def main() -> int:
             f"Excluded from the averages because not every variant completed them: {', '.join(dropped)}.",
         ]
 
-    parts += ["", "## Quality (averaged over shared scenes)", "", summary_table(ok, QUALITY_COLUMNS, shared)]
+    scale_dependent_headers = [header for key, header, _, _ in QUALITY_COLUMNS if key in SCALE_DEPENDENT]
+    parts += [
+        "",
+        "## Quality (averaged over shared scenes)",
+        "",
+        summary_table(ok, QUALITY_COLUMNS, shared),
+        "",
+        f"{', '.join('`' + name + '`' for name in scale_dependent_headers)} are in world units, so an average "
+        "across scenes is dominated by the physically largest one; rank on `d_absrel` and `d_delta1`, "
+        "which are scale free, and read the world-unit columns per scene.",
+    ]
     parts += ["", "## Cost", "", summary_table(ok, COST_COLUMNS, shared)]
     parts += [
         "",
