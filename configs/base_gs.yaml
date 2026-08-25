@@ -184,6 +184,14 @@ loss:
   use_scale: false
   lambda_scale: 0.0
 
+  # Depth-normal consistency. Needs render.enable_normals, and under 3DGRT a backward pipeline
+  # that differentiates the normal buffer (render.pipeline_type=referenceSlang); the tracer
+  # rejects the combination rather than training on zero normal gradients.
+  use_depth_normal: false
+  lambda_depth_normal: 0.0
+  # Iteration the term switches on. Normals are meaningless until the geometry roughly settles.
+  depth_normal_from_iter: 7000
+
 # Post-processing configuration
 post_processing:
   # null | "ppisp" | "linear-to-srgb"

@@ -19,6 +19,7 @@ from enum import IntEnum
 
 import torch
 import torch.utils.cpp_extension
+from omegaconf import OmegaConf
 
 from threedgrut.datasets.protocols import Batch
 from threedgrut.model.features import Features
@@ -47,6 +48,45 @@ def load_3dgrt_plugin(conf):
 
 # ----------------------------------------------------------------------------
 #
+
+# Backward pipelines that propagate gradients from the rendered normal buffer.
+#
+# The others render normals forward-only, which is fine for evaluation metrics and
+# visualization but silently yields zero gradients for any loss built on `pred_normals`:
+#   * `referenceBwd` calls a hand-derived `processHitBwd` (kernels/cuda/gaussianParticles.cuh)
+#     that has no normal term at all.
+#   * `referenceB2FSlangBwd` is an upstream stub whose `processHitBwd` is commented out
+#     entirely, so it produces no gradients of any kind.
+# Train a normal-supervised model with `render.pipeline_type=referenceSlang`.
+NORMAL_GRADIENT_BACKWARD_PIPELINES = frozenset({"referenceSlangBwd"})
+
+
+def supports_normal_gradients(conf) -> bool:
+    """Whether the configured 3DGRT backward pipeline differentiates the normal buffer."""
+    return conf.render.backward_pipeline_type in NORMAL_GRADIENT_BACKWARD_PIPELINES
+
+
+def check_normal_supervision_supported(conf) -> None:
+    """Reject a configuration asking for normal supervision the backward pipeline cannot give.
+
+    Checked once when the tracer is built, because the configuration alone settles it: a
+    normal loss is requested or it is not. Keying on the loss flag rather than on
+    `enable_normals` keeps forward-only normals -- evaluation metrics, visualization --
+    working on every pipeline.
+    """
+    if not OmegaConf.select(conf, "loss.use_depth_normal", default=False):
+        return
+    if supports_normal_gradients(conf):
+        return
+
+    raise ValueError(
+        f"loss.use_depth_normal is set but render.backward_pipeline_type="
+        f"'{conf.render.backward_pipeline_type}' does not differentiate the rendered normal "
+        "buffer, so the normal term would contribute silently zero gradients. Use "
+        "render.pipeline_type=referenceSlang."
+    )
+
+
 class Tracer:
     class _Autograd(torch.autograd.Function):
         @staticmethod
@@ -176,6 +216,7 @@ class Tracer:
         logger.info(f'🔆 Creating Optix tracing pipeline.. Using CUDA path: "{torch.utils.cpp_extension.CUDA_HOME}"')
         torch.zeros(1, device=self.device)  # Create a dummy tensor to force cuda context init
         load_3dgrt_plugin(conf)
+        check_normal_supervision_supported(conf)
 
         self.tracer_wrapper = _3dgrt_plugin.OptixTracer(
             os.path.dirname(__file__),

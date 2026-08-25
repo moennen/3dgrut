@@ -11,6 +11,9 @@ particle_radiance_sph_degree: 3
 primitive_type: instances
 min_transmittance: 0.001
 max_consecutive_bvh_update: 15
+# Renders the normal buffer. Every pipeline renders it, but only pipeline_type=referenceSlang
+# differentiates it, so loss.use_depth_normal requires that pipeline and is rejected on the
+# others; see NORMAL_GRADIENT_BACKWARD_PIPELINES in threedgrt_tracer/tracer.py.
 enable_normals: false
 enable_hitcounts: true
 enable_kernel_timings: false
