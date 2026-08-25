@@ -15,6 +15,7 @@
 
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import threedgrut.datasets as datasets
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.utils.color_correct import color_correct_affine
+from threedgrut.utils.depth_normal_metrics import geometry_metrics
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
 from threedgrut.utils.render import (
@@ -273,6 +275,17 @@ class Renderer:
         cc_ssim = []
         cc_lpips = []
         inference_time = []
+        # Geometry metrics are only produced for frames that carry reference depth or
+        # normals, so they are accumulated per key rather than as fixed-length lists.
+        geometry: dict[str, list[float]] = defaultdict(list)
+        # Without a rendered normal buffer `pred_normals` is a constant placeholder, which
+        # would score a plausible-looking angular error instead of reporting nothing.
+        score_normals = bool(self.conf.render.get("enable_normals", False))
+        if not score_normals and getattr(self.dataset, "normal_paths", None):
+            logger.warning(
+                "Reference normals are loaded but render.enable_normals is false, so no normals "
+                "are rendered; skipping normal metrics."
+            )
 
         best_psnr = -1.0
         worst_psnr = 2**16 * 1.0
@@ -368,6 +381,13 @@ class Renderer:
                 ).item()
             )
 
+            for name, value in geometry_metrics(
+                outputs,
+                getattr(gpu_batch, "depth_gt", None),
+                getattr(gpu_batch, "normal_gt", None) if score_normals else None,
+            ).items():
+                geometry[name].append(value)
+
             # Record the time
             inference_time.append(outputs["frame_time_ms"])
 
@@ -383,6 +403,12 @@ class Renderer:
         mean_cc_lpips = np.mean(cc_lpips)
         std_psnr = np.std(psnr)
         mean_inference_time = np.mean(inference_time)
+        # Pixel counts are totals over the split; everything else averages over frames,
+        # matching how the photometric metrics are reported.
+        mean_geometry = {
+            name: float(np.sum(values) if name.endswith("_px") else np.mean(values))
+            for name, values in geometry.items()
+        }
 
         table = dict(
             mean_psnr=mean_psnr,
@@ -406,6 +432,7 @@ class Renderer:
             mean_cc_ssim=float(mean_cc_ssim),
             mean_cc_lpips=float(mean_cc_lpips),
             mean_inference_time_ms=float(mean_inference_time),
+            **mean_geometry,
         )
         metrics_path = os.path.join(self.out_dir, "metrics.json")
         with open(metrics_path, "w") as f:
