@@ -13,21 +13,114 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
+import hashlib
 import math
 import os
 import platform
 import sys
+from typing import Iterable, Sequence
 
 import torch
 import torch.utils.cpp_extension
 from torch.utils.cpp_extension import CUDA_HOME
 
+# Escape hatch: set to 1 to force Slang regeneration even when the stamp is current.
+_FORCE_SLANG_REBUILD_ENV = "THREEDGRUT_FORCE_SLANG_REBUILD"
 
-def compile_slang_kernel(kernel_files: list[str], output_file: str, defines: list[str], include_paths: list[str]):
-    # Compile slang kernels
-    # TODO: do not overwrite files, use config hash to register the needed version
+
+def variant_digest(defines: Sequence[str], extra: Sequence[str] = ()) -> str:
+    """Short stable hash identifying one compiled kernel variant.
+
+    The digest covers every compile-time define that selects a code path (normals on/off,
+    surfel vs ellipsoid, feature dimensions, ...). Keying build artifacts by it keeps
+    variants from sharing a build directory, which would otherwise silently reuse a stale
+    binary when the configuration changes, or corrupt each other when two configurations
+    are built concurrently.
+    """
+    payload = "\n".join([*sorted(defines), *sorted(extra)])
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def variant_build_directory(
+    name: str,
+    defines: Sequence[str],
+    extra: Sequence[str] = (),
+    label: str = "",
+    verbose: bool = True,
+) -> str:
+    """Return a per-variant build directory nested under torch's extension directory.
+
+    The extension *name* is left untouched, so the loaded module keeps its import name and
+    `TORCH_EXTENSION_NAME` stays valid; only the directory holding the objects, the shared
+    library and torch's JIT lock file is specialized. Deriving the directory from the full
+    flag set rather than from a hand-picked subset means a newly introduced define cannot
+    be forgotten here and silently share a build with its opposite.
+
+    `label` is a purely cosmetic prefix to keep the directories recognizable on disk.
+    """
+    root = torch.utils.cpp_extension._get_build_directory(name, verbose=verbose)
+    digest = variant_digest(defines, extra)
+    path = os.path.join(root, f"{label}-{digest}" if label else digest)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _slang_source_fingerprint(kernel_files: Iterable[str], include_paths: Iterable[str]) -> str:
+    """Hash every Slang source that could take part in the compilation.
+
+    The entry files `#include` other `.slang` modules, so hashing only the entry points
+    would miss edits to the included ones and hand back a stale kernel. Hashing all
+    reachable `.slang` files is cheap (a few hundred KB) and avoids that trap.
+    """
+    paths = set(kernel_files)
+    for include_path in include_paths:
+        paths.update(glob.glob(os.path.join(include_path, "**", "*.slang"), recursive=True))
+
+    digest = hashlib.sha1()
+    for path in sorted(paths):
+        digest.update(path.encode("utf-8"))
+        try:
+            with open(path, "rb") as handle:
+                digest.update(handle.read())
+        except OSError:
+            # A missing file is part of the fingerprint too: if it reappears the hash changes.
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def compile_slang_kernel(
+    kernel_files: list[str],
+    output_file: str,
+    defines: list[str],
+    include_paths: list[str],
+) -> str:
+    """Generate CUDA from Slang, skipping the work when the output is already current.
+
+    `output_file` should live in a per-variant directory (see `variant_build_directory`):
+    the generated code depends on `defines`, so a shared path would make two variants
+    overwrite each other's header.
+    """
     import importlib
     import subprocess
+
+    # Skip the (not exactly cheap) slangc invocation when nothing that feeds it changed.
+    stamp_file = output_file + ".stamp"
+    stamp = "\n".join(
+        [
+            _slang_source_fingerprint(kernel_files, include_paths),
+            *sorted(defines),
+            *sorted(include_paths),
+            *sorted(kernel_files),
+        ]
+    )
+    force = os.environ.get(_FORCE_SLANG_REBUILD_ENV, "0") == "1"
+    if not force and os.path.isfile(output_file) and os.path.isfile(stamp_file):
+        with open(stamp_file, "r", encoding="utf-8") as handle:
+            if handle.read() == stamp:
+                return output_file
+
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
     slang_build_env = os.environ.copy()
     slang_build_env["PATH"] += ";" if os.name == "nt" else ":"
@@ -55,6 +148,11 @@ def compile_slang_kernel(kernel_files: list[str], output_file: str, defines: lis
         ],
         env=slang_build_env,
     )
+
+    with open(stamp_file, "w", encoding="utf-8") as handle:
+        handle.write(stamp)
+
+    return output_file
 
 
 def load(

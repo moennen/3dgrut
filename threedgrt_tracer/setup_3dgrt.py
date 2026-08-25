@@ -78,33 +78,53 @@ def setup_3dgrt(conf):
         "bindings.cpp",
     ]
 
-    # Compile slang kernels
+    # Compile slang kernels.
+    #
+    # NB: unlike 3dgut, the generated header cannot move into the per-variant build
+    # directory yet. It is included as <3dgrt/kernels/slang/gaussianParticles.cuh> by the
+    # OptiX kernels, which NVRTC compiles at trace time using an include directory derived
+    # in C++ from the tracer root (see OptixTracer::createPipeline). Relocating it needs an
+    # extra include path threaded through the pybind constructor, which lands in phase B
+    # together with the other 3dgrt changes. Until then the stamp in compile_slang_kernel
+    # keeps *sequential* variant switches correct by regenerating on a defines change, but
+    # two processes building different 3dgrt variants concurrently would still race on
+    # this shared path: build 3dgrt variants one at a time.
     slang_build_dir = os.path.join(os.path.dirname(__file__), "include", "3dgrt", "kernels", "slang")
+    slang_defines = [
+        f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
+        f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
+        f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
+        f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
+        f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
+        f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
+        f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type=='trisurfel')}",
+        # Feature-based radiance dimensions
+        *transform_defines,
+        *nht_defines,
+        *half_defines,
+    ]
     jit.compile_slang_kernel(
         kernel_files=[
             f"{os.path.join(slang_build_dir,'models/gaussianParticles.slang')}",
             f"{os.path.join(slang_build_dir,'models/radiativeParticles.slang')}",
         ],
         output_file=f"{os.path.join(slang_build_dir, 'gaussianParticles.cuh')}",
-        defines=[
-            f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
-            f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
-            f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
-            f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
-            f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
-            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
-            f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type=='trisurfel')}",
-            # Feature-based radiance dimensions
-            *transform_defines,
-            *nht_defines,
-            *half_defines,
-        ],
+        defines=slang_defines,
         include_paths=[
             os.path.join(os.path.dirname(__file__), "include"),
         ],
     )
 
-    # Compile and load.
+    # Compile and load. The slang defines join the variant identity even though they are not
+    # passed to nvcc: they change the generated header the compiled sources pull in.
+    label = (
+        f"k{conf.render.particle_kernel_degree}"
+        f"_n{int(conf.render.enable_normals)}"
+        f"_s{int(conf.render.primitive_type == 'trisurfel')}"
+    )
+    build_dir = jit.variant_build_directory(
+        "lib3dgrt_cc", cflags + cuda_flags + slang_defines, label=label, verbose=True
+    )
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
     return jit.load(
         name="lib3dgrt_cc",
@@ -112,4 +132,5 @@ def setup_3dgrt(conf):
         extra_cflags=cflags,
         extra_cuda_cflags=cuda_flags,
         extra_include_paths=include_paths,
+        build_directory=build_dir,
     )

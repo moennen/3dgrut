@@ -44,23 +44,28 @@ def setup_playground(conf):
         "../threedgrt_tracer/src/particlePrimitives.cu",
     ]
 
-    # Compile slang kernels
+    # Compile slang kernels. NB: this writes the same header as setup_3dgrt but from a
+    # different radiance model (sh- vs plain radiativeParticles), so the two clobber each
+    # other. The stamp in compile_slang_kernel makes the regeneration happen whenever the
+    # inputs differ, which keeps alternating playground/training runs correct; they cannot
+    # however be built concurrently.
     slang_build_dir = os.path.join(THREEDGRT_ROOT, "include/3dgrt/kernels/slang")
+    slang_defines = [
+        f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
+        f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
+        f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
+        f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
+        f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
+        f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
+        f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type == 'trisurfel')}",
+    ]
     jit.compile_slang_kernel(
         kernel_files=[
             f"{os.path.join(slang_build_dir, 'models/gaussianParticles.slang')}",
             f"{os.path.join(slang_build_dir, 'models/shRadiativeParticles.slang')}",
         ],
         output_file=f"{os.path.join(slang_build_dir, 'gaussianParticles.cuh')}",
-        defines=[
-            f"-DPARTICLE_RADIANCE_NUM_COEFFS={(conf.render.particle_radiance_sph_degree + 1) ** 2}",
-            f"-DGAUSSIAN_PARTICLE_KERNEL_DEGREE={conf.render.particle_kernel_degree}",
-            f"-DGAUSSIAN_PARTICLE_MIN_KERNEL_DENSITY={conf.render.particle_kernel_min_response}",
-            f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
-            f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
-            f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
-            f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type == 'trisurfel')}",
-        ],
+        defines=slang_defines,
         include_paths=[
             os.path.join(THREEDGRT_ROOT, "include"),
             os.path.join(PLAYGROUND_ROOT, "include"),
@@ -68,9 +73,11 @@ def setup_playground(conf):
     )
 
     # Compile and load.
+    build_dir = jit.variant_build_directory("libplayground_cc", slang_defines, verbose=True)
     source_paths = [os.path.abspath(os.path.join(os.path.dirname(__file__), fn)) for fn in source_files]
     return jit.load(
         name="libplayground_cc",
         sources=source_paths,
         extra_include_paths=include_paths,
+        build_directory=build_dir,
     )

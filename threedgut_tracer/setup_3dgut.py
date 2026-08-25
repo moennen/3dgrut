@@ -16,8 +16,6 @@
 import math
 import os
 
-import torch
-
 from threedgrut.model.features import Features
 from threedgrut.utils import jit
 
@@ -25,8 +23,6 @@ from threedgrut.utils import jit
 # ----------------------------------------------------------------------------
 #
 def setup_3dgut(conf):
-    build_dir = torch.utils.cpp_extension._get_build_directory("lib3dgut_cc", verbose=True)
-
     include_paths = []
     prefix = os.path.dirname(__file__)
     include_paths.append(os.path.join(prefix, "include"))
@@ -130,9 +126,23 @@ def setup_3dgut(conf):
         "bindings.cpp",
     ]
 
-    # Compile slang kernels
+    # Every flag that can select a code path takes part in the variant identity, so that
+    # switching e.g. normals on/off neither reuses a stale binary nor races with a
+    # concurrently building configuration.
+    label = (
+        f"k{conf.render.particle_kernel_degree}"
+        f"_n{int(conf.render.enable_normals)}"
+        f"_s{int(conf.render.primitive_type == 'trisurfel')}"
+        f"_kb{conf.render.splat.k_buffer_size}"
+    )
+    build_dir = jit.variant_build_directory("lib3dgut_cc", cflags + cuda_cflags, label=label, verbose=True)
+
+    # Compile slang kernels. The generated CUDA depends on `defines`, so it is written into
+    # the per-variant build directory rather than into the source tree; putting that
+    # directory first on the include path makes it win over any legacy artifact.
     slang_build_inc_dir = os.path.join(os.path.dirname(__file__), "include", "3dgut")
-    slang_output_file = os.path.join(os.path.dirname(__file__), "include", "threedgutSlang.cuh")
+    slang_output_file = os.path.join(build_dir, "gen", "threedgutSlang.cuh")
+    include_paths.insert(0, os.path.dirname(slang_output_file))
 
     jit.compile_slang_kernel(
         kernel_files=[f"{os.path.join(slang_build_inc_dir, 'threedgut.slang')}"],
@@ -143,6 +153,12 @@ def setup_3dgut(conf):
         ],
         defines=defines,
     )
+
+    # Drop the pre-variant artifact so a stale copy can never shadow the generated one.
+    legacy_slang_output = os.path.join(os.path.dirname(__file__), "include", "threedgutSlang.cuh")
+    for path in (legacy_slang_output, legacy_slang_output + ".stamp"):
+        if os.path.isfile(path):
+            os.remove(path)
 
     # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
