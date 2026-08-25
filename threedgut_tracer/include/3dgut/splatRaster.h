@@ -83,7 +83,9 @@ public:
              torch::Tensor rayRadianceDensity,
              torch::Tensor rayRadianceDensityGradient,
              torch::Tensor rayHitDistance,
-             torch::Tensor rayHitDistanceGradient);
+             torch::Tensor rayHitDistanceGradient,
+             torch::Tensor rayHitNormal,
+             torch::Tensor rayHitNormalGradient);
 
     std::map<std::string, float>
     collectTimes();

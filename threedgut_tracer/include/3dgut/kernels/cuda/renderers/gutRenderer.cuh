@@ -250,7 +250,9 @@ __global__ NHT_BWD_LB void renderBackward(threedgut::RenderParameters params,
                                           tcnn::vec4* __restrict__ particlesProjectedConicOpacityGradPtr,
                                           float* __restrict__ particlesGlobalDepthGradPtr,
                                           float* __restrict__ particlesPrecomputedFeaturesGradPtr,
-                                          const uint64_t* __restrict__ parameterGradientMemoryHandles) {
+                                          const uint64_t* __restrict__ parameterGradientMemoryHandles,
+                                          const tcnn::vec3* __restrict__ worldHitNormalPtr         = nullptr,
+                                          const tcnn::vec3* __restrict__ worldHitNormalGradientPtr = nullptr) {
 
     auto ray = initializeBackwardRay<TGUTRenderer::TRayPayloadBackward>(params,
                                                                         sensorRayOriginPtr,
@@ -259,7 +261,9 @@ __global__ NHT_BWD_LB void renderBackward(threedgut::RenderParameters params,
                                                                         worldHitDistanceGradientPtr,
                                                                         featureDensityPtr,
                                                                         featureDensityGradientPtr,
-                                                                        sensorToWorldTransform);
+                                                                        sensorToWorldTransform,
+                                                                        worldHitNormalPtr,
+                                                                        worldHitNormalGradientPtr);
 
     // TGUTModel::evalBackward(params, ray, {parameterMemoryHandles}, {parameterGradientMemoryHandles});
 

@@ -83,15 +83,21 @@ struct Parameters : IDifferentiable {
     float density;
 };
 
-[BackwardDifferentiable][ForceInline] Parameters fetchParameters(
-    no_diff uint32_t particleIdx,
-    no_diff RawParametersBuffer parametersBuffer) {
-    const RawParameters rawParameters = fetchParametersFromBuffer(particleIdx, parametersBuffer);
+// raw (position/scale/quaternion/density) -> cooked Parameters (rotation matrix). Differentiable
+// so a backward holding a Parameters gradient can convert it back to a RawParameters gradient,
+// which is what the warp-reduced K=0 path needs (it never touches the global gradient buffer).
+[BackwardDifferentiable][ForceInline] Parameters parametersFromRaw(RawParameters rawParameters) {
     return {
         rawParameters.position,
         rawParameters.scale,
         transforms.rotationMatrixTranspose(rawParameters.quaternion),
         rawParameters.density};
+}
+
+[BackwardDifferentiable][ForceInline] Parameters fetchParameters(
+    no_diff uint32_t particleIdx,
+    no_diff RawParametersBuffer parametersBuffer) {
+    return parametersFromRaw(fetchParametersFromBuffer(particleIdx, parametersBuffer));
 }
 [BackwardDifferentiable][ForceInline] void cannonicalRay(
     in float3 rayOrigin,
@@ -321,6 +327,43 @@ float processHitFromBuffer<let backToFront : bool>(
     return 0.0f;
 }
 
+// Same compositing step as processHitFromBuffer, but differentiating w.r.t. a caller-held
+// Parameters value instead of the global buffer. Used by the K=0 warp-reduced backward, which
+// accumulates into thread-local RawParameters gradients and reduces them once per particle.
+[BackwardDifferentiable]
+float processHitFromParameters<let backToFront : bool>(
+    no_diff float3 rayOrigin,
+    no_diff float3 rayDirection,
+    in Parameters parameters,
+    inout float transmittance,
+    inout float integratedDepth,
+    out float3 canonicalIntersection,
+    no_diff bool enableNormal,
+    inout float3 integratedNormal)
+{
+    float alpha = 0.0f;
+    float depth;
+    float3 normal;
+    if (hit(rayOrigin,
+            rayDirection,
+            parameters,
+            alpha,
+            depth,
+            canonicalIntersection,
+            enableNormal,
+            normal))
+    {
+        return integrateHit<backToFront>(alpha,
+                                         transmittance,
+                                         depth,
+                                         integratedDepth,
+                                         enableNormal,
+                                         normal,
+                                         integratedNormal);
+    }
+    return 0.0f;
+}
+
 [BackwardDifferentiable][ForceInline] float3x3 computeCovariance(
     in Parameters parameters) {
     // Σ = RSS^TR^T
@@ -488,6 +531,89 @@ void particleDensityProcessHitBwdToBuffer(
         {
             integratedNormalGrad = integratedNormalDiff.getDifferential();
         }
+    }
+}
+
+// As particleDensityProcessHitBwdToBuffer, but returning the gradient in a caller-owned
+// RawParameters struct instead of atomically accumulating into the global gradient buffer.
+// This is what the K=0 optimized backward needs: one warp reduction per particle rather than
+// one atomic per thread per particle.
+[CudaDeviceExport]
+void particleDensityProcessHitBwdToRawParameters(
+    float3 rayOrigin,
+    float3 rayDirection,
+    in gaussianParticle.RawParameters rawParameters,
+    inout gaussianParticle.RawParameters rawParametersGrad,
+    in float alpha,
+    in float alphaGrad,
+    inout float transmittance,
+    inout float transmittanceGrad,
+    in float depth,
+    inout float integratedDepth,
+    inout float integratedDepthGrad,
+    in float3 canonicalIntersectionGrad,
+    bool enableNormal,
+    in float3 normal,
+    inout float3 integratedNormal,
+    inout float3 integratedNormalGrad)
+{
+    if (alpha > 0.0f)
+    {
+        const float weight = 1.0f / (1.0f - alpha);
+
+        gaussianParticle.Parameters parameters = gaussianParticle.parametersFromRaw(rawParameters);
+        DifferentialPair<gaussianParticle.Parameters> parametersDiff =
+            DifferentialPair<gaussianParticle.Parameters>(parameters, gaussianParticle.Parameters(float3(0), float3(0), float3x3(0), 0));
+
+        transmittance *= weight;
+        DifferentialPair<float> transmittanceDiff = DifferentialPair<float>(transmittance, transmittanceGrad);
+
+        integratedDepth = (integratedDepth - depth * alpha) * weight;
+        DifferentialPair<float> integratedDepthDiff = DifferentialPair<float>(integratedDepth, integratedDepthGrad);
+
+        DifferentialPair<float3> integratedNormalDiff;
+        if (enableNormal)
+        {
+            integratedNormal = (integratedNormal - normal * alpha) * weight;
+            integratedNormalDiff = DifferentialPair<float3>(integratedNormal, integratedNormalGrad);
+        }
+        else
+        {
+            integratedNormalDiff = DifferentialPair<float3>(float3(0), float3(0));
+        }
+
+        bwd_diff(gaussianParticle.processHitFromParameters<true>)(
+            rayOrigin,
+            rayDirection,
+            parametersDiff,
+            transmittanceDiff,
+            integratedDepthDiff,
+            canonicalIntersectionGrad,
+            enableNormal,
+            integratedNormalDiff,
+            alphaGrad);
+
+        transmittanceGrad = transmittanceDiff.getDifferential();
+        integratedDepthGrad = integratedDepthDiff.getDifferential();
+        if (enableNormal)
+        {
+            integratedNormalGrad = integratedNormalDiff.getDifferential();
+        }
+
+        DifferentialPair<gaussianParticle.RawParameters> rawParametersDiff =
+            DifferentialPair<gaussianParticle.RawParameters>(
+                rawParameters,
+                gaussianParticle.RawParameters(float3(0), 0.0, float4(0), float3(0), 0.0));
+
+        bwd_diff(gaussianParticle.parametersFromRaw)(
+            rawParametersDiff,
+            parametersDiff.getDifferential());
+
+        rawParametersGrad.position += rawParametersDiff.getDifferential().position;
+        rawParametersGrad.density += rawParametersDiff.getDifferential().density;
+        rawParametersGrad.quaternion += rawParametersDiff.getDifferential().quaternion;
+        rawParametersGrad.scale += rawParametersDiff.getDifferential().scale;
+        rawParametersGrad.padding += rawParametersDiff.getDifferential().padding;
     }
 }
 

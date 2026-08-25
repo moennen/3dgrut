@@ -183,6 +183,46 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
         }
     }
 
+    // Same backward as densityProcessHitBwdToBuffer, but accumulating into a caller-owned
+    // RawParameters gradient rather than the global buffer. The K=0 renderer uses this so the
+    // per-particle gradient can be warp-reduced into a single atomic.
+    __forceinline__ __device__ void densityProcessHitBwdToRawParameters(const tcnn::vec3& rayOrigin,
+                                                                        const tcnn::vec3& rayDirection,
+                                                                        const DensityRawParameters& densityRawParameters,
+                                                                        DensityRawParameters& densityRawParametersGrad,
+                                                                        float alpha,
+                                                                        float alphaGrad,
+                                                                        float& transmittance,
+                                                                        float& transmittanceGrad,
+                                                                        float depth,
+                                                                        float& integratedDepth,
+                                                                        float& integratedDepthGrad,
+                                                                        const float3& canonicalIntersectionGrad,
+                                                                        const tcnn::vec3* normal         = nullptr,
+                                                                        tcnn::vec3* integratedNormal     = nullptr,
+                                                                        tcnn::vec3* integratedNormalGrad = nullptr
+
+    ) const {
+        if constexpr (TDifferentiable) {
+            particleDensityProcessHitBwdToRawParameters(*reinterpret_cast<const float3*>(&rayOrigin),
+                                                        *reinterpret_cast<const float3*>(&rayDirection),
+                                                        reinterpret_cast<const gaussianParticle_RawParameters_0&>(densityRawParameters),
+                                                        reinterpret_cast<gaussianParticle_RawParameters_0*>(&densityRawParametersGrad),
+                                                        alpha,
+                                                        alphaGrad,
+                                                        &transmittance,
+                                                        &transmittanceGrad,
+                                                        depth,
+                                                        &integratedDepth,
+                                                        &integratedDepthGrad,
+                                                        canonicalIntersectionGrad,
+                                                        normal != nullptr,
+                                                        normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(normal),
+                                                        reinterpret_cast<float3*>(integratedNormal),
+                                                        reinterpret_cast<float3*>(integratedNormalGrad));
+        }
+    }
+
     __forceinline__ __device__ bool densityHitCustom(const tcnn::vec3& rayOrigin,
                                                      const tcnn::vec3& rayDirection,
                                                      uint32_t particleIdx,

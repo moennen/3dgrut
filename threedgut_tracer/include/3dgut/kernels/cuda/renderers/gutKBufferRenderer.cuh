@@ -198,7 +198,12 @@ struct GUTKBufferRenderer : Params {
                                                           hitParticle.hitT,
                                                           ray.hitTBackward,
                                                           ray.hitTGradient,
-                                                          canonicalIntersectionGrad);
+                                                          canonicalIntersectionGrad,
+                                                          // Compile-time nullptr when normals are off, which the
+                                                          // Slang entry point reads as `enableNormal = false`.
+                                                          hitParticle.normalPtr(),
+                                                          ray.normalPtr(),
+                                                          ray.normalGradientPtr());
 
             ray.transmittance *= (1.0 - hitParticle.alpha);
 
@@ -600,8 +605,10 @@ struct GUTKBufferRenderer : Params {
                         float hitT                   = 0.f;
                         float3 canonicalIntersection = make_float3(0.f, 0.f, 0.f);
 
+                        OptionalNormal<GAUSSIAN_PARTICLE_ENABLE_NORMAL> hitNormal;
+
                         if (particles.densityHit(ray.origin, ray.direction, particleData.densityParameters,
-                                                 hitAlpha, hitT, canonicalIntersection) &&
+                                                 hitAlpha, hitT, canonicalIntersection, hitNormal.normalPtr()) &&
                             (hitT > ray.tMinMax.x) &&
                             (hitT < ray.tMinMax.y)) {
                             // Re-evaluate NHT features at canonical intersection point (cheap: barycentric interp)
@@ -632,7 +639,10 @@ struct GUTKBufferRenderer : Params {
                                                                                    hitT,
                                                                                    ray.hitTBackward,
                                                                                    ray.hitTGradient,
-                                                                                   canonicalIntersectionGrad);
+                                                                                   canonicalIntersectionGrad,
+                                                                                   hitNormal.normalPtr(),
+                                                                                   ray.normalPtr(),
+                                                                                   ray.normalGradientPtr());
 
                             ray.transmittance *= (1.0f - hitAlpha);
                         }
@@ -696,6 +706,53 @@ struct GUTKBufferRenderer : Params {
                     TFeaturesVec featuresGrad = TFeaturesVec::zero();
 
                     if (ray.isAlive()) {
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+                        // Normal-aware split backward. The fused `processHitBwd` carries no
+                        // normal, so when normals are compiled in we re-evaluate the hit and
+                        // back-prop features and density separately -- the same steps as
+                        // evalKBuffer's processHitParticle, but accumulating into the
+                        // thread-local RawParameters gradient that is warp-reduced below.
+                        const DensityParameters cookedParameters = particles.fetchDensityParameters(particleData.idx);
+                        float hitAlpha                           = 0.0f;
+                        float hitT                               = 0.0f;
+                        float3 canonicalIntersection             = make_float3(0.f, 0.f, 0.f);
+                        OptionalNormal<true> hitNormal;
+                        if (particles.densityHit(ray.origin, ray.direction, cookedParameters,
+                                                 hitAlpha, hitT, canonicalIntersection, hitNormal.normalPtr()) &&
+                            (hitT > ray.tMinMax.x) && (hitT < ray.tMinMax.y)) {
+
+                            float hitAlphaGrad               = 0.0f;
+                            float3 canonicalIntersectionGrad = make_float3(0.f, 0.f, 0.f);
+
+                            particles.featuresIntegrateBwd(hitAlpha,
+                                                           hitAlphaGrad,
+                                                           particleData.features,
+                                                           featuresGrad,
+                                                           ray.featuresBackward,
+                                                           ray.featuresGradient);
+
+                            particles.densityProcessHitBwdToRawParameters(ray.origin,
+                                                                          ray.direction,
+                                                                          particleData.densityParameters,
+                                                                          densityRawParametersGrad,
+                                                                          hitAlpha,
+                                                                          hitAlphaGrad,
+                                                                          ray.transmittanceBackward,
+                                                                          ray.transmittanceGradient,
+                                                                          hitT,
+                                                                          ray.hitTBackward,
+                                                                          ray.hitTGradient,
+                                                                          canonicalIntersectionGrad,
+                                                                          hitNormal.normalPtr(),
+                                                                          ray.normalPtr(),
+                                                                          ray.normalGradientPtr());
+
+                            ray.transmittance *= (1.0f - hitAlpha);
+                        }
+                        if (ray.transmittance < Particles::MinTransmittanceThreshold) {
+                            ray.kill();
+                        }
+#else
                         particles.processHitBwd<false>(
                             ray.origin,
                             ray.direction,
@@ -716,6 +773,7 @@ struct GUTKBufferRenderer : Params {
                         if (ray.transmittance < Particles::MinTransmittanceThreshold) {
                             ray.kill();
                         }
+#endif
                     }
 
                     particles.processHitBwdUpdateFeaturesGradient(particleData.idx, featuresGrad,

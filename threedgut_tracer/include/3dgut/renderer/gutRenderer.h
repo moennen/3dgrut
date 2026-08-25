@@ -95,7 +95,9 @@ public:
                           tcnn::vec3* worldRayDirectionGradientCudaPtr,
                           Parameters& parameters,
                           int cudaDeviceIndex,
-                          cudaStream_t cudaStream);
+                          cudaStream_t cudaStream,
+                          const tcnn::vec3* worldHitNormalCudaPtr         = nullptr,
+                          const tcnn::vec3* worldHitNormalGradientCudaPtr = nullptr);
 };
 
 } // namespace threedgut

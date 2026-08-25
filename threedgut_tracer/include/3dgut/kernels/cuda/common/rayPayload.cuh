@@ -51,6 +51,35 @@ struct OptionalNormal<false> {
 
 using TOptionalNormal = OptionalNormal<GAUSSIAN_PARTICLE_ENABLE_NORMAL>;
 
+// Upstream gradient of the rendered normal, carried by the backward payload only.
+//
+// A separate template rather than a second OptionalNormal base: inheriting the same base
+// twice would make `normalPtr()` ambiguous, and the backward payload needs to hold the
+// accumulated normal (replayed, in the inherited OptionalNormal) and its incoming gradient
+// side by side. Same empty base optimization, so the disabled build stays byte-identical.
+template <bool Enabled>
+struct OptionalNormalGradient {
+    tcnn::vec3 normalGradientVec;
+    __host__ __device__ __forceinline__ tcnn::vec3* normalGradientPtr() {
+        return &normalGradientVec;
+    }
+    __host__ __device__ __forceinline__ const tcnn::vec3* normalGradientPtr() const {
+        return &normalGradientVec;
+    }
+};
+
+template <>
+struct OptionalNormalGradient<false> {
+    __host__ __device__ __forceinline__ tcnn::vec3* normalGradientPtr() {
+        return nullptr;
+    }
+    __host__ __device__ __forceinline__ const tcnn::vec3* normalGradientPtr() const {
+        return nullptr;
+    }
+};
+
+using TOptionalNormalGradient = OptionalNormalGradient<GAUSSIAN_PARTICLE_ENABLE_NORMAL>;
+
 template <int FeatN>
 struct RayPayload : TOptionalNormal {
     static constexpr uint32_t FeatDim = FeatN;

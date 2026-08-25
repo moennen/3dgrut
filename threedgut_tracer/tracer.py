@@ -210,6 +210,9 @@ class Tracer:
                 ray_hit_distance,
                 particle_density,
                 particle_features,
+                # Needed by the backward: the compositing replay unwinds the accumulated
+                # normal in place, so it has to start from the forward result.
+                ray_hit_normal,
             )
 
             ctx.frame_id = frame_id
@@ -223,8 +226,8 @@ class Tracer:
                 ray_hit_distance,
                 ray_hit_count,
                 mog_visibility,
-                # Empty unless normals are compiled in. Not differentiable: the forward
-                # port carries the buffer only, so no gradient flows back through it.
+                # Empty unless normals are compiled in, in which case it is differentiable
+                # w.r.t. position / rotation / scale / density.
                 ray_hit_normal,
             )
 
@@ -235,7 +238,7 @@ class Tracer:
             ray_hit_distance_grd,
             ray_hit_count_grd_UNUSED,
             mog_visibility_grd_UNUSED,
-            ray_hit_normal_grd_UNUSED,
+            ray_hit_normal_grd,
         ):
             (
                 ray_ori,
@@ -245,7 +248,13 @@ class Tracer:
                 ray_hit_distance,
                 particle_density,
                 particle_features,
+                ray_hit_normal,
             ) = ctx.saved_variables
+
+            # Autograd passes None when nothing downstream consumed the normals, and the
+            # kernel reads the buffer unconditionally once normals are compiled in.
+            if ray_hit_normal_grd is None:
+                ray_hit_normal_grd = torch.zeros_like(ray_hit_normal)
 
             frame_id = ctx.frame_id
             n_active_features = ctx.n_active_features
@@ -269,6 +278,8 @@ class Tracer:
                 ray_features_density_grd,
                 ray_hit_distance,
                 ray_hit_distance_grd,
+                ray_hit_normal,
+                ray_hit_normal_grd.contiguous(),
             )
 
             mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, _ = torch.split(

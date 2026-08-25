@@ -18,7 +18,7 @@
 #include <3dgut/kernels/cuda/common/rayPayload.cuh>
 
 template <int FeatN>
-struct RayPayloadBackward : public RayPayload<FeatN> {
+struct RayPayloadBackward : public RayPayload<FeatN>, public TOptionalNormalGradient {
     float transmittanceBackward;
     float transmittanceGradient;
     float hitTBackward;
@@ -26,6 +26,15 @@ struct RayPayloadBackward : public RayPayload<FeatN> {
     tcnn::vec<FeatN> featuresBackward;
     tcnn::vec<FeatN> featuresGradient;
 };
+
+// The backward payload lives in registers on the hot path, so the normal gradient must cost
+// nothing once normals are compiled out. OptionalNormalGradient<false> is empty and is a
+// distinct type from the OptionalNormal base RayPayload already carries, so the empty base
+// optimization applies; this pins that rather than trusting it.
+static_assert(GAUSSIAN_PARTICLE_ENABLE_NORMAL ||
+                  sizeof(RayPayloadBackward<RAY_FEATURE_DIM>) ==
+                      sizeof(RayPayload<RAY_FEATURE_DIM>) + 4 * sizeof(float) + 2 * sizeof(tcnn::vec<RAY_FEATURE_DIM>),
+              "compiling normals out must not grow the backward ray payload");
 
 template <typename RayPayloadT>
 __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderParameters& params,
@@ -35,7 +44,9 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
                                                         const float* __restrict__ worldHitDistanceGradientPtr,
                                                         const TFeatureDensityElem* __restrict__ featuresDensityPtr,
                                                         const float* __restrict__ featuresDensityGradientPtr,
-                                                        const tcnn::mat4x3& sensorToWorldTransform) {
+                                                        const tcnn::mat4x3& sensorToWorldTransform,
+                                                        const tcnn::vec3* __restrict__ worldHitNormalPtr         = nullptr,
+                                                        const tcnn::vec3* __restrict__ worldHitNormalGradientPtr = nullptr) {
 
     // NB : no backpropagation through the forward ray initialization / finalization
     RayPayloadT ray = initializeRay<RayPayloadT>(params,
@@ -67,6 +78,19 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
 #endif
         ray.hitTBackward = worldHitDistancePtr[ray.idx];
         ray.hitTGradient = worldHitDistanceGradientPtr[ray.idx];
+
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+        // The normal has no separate `*Backward` slot: the compositing replay unwinds the
+        // accumulator in place, exactly as the k-buffer backward does for features. So seed
+        // the inherited accumulator with the forward result rather than the zero left by
+        // initializeRay, and carry the upstream gradient alongside it.
+        if ((worldHitNormalPtr != nullptr) && (worldHitNormalGradientPtr != nullptr)) {
+            ray.normalVec         = worldHitNormalPtr[ray.idx];
+            ray.normalGradientVec = worldHitNormalGradientPtr[ray.idx];
+        } else {
+            ray.normalGradientVec = tcnn::vec3(0.0f);
+        }
+#endif
     }
 
     return ray;
