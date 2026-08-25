@@ -262,3 +262,58 @@ def test_world_view_dirs_rotates_into_the_world_frame() -> None:
     dirs = world_view_dirs(rays, yaw)
     assert torch.allclose(dirs[0, 0, 0], torch.tensor([1.0, 0.0, 0.0]), atol=1e-6)
     assert torch.allclose(dirs.norm(dim=-1), torch.ones(1, 1, 1))
+
+
+def test_floater_fraction_counts_only_surfaces_well_in_front() -> None:
+    """Mild depth noise must not be counted; geometry at half the distance must be."""
+    gt = torch.tensor([[[10.0, 10.0, 10.0, 10.0]]])
+    pred = torch.tensor([[[9.0, 11.0, 4.0, 2.0]]])  # two near misses, two floaters
+    metrics = depth_metrics(pred, gt, torch.ones(1, 1, 4, dtype=torch.bool))
+
+    assert metrics["depth_floater_frac"] == pytest.approx(0.5)
+
+
+def test_floater_fraction_ignores_pixels_the_model_declined_to_render() -> None:
+    """A zero prediction is missing coverage, already reported, not a floater."""
+    gt = torch.tensor([[[10.0, 10.0]]])
+    pred = torch.tensor([[[0.0, 10.0]]])
+    metrics = depth_metrics(pred, gt, torch.ones(1, 1, 2, dtype=torch.bool))
+
+    assert metrics["depth_floater_frac"] == pytest.approx(0.0)
+    assert metrics["depth_covered_frac"] == pytest.approx(0.5)
+
+
+def test_floater_fraction_is_insensitive_to_scene_scale() -> None:
+    """The same relative error in a scene 100x larger must give the same rate.
+
+    Otherwise the metric could not be compared across scenes of different extent, which
+    is the flaw that already makes averaged rmse and bias misleading.
+    """
+    gt = torch.tensor([[[10.0, 10.0]]])
+    pred = torch.tensor([[[3.0, 9.5]]])
+    small = depth_metrics(pred, gt, torch.ones(1, 1, 2, dtype=torch.bool))
+    large = depth_metrics(pred * 100, gt * 100, torch.ones(1, 1, 2, dtype=torch.bool))
+
+    assert small["depth_floater_frac"] == large["depth_floater_frac"] == pytest.approx(0.5)
+
+
+def test_floaters_are_distinguished_from_symmetric_noise_of_equal_abs_rel() -> None:
+    """Two predictions can share an abs-rel while only one has misplaced geometry.
+
+    This is exactly the case the aggregate hid: a broad band of ghost surfaces and
+    ordinary two-sided error look the same on average.
+    """
+    gt = torch.full((1, 1, 10), 10.0)
+    ghosts = gt.clone()
+    ghosts[..., :2] = 1.0  # 20% of pixels at a tenth of the true depth
+    spread = gt.clone()
+    # Nine pixels off by 20% sum to the same relative error as two off by 90%.
+    spread[..., :5] = 12.0
+    spread[..., 5:9] = 8.0
+
+    ghost_metrics = depth_metrics(ghosts, gt, torch.ones(1, 1, 10, dtype=torch.bool))
+    spread_metrics = depth_metrics(spread, gt, torch.ones(1, 1, 10, dtype=torch.bool))
+
+    assert ghost_metrics["depth_abs_rel"] == pytest.approx(spread_metrics["depth_abs_rel"])
+    assert ghost_metrics["depth_floater_frac"] == pytest.approx(0.2)
+    assert spread_metrics["depth_floater_frac"] == pytest.approx(0.0)

@@ -43,6 +43,7 @@ QUALITY_COLUMNS = [
     ("depth_delta1", "d_delta1", "{:.3f}", False),
     ("depth_bias", "d_bias", "{:+.3f}", None),
     ("depth_covered_frac", "d_cover", "{:.3f}", False),
+    ("depth_floater_frac", "d_float", "{:.4f}", True),
 ]
 
 # Reported for information only; see the module docstring for why it is not ranked on.

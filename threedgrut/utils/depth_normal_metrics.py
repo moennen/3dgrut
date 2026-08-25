@@ -41,6 +41,11 @@ MIN_REFERENCE_NORMAL_NORM = 0.5
 # Standard depth accuracy thresholds: the fraction of pixels within a ratio of 1.25^k.
 DELTA_THRESHOLDS = (1.25, 1.25**2, 1.25**3)
 
+# A surface rendered closer than this fraction of its reference depth is counted as a
+# floater. Half is well outside plausible depth noise, so the count reflects geometry
+# placed in the wrong place rather than an imprecise estimate of the right one.
+FLOATER_RATIO = 0.5
+
 # Standard normal accuracy thresholds in degrees.
 ANGLE_THRESHOLDS_DEG = (11.25, 22.5, 30.0)
 
@@ -120,6 +125,11 @@ def depth_metrics(
         "depth_valid_px": float(count),
         # Fraction of reference surfaces the model rendered anything at all for.
         "depth_covered_frac": float(positive.double().mean()),
+        # Surfaces placed far in front of the reference: semi-transparent ghost layers
+        # that a symmetric average hides, since they are a small fraction of pixels with
+        # a large one-sided error. Separating them matters because they behave quite
+        # differently from the mild, symmetric noise that dominates abs-rel.
+        "depth_floater_frac": float((positive & (pred < FLOATER_RATIO * gt)).double().mean()),
     }
     for index, threshold in enumerate(DELTA_THRESHOLDS, start=1):
         # Pixels with no prediction cannot be within a ratio, so they count as misses
