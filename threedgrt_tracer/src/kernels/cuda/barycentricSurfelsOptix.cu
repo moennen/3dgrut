@@ -148,7 +148,12 @@ extern "C" __global__ void __raygen__rg() {
 #ifdef ENABLE_NORMALS
                     // fetch the normals from the precomputed normals buffer
                     const float3 rayParticleNormal = make_float3(particleNormalsDensity.x, particleNormalsDensity.y, particleNormalsDensity.z);
-                    rayNormal += (dot(rayParticleNormal, rayDirection) < 0 ? -1.f : 1.f) * rayParticleNormal * rayParticleWeight;
+                    // Orient towards the ray, matching canonicalRayNormal() in the Slang model and
+                    // processHit() in kernels/cuda/gaussianParticles.cuh. This kernel used the
+                    // opposite convention, so its normals came out negated relative to every other
+                    // pipeline. The underlying normal is still the precomputed surfel normal rather
+                    // than a derived disk normal, so only the orientation is shared.
+                    rayNormal += (dot(rayParticleNormal, rayDirection) > 0 ? -1.f : 1.f) * rayParticleNormal * rayParticleWeight;
 #endif
 
 #ifdef ENABLE_HIT_COUNTS

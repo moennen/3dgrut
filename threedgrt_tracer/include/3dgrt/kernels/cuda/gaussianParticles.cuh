@@ -400,9 +400,18 @@ __device__ inline bool processHit(
         *depth += hitT * weight;
 
         if (normal) {
-            constexpr float ellispoidSqRadius = 9.0f;
-            const float3 particleScaleRotated = (particleRotation * particleScale);
-            *normal += weight * (SurfelPrimitive ? make_float3(0, 0, (grd.z > 0 ? 1 : -1) * particleScaleRotated.z) : safe_normalize((gro + grd * (dot(grd, -1 * gro) - sqrtf(ellispoidSqRadius - grayDist))) * particleScaleRotated));
+            // Flat-disk normal: the particle's third canonical axis carried into world space and
+            // oriented to face the ray. Mirrors canonicalRayNormal() in the Slang model and the
+            // 3DGUT kernels, so every pipeline reports the same quantity. Deliberately independent
+            // of SurfelPrimitive: the Slang version ignores its Surfel parameter too, treating each
+            // particle as its flattest plane.
+            //
+            // `particleRotation` maps world -> canonical (see `gposc * particleRotation` above), and
+            // `operator*(float33, float3)` applies its transpose, giving canonical -> world.
+            // Sign matches Slang's `dot(surfelNm, canonicalRayDirection) > 0` test, which reduces to
+            // the sign of grd.z: dot(n_canonical, d_canonical) = dot(n_world, d_world) / scale.z.
+            const float3 canonicalNormal = make_float3(0.f, 0.f, grd.z > 0.f ? -1.f : 1.f);
+            *normal += weight * safe_normalize(particleRotation * canonicalNormal);
         }
     }
 
