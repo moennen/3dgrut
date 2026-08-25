@@ -12,6 +12,7 @@ from threedgrut.utils.depth_normal_metrics import (
     geometry_metrics,
     normal_metrics,
     reference_depth_validity,
+    world_view_dirs,
 )
 
 SENTINEL = 1e10
@@ -206,3 +207,58 @@ def test_geometry_metrics_excludes_sky_from_normals_via_reference_depth() -> Non
 
     assert metrics["normal_valid_px"] == 1
     assert metrics["normal_mean_deg"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_viewdir_control_is_zero_gain_for_the_no_geometry_cheat() -> None:
+    """Pointing every normal back down the view ray must show exactly no gain.
+
+    This is the degenerate predictor the control exists to expose: it uses no geometry,
+    yet scores well simply because both vectors are forced into the same hemisphere.
+    """
+    view = torch.tensor([[[[0.0, 0.3, 0.95], [0.5, 0.0, 0.87]]]])
+    view = view / view.norm(dim=-1, keepdim=True)
+    gt = torch.tensor([[[[0.0, 0.0, -1.0], [0.1, 0.2, -0.97]]]])
+    gt = gt / gt.norm(dim=-1, keepdim=True)
+
+    metrics = normal_metrics(-view.squeeze(0), gt.squeeze(0), torch.ones(1, 2, dtype=torch.bool), view.squeeze(0))
+
+    # acos is steep near zero, so float32 inputs leave a few micro-degrees of slack.
+    assert metrics["normal_gain_vs_viewdir_deg"] == pytest.approx(0.0, abs=1e-4)
+    assert metrics["normal_viewdir_control_deg"] == pytest.approx(metrics["normal_mean_deg"], abs=1e-4)
+
+
+def test_viewdir_control_reports_negative_gain_when_the_buffer_is_worse() -> None:
+    """A buffer that loses to the cheat must be reported as losing, not merely as ~48 degrees."""
+    view = torch.tensor([[[0.0, 0.0, 1.0]]])
+    gt = torch.tensor([[[0.0, 0.2, -0.98]]])
+    gt = gt / gt.norm(dim=-1, keepdim=True)
+    worse = torch.tensor([[[0.0, 0.8, -0.6]]])
+
+    metrics = normal_metrics(worse, gt, torch.ones(1, 1, dtype=torch.bool), view)
+    assert metrics["normal_gain_vs_viewdir_deg"] < 0.0
+
+
+def test_viewdir_control_reports_positive_gain_for_a_real_normal() -> None:
+    view = torch.tensor([[[0.0, 0.0, 1.0]]])
+    gt = torch.tensor([[[0.0, 0.6, -0.8]]])
+    metrics = normal_metrics(gt.clone(), gt, torch.ones(1, 1, dtype=torch.bool), view)
+
+    assert metrics["normal_mean_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert metrics["normal_gain_vs_viewdir_deg"] > 30.0
+
+
+def test_control_is_absent_when_no_view_direction_is_given() -> None:
+    gt = torch.tensor([[[0.0, 0.0, 1.0]]])
+    metrics = normal_metrics(gt.clone(), gt, torch.ones(1, 1, dtype=torch.bool))
+    assert "normal_viewdir_control_deg" not in metrics
+
+
+def test_world_view_dirs_rotates_into_the_world_frame() -> None:
+    """A 90 degree yaw must move a forward ray onto the world x axis, not leave it alone."""
+    rays = torch.tensor([[[[0.0, 0.0, 2.0]]]])  # deliberately not unit length
+    yaw = torch.eye(4).unsqueeze(0)
+    yaw[0, :3, :3] = torch.tensor([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+
+    dirs = world_view_dirs(rays, yaw)
+    assert torch.allclose(dirs[0, 0, 0], torch.tensor([1.0, 0.0, 0.0]), atol=1e-6)
+    assert torch.allclose(dirs.norm(dim=-1), torch.ones(1, 1, 1))

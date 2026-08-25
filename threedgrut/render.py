@@ -28,7 +28,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import threedgrut.datasets as datasets
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.utils.color_correct import color_correct_affine
-from threedgrut.utils.depth_normal_metrics import geometry_metrics
+from threedgrut.utils.depth_normal_metrics import geometry_metrics, world_view_dirs
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
 from threedgrut.utils.render import (
@@ -381,10 +381,14 @@ class Renderer:
                 ).item()
             )
 
+            normal_gt = getattr(gpu_batch, "normal_gt", None) if score_normals else None
             for name, value in geometry_metrics(
                 outputs,
                 getattr(gpu_batch, "depth_gt", None),
-                getattr(gpu_batch, "normal_gt", None) if score_normals else None,
+                normal_gt,
+                # Lets the report state what the same metric would be without any
+                # geometry, which is most of it once normals are forced camera-facing.
+                world_view_dirs(gpu_batch.rays_dir, gpu_batch.T_to_world) if normal_gt is not None else None,
             ).items():
                 geometry[name].append(value)
 

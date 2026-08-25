@@ -75,6 +75,17 @@ def expected_depth(
     return depth, confident
 
 
+def world_view_dirs(rays_dir: torch.Tensor, T_to_world: torch.Tensor) -> torch.Tensor:
+    """Unit ray directions rotated from ray space into the world frame.
+
+    Rendered normals live in world space, so the view direction has to be brought into
+    the same frame before it can be used as a control.
+    """
+    rotation = T_to_world[:, :3, :3]
+    dirs = torch.einsum("bij,bhwj->bhwi", rotation, rays_dir)
+    return dirs / dirs.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
 def depth_metrics(
     pred_depth: torch.Tensor,
     depth_gt: torch.Tensor,
@@ -121,6 +132,7 @@ def normal_metrics(
     pred_normals: torch.Tensor,
     normal_gt: torch.Tensor,
     valid: torch.Tensor,
+    view_dirs: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """Angular error between rendered and reference normals, in degrees.
 
@@ -128,6 +140,15 @@ def normal_metrics(
     camera. The error is signed, not folded into [0, 90]: a normal pointing away from the
     reference is wrong, and taking the absolute cosine would hide exactly the
     inside-out surfaces worth catching.
+
+    A raw angular error is close to uninterpretable on its own. The renderer flips every
+    normal to face the camera and the reference normals of visible surfaces face the
+    camera too, so both vectors are confined to the same hemisphere and a prediction
+    carrying no geometry at all still scores far better than the 90 degrees that
+    "random" suggests. When `view_dirs` is supplied this reports the control directly:
+    the error of pointing every normal straight back along the view ray, which uses no
+    geometry whatsoever. A normal buffer that does not beat that control has not been
+    shown to know anything about the surface.
     """
     reference_norm = normal_gt.detach().norm(dim=-1)
     predicted_norm = pred_normals.detach().norm(dim=-1)
@@ -150,6 +171,15 @@ def normal_metrics(
     for threshold in ANGLE_THRESHOLDS_DEG:
         key = f"normal_pct_{str(threshold).replace('.', '_')}"
         metrics[key] = float((angles < threshold).double().mean())
+
+    if view_dirs is not None:
+        view = view_dirs.detach()[mask].double()
+        view = view / view.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        control = torch.rad2deg(torch.acos((-view * gt).sum(-1).clamp(-1.0, 1.0)))
+        metrics["normal_viewdir_control_deg"] = float(control.mean())
+        # Positive means the buffer beats the no-geometry control. Negative means the
+        # reported error is coming from the camera-facing convention, not the surface.
+        metrics["normal_gain_vs_viewdir_deg"] = float(control.mean() - angles.mean())
     return metrics
 
 
@@ -157,12 +187,15 @@ def geometry_metrics(
     outputs: dict[str, torch.Tensor],
     depth_gt: torch.Tensor | None,
     normal_gt: torch.Tensor | None,
+    view_dirs: torch.Tensor | None = None,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
 ) -> dict[str, float]:
     """Depth and normal metrics for one frame, skipping whichever reference is absent.
 
-    `outputs` is a tracer render dict. Returns an empty dict when neither reference is
-    available, so callers can merge unconditionally.
+    `outputs` is a tracer render dict. `view_dirs` are world-space ray directions, used
+    only to report the no-geometry control described in `normal_metrics`. Returns an
+    empty dict when neither reference is available, so callers can merge
+    unconditionally.
     """
     metrics: dict[str, float] = {}
 
@@ -177,6 +210,6 @@ def geometry_metrics(
         valid = torch.ones(normal_gt.shape[:-1], dtype=torch.bool, device=normal_gt.device)
         if depth_gt is not None and depth_gt.numel() > 0:
             valid = valid & reference_depth_validity(depth_gt.squeeze(-1))
-        metrics.update(normal_metrics(outputs["pred_normals"], normal_gt, valid))
+        metrics.update(normal_metrics(outputs["pred_normals"], normal_gt, valid, view_dirs))
 
     return metrics
