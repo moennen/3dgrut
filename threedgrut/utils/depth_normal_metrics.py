@@ -30,6 +30,7 @@ from __future__ import annotations
 import torch
 
 from threedgrut.datasets.gt_geometry import DEPTH_SENTINEL_THRESHOLD
+from threedgrut.utils.depth_geometry import depth_gradient_magnitude, normals_from_points, unproject_to_world
 
 # Below this accumulated opacity a ray has passed through almost nothing, so the
 # expected depth is dominated by the transparent remainder and carries no surface.
@@ -48,6 +49,10 @@ FLOATER_RATIO = 0.5
 
 # Standard normal accuracy thresholds in degrees.
 ANGLE_THRESHOLDS_DEG = (11.25, 22.5, 30.0)
+
+# Pixels at or above this quantile of relative depth gradient are the "high gradient"
+# tail: occlusion boundaries, where an expected depth is least likely to sit on a surface.
+HIGH_GRADIENT_PERCENTILE = 0.9
 
 
 def reference_depth_validity(depth_gt: torch.Tensor) -> torch.Tensor:
@@ -193,33 +198,140 @@ def normal_metrics(
     return metrics
 
 
+def depth_derived_normal_metrics(
+    pred_depth: torch.Tensor,
+    reference_depth: torch.Tensor | None,
+    normal_gt: torch.Tensor,
+    pred_normals: torch.Tensor,
+    rays_ori: torch.Tensor,
+    rays_dir: torch.Tensor,
+    T_to_world: torch.Tensor,
+    valid: torch.Tensor,
+    high_gradient_percentile: float = HIGH_GRADIENT_PERCENTILE,
+) -> dict[str, float]:
+    """How good a supervision target the depth-implied normal actually is.
+
+    The depth-normal consistency loss pulls the rendered normal towards the normal implied
+    by the rendered depth. That is only worth doing if the target is better than what it
+    replaces, which is a measurable claim rather than an assumption, so this reports:
+
+    * `depth_normal_mean_deg` -- the target's own error against the reference normals.
+      This is what the loss converges towards, so it bounds what the loss can achieve.
+    * `depth_normal_vs_rendered_deg` -- disagreement between target and rendered normal,
+      which is the quantity the loss actually minimises. Near zero means the loss has
+      nothing to say whatever its weight.
+    * `depth_normal_reference_mean_deg` -- the same target computed from the *reference*
+      depth. This is the control that separates two very different failures: if the
+      reference depth also produces a poor normal then the finite-difference operator is
+      the limit and no improvement in the rendered depth will help, whereas a large gap
+      between the two means the rendered depth is what is wrong.
+    * `depth_normal_high_grad_deg` / `depth_normal_low_grad_deg` -- the target's error
+      restricted to the pixels with the largest and smallest relative depth gradient. Expected depth is a
+      weighted mean along the ray, so it lands between surfaces at an occlusion boundary
+      and describes no surface there; if that mechanism matters in practice the damage is
+      concentrated in the high-gradient tail and can be masked away, whereas a flat
+      profile means the problem is diffuse and masking will not fix it.
+    """
+    world_dirs = world_view_dirs(rays_dir, T_to_world)
+    points = unproject_to_world(pred_depth, rays_ori, rays_dir, T_to_world)
+    derived, usable = normals_from_points(points, world_dirs, valid)
+
+    reference_norm = normal_gt.norm(dim=-1)
+    mask = usable & valid & (reference_norm > MIN_REFERENCE_NORMAL_NORM)
+    if not bool(mask.any()):
+        return {}
+
+    gt = (normal_gt[mask] / reference_norm[mask].unsqueeze(-1)).double()
+    target = derived[mask].double()
+    metrics = {
+        "depth_normal_mean_deg": float(_angles_deg(target, gt).mean()),
+        "depth_normal_valid_px": float(int(mask.sum())),
+    }
+
+    rendered_norm = pred_normals.norm(dim=-1)
+    both = mask & (rendered_norm > 1e-6)
+    if bool(both.any()):
+        rendered = (pred_normals[both] / rendered_norm[both].unsqueeze(-1)).double()
+        metrics["depth_normal_vs_rendered_deg"] = float(_angles_deg(derived[both].double(), rendered).mean())
+
+    # Split on the rendered depth's own gradient: the mask a loss could apply is one it
+    # can compute, and it has no access to the reference.
+    gradient = depth_gradient_magnitude(pred_depth)[mask]
+    if gradient.numel() > 1:
+        cutoff = torch.quantile(gradient.float(), high_gradient_percentile)
+        steep = gradient >= cutoff
+        angles = _angles_deg(target, gt)
+        if bool(steep.any()) and not bool(steep.all()):
+            metrics["depth_normal_high_grad_deg"] = float(angles[steep].mean())
+            metrics["depth_normal_low_grad_deg"] = float(angles[~steep].mean())
+            metrics["depth_normal_high_grad_frac"] = float(steep.double().mean())
+
+    if reference_depth is not None:
+        reference_points = unproject_to_world(reference_depth, rays_ori, rays_dir, T_to_world)
+        reference_derived, reference_usable = normals_from_points(reference_points, world_dirs, valid)
+        control = reference_usable & valid & (reference_norm > MIN_REFERENCE_NORMAL_NORM)
+        if bool(control.any()):
+            control_gt = (normal_gt[control] / reference_norm[control].unsqueeze(-1)).double()
+            metrics["depth_normal_reference_mean_deg"] = float(
+                _angles_deg(reference_derived[control].double(), control_gt).mean()
+            )
+
+    return metrics
+
+
+def _angles_deg(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.rad2deg(torch.acos((a * b).sum(-1).clamp(-1.0, 1.0)))
+
+
 def geometry_metrics(
     outputs: dict[str, torch.Tensor],
     depth_gt: torch.Tensor | None,
     normal_gt: torch.Tensor | None,
     view_dirs: torch.Tensor | None = None,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
+    batch: object | None = None,
 ) -> dict[str, float]:
     """Depth and normal metrics for one frame, skipping whichever reference is absent.
 
     `outputs` is a tracer render dict. `view_dirs` are world-space ray directions, used
-    only to report the no-geometry control described in `normal_metrics`. Returns an
-    empty dict when neither reference is available, so callers can merge
-    unconditionally.
+    only to report the no-geometry control described in `normal_metrics`. `batch` carries
+    the rays and pose needed to unproject depth; supplying it adds the depth-derived
+    normal diagnostics. Returns an empty dict when neither reference is available, so
+    callers can merge unconditionally.
     """
     metrics: dict[str, float] = {}
+    has_depth = depth_gt is not None and depth_gt.numel() > 0
+    has_normals = normal_gt is not None and normal_gt.numel() > 0
 
-    if depth_gt is not None and depth_gt.numel() > 0:
-        pred_depth, _ = expected_depth(outputs["pred_dist"], outputs["pred_opacity"], min_opacity)
+    pred_depth = None
+    if has_depth:
+        pred_depth, confident = expected_depth(outputs["pred_dist"], outputs["pred_opacity"], min_opacity)
         valid = reference_depth_validity(depth_gt)
         metrics.update(depth_metrics(pred_depth.squeeze(-1), depth_gt.squeeze(-1), valid.squeeze(-1)))
 
-    if normal_gt is not None and normal_gt.numel() > 0:
+    if has_normals:
         # Normals are only scored where a surface exists, which the reference depth
         # defines when it is available; otherwise the reference normal's own length does.
         valid = torch.ones(normal_gt.shape[:-1], dtype=torch.bool, device=normal_gt.device)
-        if depth_gt is not None and depth_gt.numel() > 0:
+        if has_depth:
             valid = valid & reference_depth_validity(depth_gt.squeeze(-1))
         metrics.update(normal_metrics(outputs["pred_normals"], normal_gt, valid, view_dirs))
+
+        if pred_depth is not None and batch is not None:
+            # The rendered depth is only a surface where the ray is opaque enough to have
+            # one, so the diagnostic inherits that restriction rather than differencing
+            # zeros left behind by transparent rays.
+            metrics.update(
+                depth_derived_normal_metrics(
+                    pred_depth,
+                    depth_gt,
+                    normal_gt,
+                    outputs["pred_normals"],
+                    batch.rays_ori,
+                    batch.rays_dir,
+                    batch.T_to_world,
+                    valid & confident.squeeze(-1),
+                )
+            )
 
     return metrics

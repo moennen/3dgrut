@@ -389,6 +389,7 @@ class Renderer:
                 # Lets the report state what the same metric would be without any
                 # geometry, which is most of it once normals are forced camera-facing.
                 world_view_dirs(gpu_batch.rays_dir, gpu_batch.T_to_world) if normal_gt is not None else None,
+                batch=gpu_batch if normal_gt is not None else None,
             ).items():
                 geometry[name].append(value)
 

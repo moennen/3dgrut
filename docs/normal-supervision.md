@@ -231,6 +231,53 @@ If it does matter, the options in increasing cost are: mask pixels by local dept
 magnitude or accumulated opacity; add a depth-distortion term (2DGS) to concentrate weights
 so expected approaches median; or add a median depth buffer to both backends' kernels.
 
+#### Measured (7k, `depth_derived_normal_metrics`, degrees)
+
+`dn` is the depth-implied normal — the target the loss would pull towards — scored against
+the reference normals. `dn_ref` is the same operator applied to the *reference* depth, so it
+is the ceiling this construction can reach. `rendered` and `ctrl` are the existing rendered
+normal error and the no-geometry view-direction control.
+
+| scene | primitive | rendered | ctrl | dn | dn_ref | dn low-grad | dn high-grad |
+|---|---|---|---|---|---|---|---|
+| sponza | gaussian | 52.5 | 42.9 | 45.7 | 19.0 | 44.0 | 60.6 |
+| sponza | trisurfel | 45.0 | 42.8 | 46.1 | 19.0 | 44.4 | 61.6 |
+| emerald-square | gaussian | 66.0 | 50.3 | 62.3 | 29.1 | 60.8 | 75.2 |
+| emerald-square | trisurfel | 49.2 | 50.3 | 64.5 | 29.2 | 63.1 | 77.2 |
+
+Three conclusions, two of which contradict the plan above.
+
+**The finite-difference operator is not the bottleneck.** Applied to the reference depth it
+scores 19.0 and 29.1, against 45.7 and 62.3 from the rendered depth. The 27-35 degree gap is
+the rendered depth's, so the target would improve substantially if the depth did. This is the
+result that keeps the term worth having.
+
+**The occlusion-boundary mechanism above is real but minor, so (a) is settled against
+elaboration.** Restricting to the 90% of pixels with the smallest relative depth gradient
+recovers 1.5-2 degrees of that 27-35 degree gap. The error is diffuse, not concentrated at
+boundaries: the rendered depth is locally noisy everywhere, and it is that noise, amplified by
+differentiation, that dominates. Note that the depth is accurate in the aggregate over the
+same pixels (`abs_rel` 0.06 on sponza, `delta1` 0.95) — being right on average and being
+locally smooth are different properties, and only the second one survives a derivative. A
+median depth buffer would therefore not repay its kernel cost, and neither would a distortion
+term aimed at this. Gradient masking is kept, because 2 degrees for a quantile is cheap, but
+it is a trim rather than a fix.
+
+**The target is worse than what trisurfel already has, which changes the loss's design.** For
+trisurfel the rendered normal beats the depth-implied normal — 45.0 against 46.1 on sponza,
+and 49.2 against 64.5 on emerald-square, a 15 degree deficit. A one-way pull of the rendered
+normal towards the depth-implied one is therefore actively harmful for the primitive that
+currently has the best normals, which is the opposite of the intended effect. It helps only
+gaussians (52.5 to 45.7, 66.0 to 62.3), whose normals lose to the control anyway.
+
+So the term cannot be justified as a normal *target*. It is worth having as a *mutual*
+consistency constraint, with gradient flowing to both the depth and the normal, whose value is
+on the depth side: the normal, being an explicit primitive orientation, acts as the smoothness
+prior the noisy depth lacks. This is why the term works in 2DGS and PGSR, where it flattens and
+aligns primitives rather than merely relabelling them. It also predicts that a large
+`lambda_depth_normal` will degrade trisurfel normals, which the ablation should test rather
+than assume.
+
 **(b) Invalid-pixel normalisation.** The reference does `masked_fill_(0).mean()`, averaging
 over *all* pixels, so invalid ones dilute the loss rather than being excluded, and the
 effective weight then drifts with the valid fraction. Dividing by the valid count is the
