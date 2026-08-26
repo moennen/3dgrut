@@ -195,9 +195,10 @@ loss:
   # trisurfel, whose kernel already forces scale.z.
   use_scale_flatten: false
   # 1.0 measured on OB3D at 7k: this is the knee, reaching z/xy 0.04 with nothing above it
-  # moving normals more than 0.3 degrees. Improves normals 8-16 degrees for no PSNR cost, and
-  # combined with use_depth_normal gives the best normals measured. Mildly worsens depth on
-  # its own.
+  # moving normals more than 0.3 degrees. Improves normals 8-16 degrees, reproducing the surfel
+  # primitive's normal quality on ellipsoids, and combined with use_depth_normal gives the best
+  # normals measured. Not free: it also converges *PSNR* onto the surfel's, costing 0.22 dB on
+  # sponza (4 sigma over 4 seeds). Mildly worsens depth on its own.
   lambda_scale_flatten: 1.0
 
   # Depth-normal consistency. Needs render.enable_normals, and under 3DGRT a backward pipeline

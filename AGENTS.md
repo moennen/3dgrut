@@ -57,6 +57,11 @@ buffer that loses to that control.
 - When porting a loss from a reference implementation, check that the quantity it names means
   the same thing here. PGSR's min-scale penalty is correct there because its normal *is* the
   shortest axis; transplanted unchanged it regressed normals by 30 degrees.
+- Run-to-run noise on OB3D at 7k is ~0.04-0.13 dB PSNR, ~0.1-1.2 deg normal and ~0.002-0.004
+  `abs_rel`, measured over `seed_initialization` 1-4. Effects of a few tenths of a dB need
+  repeated seeds; normal effects of several degrees do not. Scatter across a *hyperparameter*
+  sweep is not a noise estimate, and reading it as one produced a wrong "free of PSNR cost"
+  claim. Repeat with `--override seed_initialization=N` on the ablation harness.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

@@ -184,7 +184,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
 | 7. Depth variance along the ray | Not started | Kernel accumulator for `w·t` and `w·t²`; backward pass |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
-| 9. Scale-z regularisation | Landed, measured at 7k | 30k confirmation. Best result so far when combined with item 5 |
+| 9. Scale-z regularisation | Landed, measured over 4 seeds | 30k confirmation. Best normals so far combined with item 5, at a 0.2 dB PSNR cost |
 | 10. Mesh export | Not started | Surface extraction (TSDF or Poisson), Chamfer metric in ablation report |
 
 ### 1. The depth-normal consistency loss
@@ -466,44 +466,71 @@ produced a confidently wrong *conclusion* rather than a null result — it was c
 observation that flattening an ellipsoid ought to approach a surfel and so ought to land
 between the two primitives, which the `min` numbers flatly contradicted.
 
-Corrected measurement on gaussians at 7k, against both primitives as references. `z/xy` is
-the mean `scale.z / max(scale.x, scale.y)`:
+Weight sweep on gaussians at 7k, single seed. `z/xy` is the mean
+`scale.z / max(scale.x, scale.y)`:
 
-| variant | sponza n | gain | z/xy | emerald n | gain | z/xy |
-|---|---|---|---|---|---|---|
-| gaussian | 52.4 | -9.5 | 0.937 | 65.4 | -15.1 | 1.686 |
-| + flatten 0.1 | 46.4 | -3.6 | 0.277 | 50.1 | +0.2 | 0.026 |
-| + flatten 1 | 44.8 | -2.0 | 0.044 | 49.4 | +0.9 | 0.001 |
-| + flatten 300 | 44.6 | -1.8 | 0.000 | 49.2 | +1.1 | 0.000 |
-| trisurfel | 45.1 | -2.2 | — | 49.2 | +1.1 | — |
-| gaussian + dn | 25.2 | +17.6 | 0.838 | 42.6 | +7.7 | 1.208 |
-| + flatten 1 | **23.3** | **+19.6** | 0.037 | **35.1** | **+15.2** | 0.001 |
-| trisurfel + dn | 23.9 | +18.9 | — | 37.0 | +13.3 | — |
+| lambda | sponza n | z/xy | emerald n | z/xy |
+|---|---|---|---|---|
+| off | 52.4 | 0.937 | 65.4 | 1.686 |
+| 0.1 | 46.4 | 0.277 | 50.1 | 0.026 |
+| 1 | 44.8 | 0.044 | 49.4 | 0.001 |
+| 300 | 44.6 | 0.000 | 49.2 | 0.000 |
 
-The flattened ellipsoid converges onto the surfel result almost exactly — 44.6 against 45.1 on
-sponza, and 49.2 against 49.2 on emerald-square. That is the strongest available evidence that
-the term does what it claims: the two primitives differ mainly in that the surfel kernel forces
-`scale.z`, so a penalty that drives `scale.z` to zero should reproduce it, and it does. The
-prediction that the result would land between the two primitives was right, and is what exposed
-the axis bug.
+Weight 1 is the knee: it reaches `z/xy` 0.04, and nothing above it moves the normals by more
+than 0.3 degrees. Default set to 1, still behind `use_scale_flatten: false`.
 
 Note the baseline `z/xy` of 1.686 on emerald-square: for the unregularised gaussian, z is on
 average the *longest* axis, so the reported normal points along the particle's long direction.
 That is a large part of why baseline gaussian normals lose to a view-direction control.
 
-Combined with depth-normal consistency it is the best configuration measured so far, and it
-beats the surfel primitive under the same loss (23.3 against 23.9, 35.1 against 37.0). The two
-terms are complementary in the way the earlier reasoning suggested but for a sharper reason:
-flattening makes the z axis the particle's genuinely thin direction, and depth-normal
-consistency is what rotates it to face the surface. Either alone leaves half the job undone.
+#### What it actually buys, over 4 seeds
 
-Costs: PSNR is free within noise (36.0-36.3 on sponza against 36.24, 32.8-33.1 on
-emerald-square against 32.98). Alone it mildly *worsens* depth (`abs_rel` 0.0579 to 0.0619 on
-sponza, 0.1329 to 0.1444 on emerald-square); combined with depth-normal consistency depth is
-neutral (0.0486 to 0.0490). So it is a normals-only win, and should not be enabled for depth.
+The weight sweep above is single-seed, which is fine for a 16-degree effect and useless for a
+0.2 dB one. Repeated at lambda 1 with `seed_initialization` 1-4 (mean +- stdev):
 
-Weight 1 is the knee — it reaches `z/xy` 0.04 and nothing above it changes the normals by more
-than 0.3 degrees. Default set to 1, still behind `use_scale_flatten: false`.
+| variant | sponza PSNR | sponza n | emerald PSNR | emerald n |
+|---|---|---|---|---|
+| gaussian | **36.26**±0.04 | 52.2±0.3 | 32.80±0.09 | 64.9±0.9 |
+| trisurfel | 36.08±0.06 | **44.7**±0.1 | **32.89**±0.10 | **49.2**±0.1 |
+| gaussian + sz | 36.04±0.08 | 45.0±0.2 | 32.82±0.09 | 49.2±0.1 |
+| gaussian + dn | 36.00±0.11 | 25.2±0.4 | 32.41±0.12 | 41.9±1.2 |
+| trisurfel + dn | 35.90±0.13 | 23.7±0.1 | 32.32±0.21 | 36.2±0.9 |
+| gaussian + sz + dn | 35.88±0.11 | **23.4**±0.2 | 32.46±0.11 | **34.1**±0.2 |
+
+Seed noise is 0.04-0.13 dB on PSNR and 0.1-1.2 degrees on normals, so normal effects of 8-16
+degrees are unambiguous and everything at the 0.2 dB scale needs the repeats to interpret.
+
+**The term converges the ellipsoid onto the surfel on both axes, not just on geometry.** It
+matches surfel normals exactly (45.0 against 44.7; 49.2 against 49.2) — strong evidence it
+does what it claims, since the primitives differ mainly in that the surfel kernel forces
+`scale.z`, so driving `scale.z` to zero should reproduce it. But on sponza it also gives up
+the ellipsoid's PSNR: -0.22 +- 0.07 against the gaussian baseline, landing at 36.04 against
+the surfel's 36.08. There is no free lunch here; softly turning an ellipsoid into a surfel
+gets surfel behaviour throughout.
+
+Two claims made earlier in this work were wrong and are corrected here:
+
+- "PSNR is free within noise" was inferred from the *across-weight* scatter (36.01-36.27)
+  looking like noise. With seeds held fixed the per-cell sd is only 0.04-0.11, and the sponza
+  cost is a real ~4 sigma regression. Across-weight scatter is not a noise estimate.
+- The ellipsoid does not have a consistent PSNR advantage to preserve in the first place. It
+  is +0.18 +- 0.05 over the surfel on sponza but -0.08 +- 0.10 on emerald-square: the sign
+  flips, and the emerald gap is not significant. The advantage is a sponza-specific 0.18 dB.
+
+Combined with depth-normal consistency it is still the best configuration measured, and the
+two terms are complementary for a sharp reason: flattening makes z the particle's genuinely
+thin axis, and depth-normal consistency is what rotates it to face the surface. Either alone
+leaves half the job undone (25.2 and 45.0 separately against 23.4 together, on sponza).
+
+Against the surfel primitive under the same loss the win is smaller than a single seed
+suggested: -0.33 +- 0.17 degrees on sponza (2 sigma, call it a match) and -2.14 +- 0.65 on
+emerald-square (3.3 sigma, real). So "matches the surfel on sponza, beats it by ~2 degrees on
+emerald-square", not the 0.6/1.9 the first run showed. Depth slightly favours the surfel on
+emerald-square (0.1277 against 0.1332).
+
+Depth cost: alone it mildly *worsens* depth (`abs_rel` 0.0569 to 0.0602 on sponza); combined
+with depth-normal consistency depth is neutral (0.0489 to 0.0490). It is a normals-only term
+and should not be enabled to improve depth.
 
 Rejected outright for trisurfel, where the kernel already forces `scale.z` to 1e-6 on fetch and
 drops its gradient. The stored third scale is dead storage the renderer never reads, so the
