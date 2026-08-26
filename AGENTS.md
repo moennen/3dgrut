@@ -105,12 +105,15 @@ buffer that loses to that control.
   backpropagating to per-hit weight and distance to see it. Suspect any `.detach()` justified
   by "that term diverges" -- check whether the numerator scales with the denominator first.
 - A sharpening prior with no reference for *where* to sharpen will buy confidence instead of
-  accuracy. Per-ray variance is zero for any Dirac at any distance, so it is winner-take-all
-  between a ray's hits, and the near basin is absorbing: once the front particle reaches
+  accuracy. Per-ray variance is zero for any Dirac at any distance, and in its pairwise form
+  -- `M2 - D^2/acc == (1/2acc) sum_ij w_i w_j (t_i - t_j)^2`, the distortion loss -- the
+  two-hit case is a double well in the near opacity, because `w_near * w_far` carries an
+  `a(1-a)` peaking at one half. The near well is absorbing: once the front particle reaches
   alpha 1, transmittance zeroes the gradient to everything behind it for *every* loss, so the
   error is permanent. Measured as `wrong | tight` rising 170x while spread fell 6x. Report
   that pairing, not just the mean error, for any term of this family --
-  `scripts/ablation/depth_variance_mechanism.py`.
+  `scripts/ablation/depth_variance_mechanism.py`. Prefer the pairwise form when reasoning
+  about a compositing loss; the accumulator form hides the interaction between hits.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

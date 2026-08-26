@@ -22,6 +22,17 @@ expected depth it reports names a place where nothing is. Penalising it asks the
 resolve such rays into surfaces. This is the distortion-style regulariser of the NeRF
 literature, expressed in the second moment the tracer now accumulates.
 
+Equivalently, and more legibly, the term is pairwise:
+
+    M2 - D^2/acc  ==  (1/(2*acc)) * sum_ij w_i w_j (t_i - t_j)^2
+
+so every hit is pulled towards every other with strength `w_i w_j / acc`. That is the mip-NeRF
+360 distortion loss with a squared distance. The identity is pinned by
+`test_the_term_is_the_pairwise_distortion_loss`, and it is the form to reason in: it makes the
+two-hit case visibly a double well in the near opacity, since `w_near * w_far` carries a
+factor `a(1-a)` that peaks at one half. See `docs/normal-supervision.md` for why that sinks
+the term as an unsupervised regulariser.
+
 The gradient is the whole point, so it is worth writing down. With `mu = D/acc` the expected
 depth, differentiating `M2 - D^2/acc` gives
 

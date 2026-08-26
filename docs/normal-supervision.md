@@ -567,19 +567,42 @@ the camera: mean signed error -0.38 on the confidently-wrong population at lambd
 
 The cause is that **nothing in the objective refers to the truth**. `M2 - D^2/acc` is zero for
 *any* Dirac distribution at *any* distance -- zero for a ray committed to 2m and zero for the
-same ray committed to 40m. It is pure sharpening; only the photometric loss says where. On a
-two-hit ray with a faint near particle at `t=2` and the true surface at `t=10` it is
-winner-take-all with a separatrix at `a_near ~ 0.47`: below it the term correctly deletes the
-floater (`dL/da_near = +50` at `a_near=0.1`), above it the term reinforces it
-(`dL/da_near = -1.6` at 0.5, `-47` at 0.9).
+same ray committed to 40m. It is pure sharpening; only the photometric loss says where.
 
-The asymmetry that makes the drift systematically *nearer* is that one basin is absorbing. At
-`a_near = 1` the far surface's weight is `a_far * (1 - a_near) = 0`, so `dL/da_far` is exactly
-zero -- and so is the gradient from every other term that reaches it through transmittance, the
-photometric loss included. A ray that collapses onto the near surface can never recover. A ray
-that collapses onto the far surface can, because an unoccluded near particle at `a = 0` is
-still visible to the image loss. So each ray that crosses the separatrix becomes a permanent
-floater, which is `floater_frac` 0.003 -> 0.059.
+The dynamics are clearest in the term's pairwise form, which is an identity (verified to ten
+decimals for two, three and four hits):
+
+    M2 - D^2/acc  ==  (1/(2*acc)) * sum_ij w_i w_j (t_i - t_j)^2
+
+So every hit is pulled towards every other with strength `w_i w_j / acc` -- equivalently every
+hit towards `mu` with strength `2 w_i`, the same gradient seen two ways. This is the mip-NeRF
+360 distortion loss, squared rather than absolute and scaled by `1/acc`.
+
+Read that way the failure is a two-line derivation. A ray with one floater and one surface has
+exactly one pair, so with `w_near = a_near` and `w_far = a_far (1 - a_near)`:
+
+    L = w_near * w_far * (dt)^2 / acc,   w_near * w_far = a_near (1 - a_near) * a_far
+
+which peaks at `a_near = 1/2`. `L` is a **double well** in `a_near`, barrier at one half, and
+*both* wells are `L = 0`: delete the floater, or promote it to full opacity and occlude the
+true surface. The term cannot tell them apart; only which side of the barrier the ray starts
+on decides. Measured sign flip is at `a_near ~ 0.47`, the half shifted by the `acc`
+denominator.
+
+What breaks the tie, and always the same way, is that one well is absorbing. At `a_near = 1`
+the far surface's weight is `a_far * (1 - a_near) = 0`, so `dL/da_far` is exactly zero -- and so
+is the gradient from every other term that reaches it through transmittance, the photometric
+loss included. A ray that collapses onto the near surface can never recover. A ray that
+collapses onto the far surface can, because an unoccluded near particle at `a = 0` is still
+visible to the image loss. So each ray starting above the barrier becomes a permanent floater,
+which is `floater_frac` 0.003 -> 0.059.
+
+One consequence for the *implementation*, worth keeping: `t_i` is reached by two routes,
+`+2 w_i t_i` through `M2` and `-2 mu w_i` through `D`, which must cancel to `2 w_i (t_i - mu)`.
+Were `pred_dist` non-differentiable while `pred_dist_sq` was not, only the first would survive
+-- positive for every hit, dragging the whole ray towards the camera irrespective of the mean.
+That relative scaling, not the mere presence of each gradient, is what the `both` case in
+`test_depth_variance_gradient.py` exists to check.
 
 This also explains the sweep's headline failure, that no lambda transfers between scenes:
 sponza's optimum is 0.01-0.1 and emerald is already losing 1.75 dB at 0.01. It is not the

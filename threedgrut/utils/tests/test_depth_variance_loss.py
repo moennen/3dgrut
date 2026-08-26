@@ -182,6 +182,34 @@ def _per_hit_gradients(weights: list[float], distances: list[float]) -> tuple[li
     return [float(g) for g in w.grad], [float(g) for g in t.grad]
 
 
+@pytest.mark.parametrize(
+    "weights,distances",
+    [([0.6, 0.4], [3.0, 8.0]), ([0.3, 0.4, 0.3], [1.0, 2.0, 4.0]), ([0.5, 0.2, 0.1, 0.7], [2.0, 5.0, 9.0, 11.0])],
+)
+def test_the_term_is_the_pairwise_distortion_loss(weights, distances):
+    """`M2 - D^2/acc == (1/2acc) * sum_ij w_i w_j (t_i - t_j)^2`, an identity.
+
+    Not a reformulation for its own sake: the pairwise view is what makes the term's behaviour
+    legible. Every hit is pulled towards every other with strength `w_i w_j / acc`, which is
+    the mip-NeRF 360 distortion loss with a squared distance. It is also what shows the
+    two-hit case to be a double well in the near opacity -- `w_near * w_far` carries a factor
+    `a(1-a)`, peaking at one half -- so the term is equally satisfied by deleting a floater or
+    by promoting it to fully opaque.
+    """
+    w = torch.tensor(weights, dtype=torch.float64)
+    t = torch.tensor(distances, dtype=torch.float64)
+    shape = (1, 1, 1, 1)
+
+    loss, _ = depth_variance_loss(
+        (w * t).sum().reshape(shape), (w * t * t).sum().reshape(shape), w.sum().reshape(shape), scene_extent=1.0
+    )
+
+    pairwise = sum(w[i] * w[j] * (t[i] - t[j]) ** 2 for i in range(len(weights)) for j in range(len(weights))) / (
+        2 * w.sum()
+    )
+    assert float(loss) == pytest.approx(float(pairwise), rel=1e-12)
+
+
 def test_weight_gradient_is_the_squared_distance_from_the_expected_depth():
     """`dL/dw_i = (t_i - mu)^2`: non-negative, so weight is only ever pushed down.
 
