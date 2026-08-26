@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~8 min, currently 299 passed, 1 skipped
+# ~8 min, currently 302 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -48,6 +48,15 @@ buffer that loses to that control.
 - `render.enable_normals=false` makes the tracers return a *constant* placeholder normal, not
   an empty buffer, so any new consumer of `pred_normals` must reject that combination rather
   than silently training against a constant.
+- The rendered normal is the particle's local **z** axis for *both* primitives, not the
+  shortest axis and not the ellipsoid surface normal. `canonicalRayNormal` in
+  `gaussianParticles.slang` is templated on `Surfel`, never branches on it, and ignores the
+  `scale` it is passed; the true ray-ellipsoid normal in `gaussianParticles.cuh` is dead on
+  this path. Any term that reasons about particle shape must target z. Pinned by
+  `threedgut_tracer/tests/test_normal_axis.py`.
+- When porting a loss from a reference implementation, check that the quantity it names means
+  the same thing here. PGSR's min-scale penalty is correct there because its normal *is* the
+  shortest axis; transplanted unchanged it regressed normals by 30 degrees.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

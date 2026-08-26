@@ -184,7 +184,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
 | 7. Depth variance along the ray | Not started | Kernel accumulator for `w·t` and `w·t²`; backward pass |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
-| 9. Scale-z regularisation | Landed, measured, **negative** | Nothing; it degrades normals monotonically and should stay off |
+| 9. Scale-z regularisation | Landed, measured at 7k | 30k confirmation. Best result so far when combined with item 5 |
 | 10. Mesh export | Not started | Surface extraction (TSDF or Poisson), Chamfer metric in ablation report |
 
 ### 1. The depth-normal consistency loss
@@ -430,62 +430,100 @@ Only meaningful for the ellipsoid primitives — trisurfel is already flat by co
 this is the term that lets the gaussian variant compete on geometry, and the baseline says it
 is the variant with the geometry problem (`n_gain` -16.7).
 
-#### Implemented as `use_scale_flatten`, and it does not work
+#### Implemented as `use_scale_flatten`
 
-`loss.use_scale_flatten` / `lambda_scale_flatten` penalise `min(scale)` per particle,
-normalised by `scene_extent` so one weight transfers between scenes. The reference (PGSR, via
-`blob-to-spoke/gaussian_wrapping/train.py`) uses weight 100 on an *unnormalised* min-scale
-over visible particles; with the extent divided out, ~300 is the comparable setting here.
+`loss.use_scale_flatten` / `lambda_scale_flatten` penalise `scale.z` per particle, normalised
+by `scene_extent` so one weight transfers between scenes.
 
-Rejected outright for trisurfel. `gaussianParticles.slang` overwrites `scale.z` with 1e-6 on
-fetch and never accumulates a gradient into it, so the stored third scale is dead storage that
-the renderer never reads — yet it is *not* small (measured aspect ratio 0.36), so `min` would
-select it for most particles and the term would spend its entire budget shrinking a number
-with no effect, showing a healthy falling loss curve throughout.
+**It has to be `scale.z`, not `min(scale)`, and getting this wrong inverts the result.** The
+rendered normal is the local z axis: `canonicalRayNormal` in `gaussianParticles.slang` returns
+`(0,0,1)` rotated into world space, and although it is templated on `Surfel` it never branches
+on it and never reads the `scale` argument it is passed. So for an ellipsoid the normal is a
+fixed body axis with no relation to the ellipsoid's shape. Penalising the *smallest* axis
+therefore flattens the particle along an axis the normal does not track, leaving a thin disk
+whose reported normal lies in its own plane. `test_normal_axis.py` pins this by rendering a
+single particle with its shortest axis on x, y and z in turn and asserting the normal follows z
+in all three cases.
 
-Measured on gaussians at 7k. `aspect` is the mean `min(scale)/max(scale)`, i.e. how flat the
-particles actually became:
+The first version of this term used `min(scale)`, following PGSR (via
+`blob-to-spoke/gaussian_wrapping/train.py`, weight 100 on an unnormalised min-scale over
+visible particles). That is correct *there*, where the normal is defined as the shortest axis,
+and wrong here. The measured cost of the mismatch, at matched weights:
 
-| lambda | sponza n | gain | aspect | emerald n | gain | aspect |
+| lambda | sponza `min` | sponza `z` | emerald `min` | emerald `z` |
+|---|---|---|---|---|
+| off | 52.4 | 52.4 | 65.4 | 65.4 |
+| 0.1 | 54.9 | 46.4 | 80.5 | 50.1 |
+| 1 | 58.7 | 44.8 | 84.9 | 49.4 |
+| 30 | 67.6 | 44.6 | 84.6 | 49.3 |
+| 300 | 67.8 | 44.6 | 84.8 | 49.2 |
+
+Penalising the wrong axis degrades normals monotonically to near-perpendicular (84.8 degrees),
+and penalising the right one improves them by 8 to 16 degrees. Both collapse the particle
+equally well, so the loss curve looks healthy either way; nothing but the normal metric
+distinguishes them. This is the third silent-failure mode in this work and the only one that
+produced a confidently wrong *conclusion* rather than a null result — it was caught by the
+observation that flattening an ellipsoid ought to approach a surfel and so ought to land
+between the two primitives, which the `min` numbers flatly contradicted.
+
+Corrected measurement on gaussians at 7k, against both primitives as references. `z/xy` is
+the mean `scale.z / max(scale.x, scale.y)`:
+
+| variant | sponza n | gain | z/xy | emerald n | gain | z/xy |
 |---|---|---|---|---|---|---|
-| off | 52.4 | -9.5 | 0.398 | 65.4 | -15.1 | 0.225 |
-| 0.1 | 54.9 | -12.1 | 0.163 | 80.5 | -30.2 | 0.003 |
-| 1 | 58.7 | -15.8 | 0.037 | 84.9 | -34.6 | 0.000 |
-| 3 | 63.3 | -20.5 | 0.012 | 84.3 | -34.0 | 0.000 |
-| 30 | 67.6 | -24.8 | 0.001 | 84.6 | -34.3 | 0.000 |
-| 300 | 67.8 | -25.0 | 0.000 | 84.8 | -34.5 | 0.000 |
+| gaussian | 52.4 | -9.5 | 0.937 | 65.4 | -15.1 | 1.686 |
+| + flatten 0.1 | 46.4 | -3.6 | 0.277 | 50.1 | +0.2 | 0.026 |
+| + flatten 1 | 44.8 | -2.0 | 0.044 | 49.4 | +0.9 | 0.001 |
+| + flatten 300 | 44.6 | -1.8 | 0.000 | 49.2 | +1.1 | 0.000 |
+| trisurfel | 45.1 | -2.2 | — | 49.2 | +1.1 | — |
+| gaussian + dn | 25.2 | +17.6 | 0.838 | 42.6 | +7.7 | 1.208 |
+| + flatten 1 | **23.3** | **+19.6** | 0.037 | **35.1** | **+15.2** | 0.001 |
+| trisurfel + dn | 23.9 | +18.9 | — | 37.0 | +13.3 | — |
 
-The term does exactly what it says — the aspect ratio collapses from 0.4 to 0.001 — and the
-normals get monotonically *worse* at every weight on both scenes, 52 to 68 degrees on sponza
-and 65 to 85 on emerald-square. Stacked on depth-normal consistency it is still a monotone
-regression (25.2 to 31.9 on sponza, 42.6 to 46.5 on emerald-square), so it is not that
-flattening needs a partner term. PSNR is untouched throughout (36.1-36.3 on sponza), which
-rules out the runs simply being worse: this is a geometry-specific regression. The 0.1 and 1
-cells were added after the fact precisely because 3 already collapsed the aspect ratio, and
-without them the sweep could not distinguish "flattening hurts" from "over-flattening hurts".
-It is the former.
+The flattened ellipsoid converges onto the surfel result almost exactly — 44.6 against 45.1 on
+sponza, and 49.2 against 49.2 on emerald-square. That is the strongest available evidence that
+the term does what it claims: the two primitives differ mainly in that the surfel kernel forces
+`scale.z`, so a penalty that drives `scale.z` to zero should reproduce it, and it does. The
+prediction that the result would land between the two primitives was right, and is what exposed
+the axis bug.
 
-The mechanism is that `min` is a hard selection on whichever axis is *currently* smallest, so
-the term shrinks that axis and thereby freezes the orientation the particle happened to be
-initialised with. Flattening makes a normal well-defined without making it correct, and a
-thin disk pointing the wrong way is a worse normal than a round blob with no strong
-orientation at all. Nothing in the term references the surface. This also explains why the
-regression is much larger on emerald-square, where the particles start rounder (0.225 versus
-0.398) and so have more arbitrary orientation to lock in.
+Note the baseline `z/xy` of 1.686 on emerald-square: for the unregularised gaussian, z is on
+average the *longest* axis, so the reported normal points along the particle's long direction.
+That is a large part of why baseline gaussian normals lose to a view-direction control.
 
-So the premise recorded above — that this is "the term that lets the gaussian variant compete
-on geometry" — is wrong, and the opposite is true. What fixes gaussian normals is
-depth-normal consistency, which cut them from 52.4 to 25.2 while *raising* the aspect ratio
-slightly: the useful direction is constraining orientation, not shape. Flatness is a
-consequence of good geometry in 2DGS/PGSR, not a cause, and those methods pair it with
-multi-view photometric constraints that pin orientation independently.
+Combined with depth-normal consistency it is the best configuration measured so far, and it
+beats the surfel primitive under the same loss (23.3 against 23.9, 35.1 against 37.0). The two
+terms are complementary in the way the earlier reasoning suggested but for a sharper reason:
+flattening makes the z axis the particle's genuinely thin direction, and depth-normal
+consistency is what rotates it to face the surface. Either alone leaves half the job undone.
 
-Kept in the tree, defaulting off, with the guard and tests. The measurement is only
-reproducible if the term still exists, and it is ~10 lines. It should not be switched on.
+Costs: PSNR is free within noise (36.0-36.3 on sponza against 36.24, 32.8-33.1 on
+emerald-square against 32.98). Alone it mildly *worsens* depth (`abs_rel` 0.0579 to 0.0619 on
+sponza, 0.1329 to 0.1444 on emerald-square); combined with depth-normal consistency depth is
+neutral (0.0486 to 0.0490). So it is a normals-only win, and should not be enabled for depth.
 
-Small caveat, recorded so it is not lost: combined with depth-normal consistency, flattening
-does improve *depth* on emerald-square (`abs_rel` 0.1353 to 0.1260). If a later item wants
-depth specifically, that is worth revisiting; it does not redeem the term for normals.
+Weight 1 is the knee — it reaches `z/xy` 0.04 and nothing above it changes the normals by more
+than 0.3 degrees. Default set to 1, still behind `use_scale_flatten: false`.
+
+Rejected outright for trisurfel, where the kernel already forces `scale.z` to 1e-6 on fetch and
+drops its gradient. The stored third scale is dead storage the renderer never reads, so the
+term would shrink a number with no effect while showing a falling loss curve.
+
+#### Follow-up this exposed: the ellipsoid normal is dead code
+
+`gaussianParticles.cuh` (`processHitFwd`, the `else` branch of the `SurfelPrimitive`
+condition) contains a real ray-ellipsoid surface normal — the gradient at the intersection
+point, which for an anisotropic particle points along its genuinely thin direction. It is
+not what runs. The Slang path is live, and it returns the z axis for both primitives with a
+`TODO : unify the computation of normals` against it.
+
+So an unregularised gaussian reports a normal that is an arbitrary body axis, which is the
+mechanism behind the baseline's headline finding that gaussian normals lose to a
+view-direction control. Two candidate fixes now exist: force z to be the meaningful axis
+(this item, measured, works) or make the normal follow the geometry (the CUDA branch,
+untested on this path). The second is more principled and needs no loss term at all, since
+it would make the reported normal correct for a round particle rather than requiring the
+particle to be flattened first. Worth measuring before adding further loss terms.
 
 ### 7. Mesh export
 
@@ -519,7 +557,7 @@ compiles Slang in a subprocess that resolves `slangc` from `PATH`, and without i
 fails with a `FileNotFoundError` unrelated to anything it is testing.
 
 ```bash
-# Full suite (~8 min): 299 passed, 1 skipped
+# Full suite (~8 min): 302 passed, 1 skipped
 python -m pytest threedgrut threedgut_tracer threedgrt_tracer scripts -q
 
 # The normal-specific tests

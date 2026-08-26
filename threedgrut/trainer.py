@@ -737,17 +737,26 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
-        # Flatness regularization: penalise only the shortest axis, so a particle collapses
-        # towards a disk while staying free to grow in the other two. This is what
-        # `use_scale` above does not do -- that one penalises all three axes, which shrinks
-        # particles rather than flattening them. Normalised by the scene extent so a single
-        # lambda transfers between scenes whose world units differ by orders of magnitude.
+        # Flatness regularization: penalise the third scale axis, driving each ellipsoid
+        # towards the disk that a surfel is by construction (the surfel kernels force
+        # scale.z to 1e-6). This is what `use_scale` above does not do -- that one penalises
+        # all three axes, which shrinks particles rather than flattening them.
+        #
+        # It must be axis z specifically, not min(scale). The rendered normal is the local z
+        # axis -- `canonicalRayNormal` in gaussianParticles.slang returns (0,0,1) rotated,
+        # for ellipsoids as well as surfels -- so penalising the *smallest* axis flattens
+        # along an axis the normal does not track, leaving a thin disk whose reported normal
+        # lies in its own plane. Measured: that costs ~30 degrees of normal error. If the
+        # normal is ever redefined as the shortest axis, this term has to follow it.
+        #
+        # Normalised by the scene extent so a single lambda transfers between scenes whose
+        # world units differ by orders of magnitude.
         loss_scale_flatten = torch.zeros(1, device=self.device)
         lambda_scale_flatten = 0.0
         if self.conf.loss.use_scale_flatten and not self._in_color_refine:
             with torch.cuda.nvtx.range(f"loss-scale-flatten"):
-                thinnest = self.model.get_scale().min(dim=-1).values
-                loss_scale_flatten = thinnest.mean() / max(self.model.scene_extent, 1e-8)
+                normal_axis = self.model.get_scale()[:, 2]
+                loss_scale_flatten = normal_axis.mean() / max(self.model.scene_extent, 1e-8)
                 lambda_scale_flatten = self.conf.loss.lambda_scale_flatten
 
         # Depth-normal consistency. Held off until depth_normal_from_iter: before the

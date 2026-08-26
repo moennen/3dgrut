@@ -186,12 +186,19 @@ loss:
   use_scale: false
   lambda_scale: 0.0
 
-  # Penalises only each particle's shortest axis, collapsing it towards a disk while leaving
-  # the other two free to grow. Normalised by the scene extent, so one lambda transfers
-  # between scenes. Only meaningful for the ellipsoid primitives -- trisurfel is already flat
-  # by construction.
+  # Penalises each particle's z scale -- the axis the rendered normal actually follows --
+  # collapsing an ellipsoid towards the disk a surfel already is, while leaving x and y free.
+  # Must be z rather than min(scale): the normal is the local z axis regardless of which axis
+  # is shortest, so penalising the shortest one flattens along a direction the normal ignores
+  # and measured ~30 degrees worse than no regularisation at all. See test_normal_axis.py.
+  # Normalised by the scene extent, so one lambda transfers between scenes. Rejected for
+  # trisurfel, whose kernel already forces scale.z.
   use_scale_flatten: false
-  lambda_scale_flatten: 0.0
+  # 1.0 measured on OB3D at 7k: this is the knee, reaching z/xy 0.04 with nothing above it
+  # moving normals more than 0.3 degrees. Improves normals 8-16 degrees for no PSNR cost, and
+  # combined with use_depth_normal gives the best normals measured. Mildly worsens depth on
+  # its own.
+  lambda_scale_flatten: 1.0
 
   # Depth-normal consistency. Needs render.enable_normals, and under 3DGRT a backward pipeline
   # that differentiates the normal buffer (render.pipeline_type=referenceSlang); the tracer

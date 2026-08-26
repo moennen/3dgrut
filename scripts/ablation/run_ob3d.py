@@ -101,12 +101,14 @@ DEPTH_NORMAL_OVERRIDES = (
 )
 
 # Flatness regularisation, gaussians only: the surfel kernel forces scale.z and drops its
-# gradient, so the term is rejected there rather than silently shrinking dead storage. The
-# weights span from gentle to the PGSR reference's aggressiveness -- that reference applies
-# weight 100 to an unnormalised min-scale, whereas this term is divided by the scene extent
-# (~4 here), so ~300 is the comparable setting. `sf*_dn` stacks it on depth-normal
-# consistency, since flatness and depth-normal agreement are meant to be complementary:
-# one makes a particle disk-like, the other points the disk the right way.
+# gradient, so the term is rejected there rather than silently shrinking dead storage.
+# Compare against the `trisurfel` baseline rather than only `gaussian` -- the term drives an
+# ellipsoid towards what a surfel already is, so the surfel result is the value it should
+# approach, and that comparison is what caught the term penalising the wrong axis. The
+# weights span to ~300, the setting comparable to the PGSR reference's 100 on an
+# unnormalised scale once the scene extent (~4 here) is divided out. `sf*_dn` stacks it on
+# depth-normal consistency: flattening makes z the genuinely thin axis, and depth-normal
+# consistency is what rotates it to face the surface.
 FLATNESS_VARIANTS: tuple[Variant, ...] = tuple(
     Variant(
         f"sf{weight_name}_gaussian" + ("_dn" if with_dn else ""),
@@ -119,8 +121,8 @@ FLATNESS_VARIANTS: tuple[Variant, ...] = tuple(
         f"Flatness at lambda={weight} on gaussians" + (" with depth-normal." if with_dn else "."),
     )
     for with_dn in (False, True)
-    # 0.1 and 1 are here because 3 already collapses the aspect ratio to 0.01: without them
-    # the sweep could not distinguish "flattening hurts" from "over-flattening hurts".
+    # 0.1 and 1 are here because 3 already collapses z/xy to 0.01, so without them the sweep
+    # could not separate the effect of flattening from that of over-flattening. 1 is the knee.
     for weight_name, weight in (("01", 0.1), ("1", 1.0), ("3", 3.0), ("30", 30.0), ("300", 300.0))
 )
 
