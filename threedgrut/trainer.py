@@ -789,6 +789,7 @@ class Trainer3DGRUT:
                     outputs["pred_dist_sq"],
                     outputs["pred_opacity"],
                     self.model.scene_extent,
+                    relative=self.conf.loss.depth_variance_relative,
                 )
                 lambda_depth_variance = self.conf.loss.lambda_depth_variance
 

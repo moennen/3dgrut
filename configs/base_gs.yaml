@@ -226,6 +226,13 @@ loss:
   # the model can also reduce it by making the scene transparent; watch accumulated opacity.
   use_depth_variance: false
   lambda_depth_variance: 0.0
+  # Divide by the squared expected depth: Var/mu^2, the squared coefficient of variation. Same
+  # buffers and same render, but dimensionless, so it is scale-free rather than merely
+  # extent-normalised (the absolute form scales as mu^2 within a scene, which is why no lambda
+  # transferred between sponza and emerald-square). It is also invariant to uniform fading and
+  # shifts the floater-locking barrier from 0.49 to 0.82. Lambda does not carry over between
+  # the two forms. Off preserves the measured absolute form; see docs/normal-supervision.md.
+  depth_variance_relative: false
   # Iteration the term switches on, matching use_depth_normal: before the geometry settles
   # every ray is diffuse and the term would fight the reconstruction rather than sharpen it.
   depth_variance_from_iter: 7000

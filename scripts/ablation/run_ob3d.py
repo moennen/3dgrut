@@ -170,8 +170,55 @@ DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = tuple(
     )
 )
 
+# The relative form, `Var/mu^2`. Same render, same buffers, one different line in the loss, so
+# these differ from `dv*` only in `depth_variance_relative`. Three properties motivate it and
+# each is a thing to read in the results:
+#
+#   - it is dimensionless, so unlike `dv*` the *same* lambda should be usable on both sponza and
+#     emerald-square. That is the primary claim, and it is a cross-scene comparison, so read the
+#     per-scene tables rather than the average.
+#   - it is degree zero in the weights, so `d_cover` should not move at all.
+#   - it shifts the floater-locking barrier from 0.49 to 0.82, so `floater_frac` and the
+#     `wrong | tight` pairing from depth_variance_mechanism.py should degrade far less steeply
+#     with lambda than the absolute form's 0.0014 -> 0.24.
+#
+# Lambda does not carry over between the forms: the absolute one was divided by the squared
+# scene extent, this one is a dimensionless ratio around 1e-2 on a typical unresolved ray, so
+# the grid is re-centred rather than reused.
+DEPTH_VARIANCE_RELATIVE_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"dvrel{weight_name}_gaussian" + ("_dn" if with_dn else ""),
+        (
+            "render.primitive_type=instances",
+            "render.enable_depth_variance=true",
+            "loss.use_depth_variance=true",
+            "loss.depth_variance_relative=true",
+            f"loss.lambda_depth_variance={weight}",
+            "loss.depth_variance_from_iter=3000",
+        )
+        + (DEPTH_NORMAL_OVERRIDES if with_dn else ()),
+        f"Relative depth variance at lambda={weight} on gaussian" + (" with depth-normal." if with_dn else "."),
+    )
+    for with_dn, weight_name, weight in (
+        (False, "001", 0.01),
+        (False, "01", 0.1),
+        (False, "1", 1.0),
+        (False, "10", 10.0),
+        (False, "100", 100.0),
+        # 2DGS pairs its distortion term with normal consistency rather than running it alone,
+        # and dn05 is our strongest geometry result, so the combination is the one worth having
+        # at more than a single weight.
+        (True, "01", 0.1),
+        (True, "1", 1.0),
+    )
+)
+
 ALL_VARIANTS: tuple[Variant, ...] = (
-    BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS + FLATNESS_VARIANTS + DEPTH_VARIANCE_VARIANTS
+    BASELINE_VARIANTS
+    + DEPTH_NORMAL_VARIANTS
+    + FLATNESS_VARIANTS
+    + DEPTH_VARIANCE_VARIANTS
+    + DEPTH_VARIANCE_RELATIVE_VARIANTS
 )
 
 

@@ -46,19 +46,38 @@ they only exist if the `acc` in the denominator carries gradient -- see the note
 division, which is where an earlier version of this got it wrong and produced exactly the
 scene collapse it was supposed to prevent.
 
-Two honest caveats remain.
+The absolute form above has two defects, and `depth_variance_relative` fixes both by dividing
+by the squared expected depth. `Var/mu^2` is computable from the same three buffers --
 
-**Uniform fading still reduces it.** `L` is homogeneous of degree one in the weights, so
-halving every `w_i` halves the term without resolving anything. Only the photometric loss
-argues against that, as with the distortion losses this follows. The ablation therefore reads
-accumulated opacity (`d_cover`) alongside the geometry metrics.
+    Var/mu^2 = acc*M2/D^2 - 1
 
-**Within a scene it is scale-dependent, by choice.** Variance carries squared distance units,
-so a far surface with the same *relative* spread contributes more than a near one. The
-alternative -- dividing by depth for a scale-free spread -- needs guarding where depth is small
-and changes what the term means. Across scenes the dependence is removed by dividing by the
-squared scene extent, so one lambda transfers between worlds whose units differ by orders of
-magnitude, as `use_scale_flatten` already does with its linear scale.
+-- so it costs no accumulator, no backward path and no kernel change; it is the same render.
+
+**Uniform fading no longer reduces it.** The absolute form is homogeneous of degree one in the
+weights, so halving every `w_i` halves it without resolving anything, and only the photometric
+loss argues against that. `Var/mu^2` is homogeneous of degree *zero*: scaling every weight
+leaves it exactly unchanged, which removes the escape hatch rather than merely monitoring it.
+The ablation still reads accumulated opacity, but it is no longer load-bearing.
+
+**And it is scale-free rather than merely extent-normalised.** Variance carries squared
+distance units, so under the absolute form a far surface with the same *relative* spread
+contributes `mu^2` times more: measured 0.01 / 0.25 / 4.0 for one ray at `mu` = 2 / 10 / 40.
+Dividing by the squared scene extent only fixes this *between* scenes, and imperfectly -- it is
+why no lambda transferred between sponza and emerald-square. `Var/mu^2` is exactly flat across
+all three. Note the mip-NeRF/2DGS `|t_i - t_j|` kernel is only a partial fix here, linear in
+`mu` rather than flat, and it needs a new accumulator to compute.
+
+The reason to prefer it is larger than either, though, and was not anticipated. Dividing by
+`mu^2` penalises the near collapse specifically, because committing to a near floater is what
+makes `mu` small. That breaks the symmetry of the double well in the right direction: the
+barrier in `a_near` moves from 0.487 to 0.818, shrinking the basin that locks a ray onto a
+floater from 51% of the axis to 18%. It does *not* remove the degeneracy -- both wells are
+still exactly zero, and the near well is still absorbing once `T` reaches zero -- so this is a
+quantitative improvement to a term that remains unanchored, not a repair of it.
+
+Its one cost is that `dL/dt` scales as `1/mu`, so rays with a small expected depth are
+amplified. `min_distance` floors them; the opacity mask alone does not, since a ray can be
+fully opaque and very close.
 """
 
 from __future__ import annotations
@@ -67,6 +86,9 @@ import torch
 
 from threedgrut.utils.depth_normal_metrics import MIN_ACCUMULATED_OPACITY
 
+MIN_EXPECTED_DISTANCE = 1e-3
+"""Floor on the expected depth for the relative form, whose gradient scales as `1/mu`."""
+
 
 def depth_variance_loss(
     pred_dist: torch.Tensor,
@@ -74,6 +96,8 @@ def depth_variance_loss(
     pred_opacity: torch.Tensor,
     scene_extent: float,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
+    relative: bool = False,
+    min_distance: float = MIN_EXPECTED_DISTANCE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Opacity-weighted variance of the per-ray distance distribution.
 
@@ -83,9 +107,16 @@ def depth_variance_loss(
     surface count for little reduces to `M2 - D^2/acc`, which is the form evaluated here --
     one division instead of three, and no `1/acc^2` to cancel.
 
-    `scene_extent` normalizes the squared units. Rays below `min_opacity` are excluded: their
-    accumulated weight is dominated by the transparent remainder, so their "variance" is a
-    statement about the background rather than about geometry.
+    With `relative`, the term is instead `Var/mu^2 == acc*M2/D^2 - 1`, the *squared coefficient
+    of variation*: same buffers, same render, but dimensionless. It is scale-free rather than
+    extent-normalised, invariant to uniform fading, and biased against the near collapse -- see
+    the module docstring. `scene_extent` is then unused, since there are no units left to
+    normalise, and rays whose expected depth falls below `min_distance` are dropped because the
+    `1/mu` in the gradient would otherwise amplify them without bound.
+
+    `scene_extent` normalizes the squared units of the absolute form. Rays below `min_opacity`
+    are excluded in both: their accumulated weight is dominated by the transparent remainder,
+    so their "variance" is a statement about the background rather than about geometry.
 
     Returns the loss and the pixel count it was averaged over, as device tensors. Runs without
     host synchronisation -- called every iteration -- so the empty-mask case is a clamped
@@ -109,12 +140,21 @@ def depth_variance_loss(
     # just `mu^2` -- and `clamp_min` only guards rays the mask already drops.
     safe = accumulated.clamp_min(min_opacity)
 
-    # Non-negative in exact arithmetic (Jensen), but the difference of two accumulators
-    # cancels to a small negative value on a nearly-resolved ray, which would otherwise
-    # reward further sharpening with an unboundedly negative loss.
-    variance = (pred_dist_sq - pred_dist * pred_dist / safe).clamp_min(0.0)
+    if relative:
+        # Var/mu^2 = acc*M2/D^2 - 1. The same three buffers, so the `acc` here carries gradient
+        # for the same reason as above -- it is what makes the term degree-zero in the weights
+        # and so immune to uniform fading, rather than merely monitored for it.
+        valid = valid & (pred_dist >= min_distance * accumulated)
+        safe_dist_sq = (pred_dist * pred_dist).clamp_min((min_distance * min_opacity) ** 2)
+        variance = (safe * pred_dist_sq / safe_dist_sq - 1.0).clamp_min(0.0)
+        normalizer = 1.0
+    else:
+        # Non-negative in exact arithmetic (Jensen), but the difference of two accumulators
+        # cancels to a small negative value on a nearly-resolved ray, which would otherwise
+        # reward further sharpening with an unboundedly negative loss.
+        variance = (pred_dist_sq - pred_dist * pred_dist / safe).clamp_min(0.0)
+        normalizer = max(scene_extent, 1e-8) ** 2
 
     per_pixel = torch.where(valid, variance, torch.zeros_like(variance))
     count = valid.sum()
-    normalizer = max(scene_extent, 1e-8) ** 2
     return per_pixel.sum() / (count.clamp_min(1) * normalizer), count

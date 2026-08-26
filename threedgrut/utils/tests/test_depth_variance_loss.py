@@ -282,3 +282,113 @@ def test_empty_buffer_is_rejected_rather_than_averaged():
     empty = torch.zeros((0,), dtype=torch.float32)
     with pytest.raises(ValueError, match="enable_depth_variance"):
         depth_variance_loss(empty, empty, empty, scene_extent=1.0)
+
+
+def _barrier(relative: bool, a_far: float = 0.9, t_near: float = 2.0, t_far: float = 10.0) -> float:
+    """Locate the double well's barrier in `a_near`, by bisection on the gradient's sign.
+
+    A ray with a floater at `t_near` in front of the true surface at `t_far`. Compositing gives
+    `w_near = a_near` and `w_far = a_far * (1 - a_near)`, so the term carries a factor
+    `a_near * (1 - a_near)` and vanishes at both ends: deleting the floater and promoting it to
+    fully opaque are equally optimal. The barrier is where descent stops doing the former and
+    starts doing the latter, and it is the number that decides how much damage the term does.
+    """
+
+    def gradient(a_near: float) -> float:
+        a = torch.tensor(a_near, dtype=torch.float64, requires_grad=True)
+        w = torch.stack([a, a_far * (1 - a)])
+        t = torch.tensor([t_near, t_far], dtype=torch.float64)
+        shape = (1, 1, 1, 1)
+        loss, _ = depth_variance_loss(
+            (w * t).sum().reshape(shape),
+            (w * t * t).sum().reshape(shape),
+            w.sum().reshape(shape),
+            scene_extent=1.0,
+            relative=relative,
+        )
+        return float(torch.autograd.grad(loss, a)[0])
+
+    lo, hi = 0.01, 0.999
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if gradient(mid) > 0 else (lo, mid)
+    return (lo + hi) / 2
+
+
+def test_relative_form_is_invariant_to_scene_scale():
+    """`Var/mu^2` is dimensionless, so scaling every distance leaves it untouched.
+
+    This is the property the absolute form lacks: variance carries squared distance units, so
+    the same *relative* spread costs `mu^2` more on a far ray than a near one. That is what
+    made lambda scene-dependent, and dividing by the scene extent only fixes it between scenes.
+    """
+    weights = [0.5, 0.5]
+    base = [9.5, 10.5]
+    reference, _ = depth_variance_loss(*_ray(weights, base), scene_extent=1.0, relative=True)
+
+    for scale in (0.2, 5.0, 100.0):
+        scaled, _ = depth_variance_loss(*_ray(weights, [d * scale for d in base]), scene_extent=1.0, relative=True)
+        assert float(scaled) == pytest.approx(float(reference), rel=1e-9)
+
+    # And the absolute form is *not* invariant, growing as the square of the scale.
+    absolute_1x, _ = depth_variance_loss(*_ray(weights, base), scene_extent=1.0)
+    absolute_5x, _ = depth_variance_loss(*_ray(weights, [d * 5.0 for d in base]), scene_extent=1.0)
+    assert float(absolute_5x) == pytest.approx(25.0 * float(absolute_1x), rel=1e-9)
+
+
+def test_relative_form_closes_the_transparency_escape():
+    """Degree zero in the weights: fading the scene out no longer reduces the term.
+
+    The absolute form is degree one, so halving every weight halves it without resolving any
+    ray -- a descent direction that only the photometric loss argues against. The relative form
+    removes it outright rather than leaving it to be monitored.
+
+    The claim is about the kernel, so it is asserted over the range where the kernel applies.
+    Fading a ray past `MIN_ACCUMULATED_OPACITY` drops it from the term altogether, in both
+    forms; that is the mask's decision, and it is not a gradient the term supplies.
+    """
+    weights = [0.3, 0.4, 0.3]
+    distances = [1.0, 2.0, 4.0]
+    reference, _ = depth_variance_loss(*_ray(weights, distances), scene_extent=1.0, relative=True)
+
+    for fade in (0.9, 0.7, 0.5):
+        faded, count = depth_variance_loss(
+            *_ray([w * fade for w in weights], distances), scene_extent=1.0, relative=True
+        )
+        assert int(count) == 1, "the ray must stay above the opacity floor for the claim to be about fading"
+        assert float(faded) == pytest.approx(float(reference), rel=1e-9)
+
+    half, _ = depth_variance_loss(*_ray([w * 0.5 for w in weights], distances), scene_extent=1.0)
+    full, _ = depth_variance_loss(*_ray(weights, distances), scene_extent=1.0)
+    assert float(half) == pytest.approx(0.5 * float(full), rel=1e-9)
+
+
+def test_relative_form_shrinks_the_basin_that_locks_rays_onto_floaters():
+    """Dividing by `mu^2` biases the double well against the near collapse.
+
+    Committing to a near floater is precisely what makes `mu` small, so the relative form
+    charges for it. The barrier moves from roughly half the axis to four fifths of it, which
+    is the mechanism by which this is expected to do less damage than the absolute form. Note
+    what it does *not* do: both wells are still exactly zero, so the degeneracy survives and
+    the term still needs a depth anchor to be more than a sharpener.
+    """
+    absolute = _barrier(relative=False)
+    relative = _barrier(relative=True)
+
+    assert absolute == pytest.approx(0.487, abs=0.02)
+    assert relative == pytest.approx(0.818, abs=0.02)
+    assert relative > absolute + 0.25
+
+
+def test_relative_form_drops_rays_whose_expected_depth_is_below_the_floor():
+    """`dL/dt` scales as `1/mu`, so a ray at almost zero depth would dominate the batch.
+
+    The opacity mask does not catch these: a ray can be entirely opaque and still very close.
+    """
+    dist, dist_sq, opacity = _ray([0.5, 0.5], [1e-6, 3e-6])
+
+    loss, count = depth_variance_loss(dist, dist_sq, opacity, scene_extent=1.0, relative=True)
+
+    assert int(count) == 0
+    assert float(loss) == 0.0
+    assert torch.isfinite(loss)
