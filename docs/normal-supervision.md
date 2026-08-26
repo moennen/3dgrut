@@ -522,6 +522,82 @@ unconsumed stack local survive into it. Those should be eliminated by `nvcc`, bu
 verified, so treat "free when disabled" as an assumption on the Slang path rather than a
 measured fact.
 
+#### Stage 2: the loss, and why it does not work
+
+`depth_variance_loss` penalises `M2 - D^2/acc`, the opacity-weighted variance of the hit
+distribution, normalised by the squared scene extent. It landed default-off behind
+`loss.use_depth_variance`, guarded so that enabling it without `render.enable_depth_variance`,
+or under 3DGRT, raises rather than training against an empty buffer.
+
+**A gradient bug came first, and it is worth recording because it looked like a result.** The
+`acc` in the denominator was detached, on the stated grounds that `dL/dacc` contained a
+divergent `1/acc^2`. That reasoning was simply wrong -- `D` scales with `acc`, so the term is
+`mu^2` and is bounded -- and detaching dropped exactly the term that completes the square:
+
+    correct   dL/dw_i = (t_i - mu)^2            non-negative, translation-invariant
+    detached  dL/dw_i = (t_i - mu)^2 - mu^2     negative offset growing as the squared depth
+
+So it pushed opacity *up*, hardest on the most distant geometry: `-4` on a ray at `t=2` but
+`-1600` at `t=40`, and `-10500` after sliding the same ray 100 units out. Accumulated opacity
+pinned at 1.000 for every weight on both scenes, floaters went 0.018 -> 0.23 and depth bias
+-4.2 -> -12.5 on emerald-square. Fixing it took lambda=10 on sponza from 14.6 dB to 30.8 dB.
+Four tests in `test_depth_variance_loss.py` now backpropagate to *per-hit* weight and distance
+and fail if the detach returns; accumulator-level gradients look reasonable under the bug,
+which is why the original tests missed it.
+
+**With the gradient correct, the term still fails, for a reason that is not fixable by
+reweighting.** Measured with `scripts/ablation/depth_variance_mechanism.py`, which re-renders
+trained checkpoints and asks where the removed spread went:
+
+| | spread | neg_var | signed_err | abs_rel | floaters | tight | wrong given tight | opacity |
+|---|---|---|---|---|---|---|---|---|
+| sponza base | 0.0391 | 0.0000 | -0.010 | 0.042 | 0.003 | 0.227 | 0.0014 | 0.972 |
+| sponza dv1 | 0.0135 | 0.0000 | -0.041 | 0.049 | 0.020 | 0.676 | 0.0402 | 0.973 |
+| sponza dv10 | 0.0065 | 0.0000 | -0.116 | 0.120 | 0.059 | 0.883 | 0.2409 | 0.981 |
+| emerald base | 0.1048 | 0.0000 | -0.046 | 0.107 | 0.018 | 0.071 | 0.0137 | 0.967 |
+| emerald dv1 | 0.0066 | 0.0000 | -0.216 | 0.228 | 0.188 | 0.899 | 0.3377 | 0.985 |
+
+The term does its job -- median relative spread falls 6x on sponza, 16x on emerald -- and it is
+not an accumulator bug: the *unclamped* variance is negative on exactly zero rays, so the two
+moments are consistent to float precision. Nor is it the transparency escape the docstring
+warned about; mean accumulated opacity barely moves. What breaks is that confidence stops
+implying correctness. The committed population grows 0.23 -> 0.88, while the probability that
+a committed ray is *wrong* grows 0.0014 -> 0.24, a factor of 170. Those rays are wrong toward
+the camera: mean signed error -0.38 on the confidently-wrong population at lambda=10.
+
+The cause is that **nothing in the objective refers to the truth**. `M2 - D^2/acc` is zero for
+*any* Dirac distribution at *any* distance -- zero for a ray committed to 2m and zero for the
+same ray committed to 40m. It is pure sharpening; only the photometric loss says where. On a
+two-hit ray with a faint near particle at `t=2` and the true surface at `t=10` it is
+winner-take-all with a separatrix at `a_near ~ 0.47`: below it the term correctly deletes the
+floater (`dL/da_near = +50` at `a_near=0.1`), above it the term reinforces it
+(`dL/da_near = -1.6` at 0.5, `-47` at 0.9).
+
+The asymmetry that makes the drift systematically *nearer* is that one basin is absorbing. At
+`a_near = 1` the far surface's weight is `a_far * (1 - a_near) = 0`, so `dL/da_far` is exactly
+zero -- and so is the gradient from every other term that reaches it through transmittance, the
+photometric loss included. A ray that collapses onto the near surface can never recover. A ray
+that collapses onto the far surface can, because an unoccluded near particle at `a = 0` is
+still visible to the image loss. So each ray that crosses the separatrix becomes a permanent
+floater, which is `floater_frac` 0.003 -> 0.059.
+
+This also explains the sweep's headline failure, that no lambda transfers between scenes:
+sponza's optimum is 0.01-0.1 and emerald is already losing 1.75 dB at 0.01. It is not the
+world units -- the extent normalisation handles those -- it is that emerald's baseline spread
+is 2.7x sponza's and only 7% of its rays are committed versus 23%, so far more of its rays sit
+near the separatrix waiting to be locked onto the wrong surface.
+
+**Conclusion: kept, default-off, not recommended.** In the window where it does no harm the
+depth gain is at or barely above the noise floor (sponza's best is `abs_rel` 0.0577 -> 0.0539,
+against a 0.002-0.004 noise band), and the depth-normal term beats it on sponza at every
+weight. Two dead ends worth not re-walking: the normalised `std/depth` form does *not* fix
+this, since any Dirac still scores zero and the winner-take-all dynamics are untouched; and
+tuning lambda per scene only chooses how many rays get locked. What the term is missing is an
+anchor for *where* to sharpen, which is what item 4's pseudo-depth supervision would supply --
+so variance is worth revisiting as a companion to a depth target, not on its own. This is the
+same conclusion the stage-0 diagnostic reached from the other direction, and it should have
+been weighted more heavily before building the backward.
+
 ### 4. Pseudo-depth supervision
 
 Nothing landed. Needs a monocular depth predictor and a cache — the dependency is heavier

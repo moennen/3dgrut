@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~13 min, currently 326 passed, 1 skipped
+# ~12 min, currently 347 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -97,6 +97,20 @@ buffer that loses to that control.
   disabled Slang flag still leaves its parameters in the generated signature.
 - The C++ is not `clang-format` clean at HEAD, so do not run it over a touched file; match the
   surrounding alignment by hand.
+- Test a loss by its *gradient*, at the granularity the renderer will apply it, not by its
+  value. The depth-variance term detached the `acc` in `M2 - D^2/acc`, which drops the term
+  completing the square and turns `dL/dw_i = (t_i - mu)^2` into `(t_i - mu)^2 - mu^2` -- an
+  offset that grows as the squared depth and inverts the sign. Value tests, finite-difference
+  tests against the renderer, and gradient tests on the *accumulators* all passed; it took
+  backpropagating to per-hit weight and distance to see it. Suspect any `.detach()` justified
+  by "that term diverges" -- check whether the numerator scales with the denominator first.
+- A sharpening prior with no reference for *where* to sharpen will buy confidence instead of
+  accuracy. Per-ray variance is zero for any Dirac at any distance, so it is winner-take-all
+  between a ray's hits, and the near basin is absorbing: once the front particle reaches
+  alpha 1, transmittance zeroes the gradient to everything behind it for *every* loss, so the
+  error is permanent. Measured as `wrong | tight` rising 170x while spread fell 6x. Report
+  that pairing, not just the mean error, for any term of this family --
+  `scripts/ablation/depth_variance_mechanism.py`.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.
