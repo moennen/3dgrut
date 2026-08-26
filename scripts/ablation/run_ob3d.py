@@ -126,7 +126,49 @@ FLATNESS_VARIANTS: tuple[Variant, ...] = tuple(
     for weight_name, weight in (("01", 0.1), ("1", 1.0), ("3", 3.0), ("30", 30.0), ("300", 300.0))
 )
 
-ALL_VARIANTS: tuple[Variant, ...] = BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS + FLATNESS_VARIANTS
+# Depth variance along the ray: penalises rays whose weight is spread over distance instead of
+# concentrated on a surface. The prior is weak -- the stage-0 diagnostic found the existing
+# depth gradient nearly as good at spotting bad depth as the variance buffer is (0.02-0.10 AUC),
+# which is why this is swept as an optimisation target rather than adopted.
+#
+# Two things this sweep has to separate. First, the weight: at lambda=1 the term is ~18% of L1
+# late in a sponza run, so 0.1 to 10 spans negligible to dominant, and 100 is included to find
+# where it breaks rather than to be used. Second, and the reason `d_cover` matters more here
+# than elsewhere: the term penalises an *un-normalized* accumulator, so the model can reduce it
+# by making the scene transparent instead of by resolving surfaces. A variance win that arrives
+# with a fall in `d_cover` is that escape hatch, not the effect being measured.
+#
+# `dv*_dn` stacks it on depth-normal consistency. That is the combination the point of extending
+# the Slang backward was to enable, and the diagnostic suggested it is where any remaining
+# spread lives, since depth-normal already removes two thirds of it.
+DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"dv{weight_name}_{primitive_name}" + ("_dn" if with_dn else ""),
+        (
+            f"render.primitive_type={primitive}",
+            "render.enable_depth_variance=true",
+            "loss.use_depth_variance=true",
+            f"loss.lambda_depth_variance={weight}",
+            # Same reasoning as depth_normal_from_iter: the 7000 default would switch the term
+            # on exactly as a 7k sweep ends and report a null result that is really a no-op.
+            "loss.depth_variance_from_iter=3000",
+        )
+        + (DEPTH_NORMAL_OVERRIDES if with_dn else ()),
+        f"Depth variance at lambda={weight} on {primitive_name}" + (" with depth-normal." if with_dn else "."),
+    )
+    for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
+    for with_dn, weight_name, weight in (
+        (False, "01", 0.1),
+        (False, "1", 1.0),
+        (False, "10", 10.0),
+        (False, "100", 100.0),
+        (True, "1", 1.0),
+    )
+)
+
+ALL_VARIANTS: tuple[Variant, ...] = (
+    BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS + FLATNESS_VARIANTS + DEPTH_VARIANCE_VARIANTS
+)
 
 
 def scene_dirs(dataset_root: Path, scenes: list[str] | None) -> list[Path]:

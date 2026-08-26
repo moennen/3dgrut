@@ -52,6 +52,33 @@ def check_normals_are_rendered(conf) -> None:
     )
 
 
+def check_depth_variance_is_rendered(conf) -> None:
+    """Reject a depth-variance loss where the second-moment buffer is absent.
+
+    Two ways it can be, with the same consequence. `render.enable_depth_variance=false`
+    compiles the accumulator out and the tracer returns an *empty* tensor, and 3DGRT does not
+    implement the moment at all. Either way the term has nothing to read; unlike the normal's
+    constant placeholder an empty buffer at least cannot masquerade as data, but it sums to a
+    perfectly respectable `0.0`, which trains at full cost and supervises nothing.
+    """
+    if not OmegaConf.select(conf, "loss.use_depth_variance", default=False):
+        return
+
+    method = OmegaConf.select(conf, "render.method", default="3dgut")
+    if method != "3dgut":
+        raise ValueError(
+            f"loss.use_depth_variance is set with render.method={method}, which does not render "
+            "the depth second moment. The term is 3DGUT-only; use render.method=3dgut."
+        )
+
+    if not OmegaConf.select(conf, "render.enable_depth_variance", default=False):
+        raise ValueError(
+            "loss.use_depth_variance is set but render.enable_depth_variance is false, so the "
+            "tracer returns an empty second-moment buffer and the term would be a silent zero. "
+            "Set render.enable_depth_variance=true."
+        )
+
+
 def check_flatness_applies(conf) -> None:
     """Reject the flatness penalty on a primitive that is already flat.
 

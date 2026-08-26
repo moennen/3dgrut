@@ -15,6 +15,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from threedgrut.utils.geometry_supervision import (
+    check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
     normal_supervision_requested,
@@ -52,6 +53,7 @@ def test_a_config_without_the_sections_is_allowed() -> None:
     """Render and playground entry points build from configs carrying neither section."""
     check_normals_are_rendered(OmegaConf.create({}))
     check_flatness_applies(OmegaConf.create({}))
+    check_depth_variance_is_rendered(OmegaConf.create({}))
     assert normal_supervision_requested(OmegaConf.create({})) is False
 
 
@@ -68,3 +70,39 @@ def test_flatness_on_ellipsoids_is_accepted() -> None:
 @pytest.mark.parametrize("primitive_type", ["instances", "trisurfel"])
 def test_runs_without_the_flatness_term_are_untouched(primitive_type: str) -> None:
     check_flatness_applies(_flatten_conf(use_scale_flatten=False, primitive_type=primitive_type))
+
+
+def _variance_conf(use_depth_variance: bool, enable_depth_variance: bool, method: str = "3dgut"):
+    return OmegaConf.create(
+        {
+            "render": {"method": method, "enable_depth_variance": enable_depth_variance},
+            "loss": {"use_depth_variance": use_depth_variance},
+        }
+    )
+
+
+def test_a_variance_loss_without_the_moment_buffer_is_rejected() -> None:
+    """The buffer is empty rather than absent, so the loss would be a silent zero."""
+    with pytest.raises(ValueError, match="render.enable_depth_variance is false"):
+        check_depth_variance_is_rendered(_variance_conf(use_depth_variance=True, enable_depth_variance=False))
+
+
+def test_a_variance_loss_under_3dgrt_is_rejected() -> None:
+    """3DGRT never renders the second moment, at any setting."""
+    with pytest.raises(ValueError, match="3DGUT-only"):
+        check_depth_variance_is_rendered(
+            _variance_conf(use_depth_variance=True, enable_depth_variance=True, method="3dgrt")
+        )
+
+
+def test_a_variance_loss_with_the_moment_buffer_is_accepted() -> None:
+    check_depth_variance_is_rendered(_variance_conf(use_depth_variance=True, enable_depth_variance=True))
+
+
+@pytest.mark.parametrize("enable_depth_variance", [True, False])
+@pytest.mark.parametrize("method", ["3dgut", "3dgrt"])
+def test_runs_without_the_variance_term_are_untouched(method: str, enable_depth_variance: bool) -> None:
+    """Including 3DGRT runs, which must not be disturbed by a term they cannot use."""
+    check_depth_variance_is_rendered(
+        _variance_conf(use_depth_variance=False, enable_depth_variance=enable_depth_variance, method=method)
+    )

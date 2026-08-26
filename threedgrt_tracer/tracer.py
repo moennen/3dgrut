@@ -23,7 +23,11 @@ from omegaconf import OmegaConf
 
 from threedgrut.datasets.protocols import Batch
 from threedgrut.model.features import Features
-from threedgrut.utils.geometry_supervision import check_flatness_applies, check_normals_are_rendered
+from threedgrut.utils.geometry_supervision import (
+    check_depth_variance_is_rendered,
+    check_flatness_applies,
+    check_normals_are_rendered,
+)
 from threedgrut.utils.timer import CudaTimer
 
 logger = logging.getLogger(__name__)
@@ -78,6 +82,7 @@ def check_normal_supervision_supported(conf) -> None:
     """
     check_normals_are_rendered(conf)
     check_flatness_applies(conf)
+    check_depth_variance_is_rendered(conf)
     if not OmegaConf.select(conf, "loss.use_depth_normal", default=False):
         return
     if supports_normal_gradients(conf):

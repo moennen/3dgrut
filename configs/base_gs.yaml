@@ -216,6 +216,20 @@ loss:
   # 1.5-2 degrees of target quality on OB3D, so a trim rather than a fix; null disables it.
   depth_normal_grad_percentile: 0.9
 
+  # Depth variance along the ray: penalises rays whose compositing weight is spread over
+  # distance rather than concentrated on a surface. Needs render.enable_depth_variance for the
+  # second-moment buffer, and 3DGUT -- 3DGRT does not render it. The trainer rejects both
+  # combinations rather than training on an empty buffer.
+  #
+  # Reduces to sum(w*t^2) - sum(w*t)^2/sum(w) per ray, normalised by the squared scene extent
+  # so one lambda transfers between scenes. Note it penalises an un-normalized accumulator, so
+  # the model can also reduce it by making the scene transparent; watch accumulated opacity.
+  use_depth_variance: false
+  lambda_depth_variance: 0.0
+  # Iteration the term switches on, matching use_depth_normal: before the geometry settles
+  # every ray is diffuse and the term would fight the reconstruction rather than sharpen it.
+  depth_variance_from_iter: 7000
+
 # Post-processing configuration
 post_processing:
   # null | "ppisp" | "linear-to-srgb"
