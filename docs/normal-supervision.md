@@ -610,16 +610,113 @@ world units -- the extent normalisation handles those -- it is that emerald's ba
 is 2.7x sponza's and only 7% of its rays are committed versus 23%, so far more of its rays sit
 near the separatrix waiting to be locked onto the wrong surface.
 
-**Conclusion: kept, default-off, not recommended.** In the window where it does no harm the
-depth gain is at or barely above the noise floor (sponza's best is `abs_rel` 0.0577 -> 0.0539,
-against a 0.002-0.004 noise band), and the depth-normal term beats it on sponza at every
-weight. Two dead ends worth not re-walking: the normalised `std/depth` form does *not* fix
-this, since any Dirac still scores zero and the winner-take-all dynamics are untouched; and
-tuning lambda per scene only chooses how many rays get locked. What the term is missing is an
-anchor for *where* to sharpen, which is what item 4's pseudo-depth supervision would supply --
-so variance is worth revisiting as a companion to a depth target, not on its own. This is the
-same conclusion the stage-0 diagnostic reached from the other direction, and it should have
-been weighted more heavily before building the backward.
+**Conclusion on the absolute form: superseded.** In the window where it does no harm the depth
+gain is at or barely above the noise floor (sponza's best is `abs_rel` 0.0577 -> 0.0539, against
+a 0.002-0.004 noise band), and the depth-normal term beats it on sponza at every weight. It is
+kept behind `depth_variance_relative: false` to preserve what was measured, and should not be
+used.
+
+**A prediction recorded here was wrong, twice over.** This section previously claimed the
+normalised `std/depth` form "does *not* fix this, since any Dirac still scores zero". The
+premise is right and the conclusion does not follow. See below.
+
+#### Stage 3: the relative form, `Var/mu^2`
+
+The obvious next candidate was the mip-NeRF 360 / 2DGS kernel, `sum_ij w_i w_j |t_i - t_j|`,
+which is the established form and is implementable here -- the absolute pairwise sum telescopes
+for sorted `t`,
+
+    sum_ij w_i w_j |t_i - t_j| = 2 * sum_i w_i * (t_i * W_<i - T_<i)
+
+where `W_<i` and `T_<i` are the running accumulated opacity and integrated depth already in the
+payload, so it needs one accumulator and no new state. It was not built, because dividing by
+the squared expected depth dominates it on every axis at a fraction of the cost:
+
+| | `\|dt\|` kernel | `Var/mu^2` |
+|---|---|---|
+| renderer cost | new accumulator, three backward paths | none, same buffers |
+| scale dependence | linear in `mu` | exactly flat |
+| barrier in `a_near` | 0.49, unchanged | 0.82 |
+| uniform fading reduces it | yes, degree one | no, degree zero |
+
+`Var/mu^2 = acc*M2/D^2 - 1` is the squared coefficient of variation, computable from the three
+buffers already rendered and already differentiated, so it is one line in the loss.
+
+The third row is the one that was not anticipated, and it is why the earlier dismissal was
+wrong. Dividing by `mu^2` charges specifically for the *near* collapse, because committing to a
+near floater is what makes `mu` small. The degeneracy is untouched -- both wells are still
+exactly zero, as predicted -- but the well's *symmetry* is not, and the symmetry is what decided
+the outcome. The barrier moves from 0.487 to 0.818, so the basin that locks a ray onto a floater
+falls from 51% of the axis to 18%. "Both minima are still zero" was a true statement about the
+objective that said nothing about which minimum descent reaches.
+
+Measured at *matched spread*, which is the only fair comparison since lambda does not carry
+between the forms:
+
+| scene, spread | form | wrong given tight | floaters | signed_err | abs_rel |
+|---|---|---|---|---|---|
+| sponza 0.039 | baseline | 0.0012 | 0.0027 | -0.011 | 0.0415 |
+| sponza 0.0135 | absolute | 0.0402 | 0.0204 | -0.0405 | 0.0490 |
+| sponza 0.0153 | relative | 0.0223 | 0.0178 | -0.0292 | 0.0390 |
+| sponza 0.0065 | absolute | 0.2409 | 0.0587 | -0.1156 | 0.1202 |
+| sponza 0.0073 | relative | 0.1353 | 0.0381 | -0.0755 | 0.0817 |
+| emerald 0.118 | baseline | 0.0090 | 0.0254 | -0.0628 | 0.1112 |
+| emerald 0.0155 | absolute | 0.2517 | 0.1156 | -0.1555 | 0.1736 |
+| emerald 0.0196 | relative | 0.1269 | 0.0345 | -0.0153 | 0.1608 |
+
+`wrong | tight` roughly halves at equal sharpening, floaters fall 3.4x on emerald and the
+toward-camera bias 10x. The clearest single line is sponza at matched spread: the absolute form
+takes `abs_rel` from 0.0415 to 0.0490 while the relative form takes it to 0.0390 -- degrading
+where the other improves, at the same reduction in spread.
+
+#### Measured over four seeds, which halves the claim
+
+The first pass was a single seed and looked like a win on both scenes: emerald `abs_rel` 0.1448
+-> 0.1370 alongside sponza 0.0562 -> 0.0515. Repeating seeds 1-4 keeps one and dissolves the
+other. Emerald's baseline `abs_rel` has a seed spread of 0.0047, three times sponza's, and the
+apparent gain sat inside it. The rule against reading one seed is written in `AGENTS.md`; it was
+written after making this mistake and then repeated anyway.
+
+| scene | variant | psnr | abs_rel | delta1 | floaters |
+|---|---|---|---|---|---|
+| sponza | baseline | 36.281 +/- 0.133 | 0.0580 +/- 0.0015 | 0.9489 +/- 0.0011 | 0.0028 +/- 0.0003 |
+| sponza | rel 0.01 | 36.268 +/- 0.086 | **0.0523 +/- 0.0008** | **0.9558 +/- 0.0006** | 0.0030 +/- 0.0003 |
+| sponza | rel 0.1 | 36.095 +/- 0.149 | **0.0499 +/- 0.0017** | **0.9566 +/- 0.0023** | 0.0052 +/- 0.0006 |
+| emerald | baseline | 32.872 +/- 0.086 | 0.1393 +/- 0.0047 | 0.8304 +/- 0.0074 | 0.0237 +/- 0.0017 |
+| emerald | rel 0.01 | 32.783 +/- 0.198 | 0.1359 +/- 0.0028 | 0.8343 +/- 0.0020 | 0.0269 +/- 0.0018 |
+| emerald | rel 0.1 | 32.618 +/- 0.041 | 0.1394 +/- 0.0009 | 0.8380 +/- 0.0035 | 0.0280 +/- 0.0022 |
+
+**Sponza: real.** At lambda 0.01, `abs_rel` -0.0057 (3.9x the baseline seed sd) and `delta1`
++0.0069 (6.3x) for a PSNR change of -0.013, inside noise. At 0.1 the depth gain grows to -0.0081
+(5.5x) and 0.0077 (7.0x) and starts costing 0.19 dB, which is 1.4x sd and therefore real. That is
+the first geometry gain in this document that comes with no photometric cost at all.
+
+**Emerald: not established.** `abs_rel` -0.0034 at lambda 0.01 is inside noise, and at 0.1 it is
++0.0001, i.e. nothing. `delta1` improves by about one sd at both weights -- suggestive, not
+established. PSNR costs 0.09 dB then 0.25 dB, the latter 2.9x sd and clearly real.
+
+So the transferability claim needs splitting. The strong half holds: a *shared* lambda is now
+safe, where the absolute form cost emerald 1.75 dB at the same 0.01 and 6.5 dB at 0.1. The weak
+half does not: a shared lambda does not buy a *gain* on both scenes, it buys one on sponza and
+approximately nothing on emerald for a small real photometric cost.
+
+`d_cover` is flat, as degree zero requires, so the transparency caveat that hung over the
+absolute form is gone rather than merely watched. Depth bias on emerald improves from -5.375 to
+-4.081 on the first seed, reversing the absolute form's monotonic degradation to -12.5, though
+that was not repeated across seeds and should be read as indicative.
+
+What has *not* changed: the term is still an unanchored sharpener. Floaters rise measurably on
+both scenes -- 7.4x sd on sponza at lambda 0.1 -- confirming the degeneracy is mitigated and not
+removed, exactly as the barrier analysis predicted. Normals are still worse than the
+view-direction control without the depth-normal term, and lambda = 1 already costs 1.3-1.9 dB,
+so the usable window is narrow.
+
+**Conclusion: worth having, default-off, on sponza-like scenes.** `depth_variance_relative=true`
+at lambda 0.01 is the configuration to use if the term is used at all: a 10% relative reduction
+in `abs_rel` for no measurable PSNR cost on one of two scenes, and no harm on the other. That is
+a real if narrow result, and it is entirely due to the normalisation rather than to the moment
+accumulator the two earlier stages were spent building. The anchor is still what is missing, and
+item 4 is still the thing that would supply it.
 
 ### 4. Pseudo-depth supervision
 

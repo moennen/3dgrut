@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~12 min, currently 347 passed, 1 skipped
+# ~9 min, currently 354 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -114,6 +114,16 @@ buffer that loses to that control.
   that pairing, not just the mean error, for any term of this family --
   `scripts/ablation/depth_variance_mechanism.py`. Prefer the pairwise form when reasoning
   about a compositing loss; the accumulator form hides the interaction between hits.
+- "The minima are unchanged" is not an argument that behaviour is unchanged. Dividing that
+  same variance by `mu^2` leaves both wells at exactly zero, so it was dismissed as a
+  non-fix -- but it moved the *barrier* from 0.49 to 0.82, shrinking the bad basin from 51% of
+  the axis to 18%, and that is what descent actually responds to. When judging a
+  reparameterisation of a degenerate objective, locate the separatrix, not just the optima.
+- Normalising a loss by a quantity it already contains can be free. `Var/mu^2` is
+  `acc*M2/D^2 - 1`, so it needed no accumulator, no kernel and no backward work, while the
+  mip-NeRF/2DGS `|t_i - t_j|` kernel it replaced would have needed a new accumulator on three
+  backward paths to reach a strictly worse place. Check what the existing buffers can already
+  express before extending the renderer.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.
