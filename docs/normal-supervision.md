@@ -182,7 +182,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 |---|---|---|
 | 5. Depth-normal consistency | Landed, measured at 7k | 30k confirmation; `referenceSlang` throughput on 3DGRT |
 | 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
-| 7. Depth variance along the ray | Not started | Kernel accumulator for `w·t` and `w·t²`; backward pass |
+| 7. Depth variance along the ray | Landed, measured over 4 seeds | 30k confirmation. Use `depth_variance_relative` at lambda 0.01; the absolute form is superseded and harms both scenes |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
 | 9. Scale-z regularisation | Landed, measured over 4 seeds | 30k confirmation. Best normals so far combined with item 5, at a 0.2 dB PSNR cost |
 | 10. Mesh export | Not started | Surface extraction (TSDF or Poisson), Chamfer metric in ablation report |
@@ -716,7 +716,7 @@ at lambda 0.01 is the configuration to use if the term is used at all: a 10% rel
 in `abs_rel` for no measurable PSNR cost on one of two scenes, and no harm on the other. That is
 a real if narrow result, and it is entirely due to the normalisation rather than to the moment
 accumulator the two earlier stages were spent building. The anchor is still what is missing, and
-item 4 is still the thing that would supply it.
+pseudo-depth supervision (plan item 6, section 4 below) is still the thing that would supply it.
 
 ### 4. Pseudo-depth supervision
 
