@@ -107,6 +107,15 @@ struct RayPayload : TOptionalNormal {
     uint32_t hitN;
 #endif
 
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    // Second moment of the hit distance, sum(w * t^2), alongside `hitT` = sum(w * t).
+    // The pair gives the variance of the per-ray weight distribution, which is the spread
+    // of the surface the ray reports. A plain `#if` member rather than the empty-base
+    // trick used for normals: this lives only in the ray payload, never in the k-buffer
+    // hit record, so there is no packed layout to preserve.
+    float hitTSq;
+#endif
+
     __device__ __forceinline__ bool isAlive() const {
         return flags & Alive;
     }
@@ -169,6 +178,10 @@ __device__ __inline__ RayPayloadT initializeRay(const threedgut::RenderParameter
     ray.hitN = 0;
 #endif
 
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    ray.hitTSq = 0.0f;
+#endif
+
     return ray;
 }
 
@@ -222,6 +235,10 @@ __device__ __inline__ RayPayloadT initializeRayPerPixel(const threedgut::RenderP
     ray.hitN = 0;
 #endif
 
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    ray.hitTSq = 0.0f;
+#endif
+
     return ray;
 }
 
@@ -233,7 +250,8 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
                                        float* __restrict__ worldHitDistancePtr,
                                        TFeatureDensityElem* __restrict__ featureDensityPtr,
                                        const tcnn::mat4x3& sensorToWorldTransform,
-                                       tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr) {
+                                       tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr,
+                                       float* __restrict__ worldHitDistanceSqPtr = nullptr) {
     if (!ray.isValid()) {
         return;
     }
@@ -255,6 +273,14 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
 #endif
 
     worldHitDistancePtr[ray.idx] = ray.hitT;
+
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    // Raw weighted second moment; the variance is formed in PyTorch, where the accumulated
+    // opacity needed to normalize both moments is already available.
+    if (worldHitDistanceSqPtr != nullptr) {
+        worldHitDistanceSqPtr[ray.idx] = ray.hitTSq;
+    }
+#endif
 
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
     // Raw alpha-premultiplied accumulation in the world frame; normalized in PyTorch.

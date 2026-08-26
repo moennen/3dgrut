@@ -31,20 +31,61 @@ logger = logging.getLogger(__name__)
 #
 
 _3dgut_plugin = None
+_3dgut_plugin_variant = None
+
+
+def _plugin_variant(conf) -> tuple:
+    """The config fields that are compiled into the binary rather than read at runtime.
+
+    Must list every field `setup_3dgut` turns into a `-D`, since two configs agreeing here
+    are interchangeable and any disagreement means the cached binary is the wrong one.
+    """
+    return (
+        conf.render.particle_kernel_degree,
+        bool(conf.render.enable_normals),
+        conf.render.primitive_type,
+        bool(getattr(conf.render, "enable_depth_variance", False)),
+        conf.render.splat.k_buffer_size,
+        bool(conf.render.splat.fine_grained_load_balancing),
+    )
 
 
 def load_3dgut_plugin(conf):
-    global _3dgut_plugin
-    if _3dgut_plugin is None:
-        import torch
+    """Compile-and-load the 3DGUT extension, or hand back the one already loaded.
 
-        try:
-            from . import lib3dgut_cc as tdgut  # type: ignore
-        except ImportError:
-            from .setup_3dgut import setup_3dgut
+    A process holds exactly one `lib3dgut_cc`: the module is imported by name, so a second
+    config cannot load a second binary and would silently run against the first one. That
+    is invisible at the call site and produces plausible-but-wrong output -- with
+    `enable_normals` off, for instance, the tracer returns a *constant* placeholder normal,
+    so a test of normal direction keeps passing on whatever the first config compiled. Fail
+    loudly instead, and isolate configs that genuinely differ into separate processes.
+    """
+    global _3dgut_plugin, _3dgut_plugin_variant
+    variant = _plugin_variant(conf)
+    if _3dgut_plugin is not None:
+        if variant != _3dgut_plugin_variant:
+            raise RuntimeError(
+                "the 3DGUT extension is already loaded for a different build variant, and a "
+                "process can only hold one:\n"
+                f"  loaded:    {_3dgut_plugin_variant}\n"
+                f"  requested: {variant}\n"
+                "(fields: particle_kernel_degree, enable_normals, primitive_type, "
+                "enable_depth_variance, k_buffer_size, fine_grained_load_balancing)\n"
+                "Reusing the loaded binary would silently render with the wrong kernel. Run "
+                "the two configurations in separate processes."
+            )
+        return
 
-            tdgut = setup_3dgut(conf)
-        _3dgut_plugin = tdgut
+    import torch
+
+    try:
+        from . import lib3dgut_cc as tdgut  # type: ignore
+    except ImportError:
+        from .setup_3dgut import setup_3dgut
+
+        tdgut = setup_3dgut(conf)
+    _3dgut_plugin = tdgut
+    _3dgut_plugin_variant = variant
 
 
 # ----------------------------------------------------------------------------
@@ -185,21 +226,26 @@ class Tracer:
                 * sensor_poses.timestamps_us[0]
             )
 
-            ray_features_density, ray_hit_distance, ray_hit_count, mog_visibility, ray_hit_normal = (
-                tracer_wrapper.trace(
-                    frame_id,
-                    n_active_features,
-                    particle_density,
-                    particle_features,
-                    ray_ori.contiguous(),
-                    ray_dir.contiguous(),
-                    ray_time.contiguous(),
-                    sensor_params,
-                    sensor_poses.timestamps_us[0],
-                    sensor_poses.timestamps_us[1],
-                    sensor_poses.T_world_sensors[0],
-                    sensor_poses.T_world_sensors[1],
-                )
+            (
+                ray_features_density,
+                ray_hit_distance,
+                ray_hit_count,
+                mog_visibility,
+                ray_hit_normal,
+                ray_hit_distance_sq,
+            ) = tracer_wrapper.trace(
+                frame_id,
+                n_active_features,
+                particle_density,
+                particle_features,
+                ray_ori.contiguous(),
+                ray_dir.contiguous(),
+                ray_time.contiguous(),
+                sensor_params,
+                sensor_poses.timestamps_us[0],
+                sensor_poses.timestamps_us[1],
+                sensor_poses.T_world_sensors[0],
+                sensor_poses.T_world_sensors[1],
             )
 
             ctx.save_for_backward(
@@ -215,6 +261,11 @@ class Tracer:
                 ray_hit_normal,
             )
 
+            # Forward-only: the kernel accumulates the second moment but no backward
+            # unwinds it. Marking it non-differentiable makes autograd raise on any loss
+            # built from it, instead of silently returning a zero gradient.
+            ctx.mark_non_differentiable(ray_hit_distance_sq)
+
             ctx.frame_id = frame_id
             ctx.n_active_features = n_active_features
             ctx.sensor_params = sensor_params
@@ -229,6 +280,8 @@ class Tracer:
                 # Empty unless normals are compiled in, in which case it is differentiable
                 # w.r.t. position / rotation / scale / density.
                 ray_hit_normal,
+                # Empty unless render.enable_depth_variance is set. Never differentiable.
+                ray_hit_distance_sq,
             )
 
         @staticmethod
@@ -239,6 +292,7 @@ class Tracer:
             ray_hit_count_grd_UNUSED,
             mog_visibility_grd_UNUSED,
             ray_hit_normal_grd,
+            ray_hit_distance_sq_grd_UNUSED,  # non-differentiable output, always None
         ):
             (
                 ray_ori,
@@ -332,6 +386,7 @@ class Tracer:
                 hits_count,
                 mog_visibility,
                 pred_normals,
+                pred_dist_sq,
             ) = Tracer._Autograd.apply(
                 self.tracer_wrapper,
                 frame_id,
@@ -352,6 +407,8 @@ class Tracer:
             pred_features = pred_features_alpha[..., :ray_feature_dim].unsqueeze(0).contiguous()
             pred_opacity = pred_features_alpha[..., ray_feature_dim:].unsqueeze(0).contiguous()
             pred_dist = pred_dist.unsqueeze(0).contiguous()
+            if pred_dist_sq.numel() > 0:
+                pred_dist_sq = pred_dist_sq.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
             pred_normals = self.__resolve_normals(pred_normals, pred_features)
 
@@ -361,6 +418,7 @@ class Tracer:
             "pred_features": pred_features,
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
+            "pred_dist_sq": pred_dist_sq,
             "pred_normals": pred_normals,
             "hits_count": hits_count,
             "frame_time_ms": timings["forward_render"] if "forward_render" in timings else 0.0,

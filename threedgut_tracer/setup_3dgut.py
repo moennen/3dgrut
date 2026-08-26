@@ -36,6 +36,17 @@ def setup_3dgut(conf):
             "Disable one of the two."
         )
 
+    # Same hole for the second moment: `renderBalanced` takes neither optional output buffer.
+    if getattr(conf.render, "enable_depth_variance", False) and getattr(
+        conf.render.splat, "fine_grained_load_balancing", False
+    ):
+        raise ValueError(
+            "render.enable_depth_variance is not supported with "
+            "render.splat.fine_grained_load_balancing: the load-balanced kernel does not "
+            "accumulate the hit-distance second moment and would return zeros. "
+            "Disable one of the two."
+        )
+
     include_paths = []
     prefix = os.path.dirname(__file__)
     include_paths.append(os.path.join(prefix, "include"))
@@ -77,6 +88,7 @@ def setup_3dgut(conf):
         f"-DGAUSSIAN_PARTICLE_MIN_ALPHA={conf.render.particle_kernel_min_alpha}",
         f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
         f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
+        f"-DGAUSSIAN_ENABLE_HIT_DISTANCE_SQ={to_cpp_bool(getattr(conf.render, 'enable_depth_variance', False))}",
         f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type=='trisurfel')}",
         f"-DGAUSSIAN_MIN_TRANSMITTANCE_THRESHOLD={conf.render.min_transmittance}",
         f"-DGAUSSIAN_ENABLE_HIT_COUNT={to_cpp_bool(conf.render.enable_hitcounts)}",
@@ -146,6 +158,7 @@ def setup_3dgut(conf):
         f"k{conf.render.particle_kernel_degree}"
         f"_n{int(conf.render.enable_normals)}"
         f"_s{int(conf.render.primitive_type == 'trisurfel')}"
+        f"_v{int(getattr(conf.render, 'enable_depth_variance', False))}"
         f"_kb{conf.render.splat.k_buffer_size}"
     )
     build_dir = jit.variant_build_directory("lib3dgut_cc", cflags + cuda_cflags, label=label, verbose=True)

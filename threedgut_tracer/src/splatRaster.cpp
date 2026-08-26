@@ -180,7 +180,7 @@ SplatRaster::SplatRaster(const nlohmann::json& config)
 SplatRaster::~SplatRaster(void) {
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
                    torch::Tensor particleDensity,
                    torch::Tensor particleRadiance,
@@ -219,6 +219,14 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
 #else
     torch::Tensor rayHitNormal = torch::empty({0}, opts);
 #endif
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    // Zero, unlike `rayHitDistance`'s 1e6: a ray that never hits anything has no weight
+    // distribution to have a spread, and the accumulated-opacity gate in PyTorch discards
+    // those pixels before the two moments are ever combined.
+    torch::Tensor rayHitDistanceSq = torch::zeros({height, width, 1}, opts);
+#else
+    torch::Tensor rayHitDistanceSq = torch::empty({0}, opts);
+#endif
 
     m_parameters.values.numParticles               = numParticles;
     m_parameters.values.radianceSphDegree          = numActiveFeatures;
@@ -256,7 +264,12 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         cudaDeviceIndex,
         cudaStream,
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
-        reinterpret_cast<tcnn::vec3*>(voidDataPtr(rayHitNormal))
+        reinterpret_cast<tcnn::vec3*>(voidDataPtr(rayHitNormal)),
+#else
+        nullptr,
+#endif
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        reinterpret_cast<float*>(voidDataPtr(rayHitDistanceSq))
 #else
         nullptr
 #endif
@@ -268,8 +281,8 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         timer->stop();
     }
 
-    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(
-        rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility, rayHitNormal);
+    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(
+        rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility, rayHitNormal, rayHitDistanceSq);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

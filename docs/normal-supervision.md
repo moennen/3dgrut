@@ -393,6 +393,42 @@ which is deeper kernel work than any of the other terms; everything else is a
 post-render torch loss. The 2DGS distortion form needs the accumulated `w·t` and `w·t²`
 moments, so a second accumulator alongside the existing depth one.
 
+#### Stage 0 landed: the forward accumulator, as a diagnostic only
+
+`render.enable_depth_variance` (3DGUT, default off) accumulates `Σ w·t²` next to the depth's
+`Σ w·t` and returns it as `pred_dist_sq`. Variance is formed in torch as
+`Σw·t²/Σw − (Σw·t/Σw)²`; the raw moment is returned rather than the variance so the
+normalisation stays where the accumulated opacity already lives.
+
+The output is marked non-differentiable in the autograd forward, so a loss built on it raises
+instead of silently receiving a zero gradient. Stage 0 is for measuring headroom — whether
+`std/depth` actually correlates with depth error and with floater pixels — before paying for
+the backward.
+
+Deliberately **variance**, not the published `Σᵢⱼ wᵢwⱼ|tᵢ−tⱼ|` distortion: variance is
+degree-2 and so directly measures the expected squared error of summarising the ray's weight
+distribution by the depth that is reported, which is the quantity the depth-normal loss and
+the depth metrics both consume. The L1 distortion form is gentler but answers a different
+question.
+
+Two things this exposed, both recorded in `AGENTS.md`:
+
+- **The depth backward is real, and correct where it is smooth.** Finite differences against
+  the analytic gradient of a depth loss agree to 0.01–0.02% on `density`, and to a median
+  0.2–0.9% on `positions`/`scale`. A persistent tail (p90 ~8–30%, worst ~50–80%) does *not*
+  shrink with the step size and the finite-difference estimate jumps non-monotonically across
+  step sizes on exactly those entries — the signature of the hard culling and hit-acceptance
+  thresholds, which make a finite difference meaningless there rather than the gradient wrong.
+  Rotation receives no meaningful depth gradient, consistent with the normal being the local z
+  axis regardless of shape.
+- **A process holds one compiled binary.** Adding this variant made `test_normal_axis` fail,
+  which looked like a regression in the normal path and was not: the first config to render
+  decides the binary for the whole process, so the normals-off variance binary was serving the
+  normal tests, which then measured the constant placeholder normal. Verified independently by
+  rendering a single particle at identity rotation, where the normal is exactly `(0,0,-1)`,
+  the local z axis, and is unchanged by which axis is shortest. `load_3dgut_plugin` now
+  raises on a mismatch, and the new tests render in a child process.
+
 ### 4. Pseudo-depth supervision
 
 Nothing landed. Needs a monocular depth predictor and a cache — the dependency is heavier

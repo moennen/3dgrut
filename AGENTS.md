@@ -62,6 +62,13 @@ buffer that loses to that control.
   repeated seeds; normal effects of several degrees do not. Scatter across a *hyperparameter*
   sweep is not a noise estimate, and reading it as one produced a wrong "free of PSNR cost"
   claim. Repeat with `--override seed_initialization=N` on the ablation harness.
+- A process holds exactly **one** compiled `lib3dgut_cc`, cached in `load_3dgut_plugin`, so
+  the first config to render decides the binary and every later config silently reuses it.
+  Combined with `enable_normals=false` returning a *constant* placeholder normal, this made
+  `test_normal_axis` "pass" against a normals-off binary. `load_3dgut_plugin` now raises on a
+  variant mismatch instead; a test needing a new variant (a new `-D`) must render in a child
+  process, as `threedgut_tracer/tests/test_depth_variance.py` does. Adding a define also
+  changes every variant's flag hash, so the next run rebuilds all of them.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

@@ -216,6 +216,14 @@ struct GUTKBufferRenderer : Params {
                                               hitParticle.normalPtr(),
                                               ray.normalPtr());
 
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+            // Second moment of the same front-to-back compositing that produced `ray.hitT`:
+            // `densityIntegrateHit` returns `alpha * transmittance`, the identical weight it
+            // applied to `hitT`, so squaring the distance here is consistent by construction
+            // rather than by a reimplementation that could drift from it.
+            ray.hitTSq += hitWeight * hitParticle.hitT * hitParticle.hitT;
+#endif
+
             // `if constexpr` branches so the SH specialization of Hit (which
             // has no `canonicalIntersection` member) is not instantiated with
             // a missing field reference.

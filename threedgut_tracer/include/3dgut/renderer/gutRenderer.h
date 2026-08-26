@@ -82,7 +82,8 @@ public:
                          Parameters& parameters,
                          int cudaDeviceIndex,
                          cudaStream_t cudaStream,
-                         tcnn::vec3* worldHitNormalCudaPtr = nullptr);
+                         tcnn::vec3* worldHitNormalCudaPtr = nullptr,
+                         float* worldHitDistanceSqCudaPtr  = nullptr);
 
     Status renderBackward(const RenderParameters& params,
                           const tcnn::vec3* sensorRayOriginCudaPtr,

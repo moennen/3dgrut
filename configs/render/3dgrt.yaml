@@ -15,6 +15,10 @@ max_consecutive_bvh_update: 15
 # differentiates it, so loss.use_depth_normal requires that pipeline and is rejected on the
 # others; see NORMAL_GRADIENT_BACKWARD_PIPELINES in threedgrt_tracer/tracer.py.
 enable_normals: false
+# Renders the second moment of the hit distance, sum(w * t^2), which with the depth buffer's
+# sum(w * t) gives the variance of the per-ray weight distribution. 3DGUT forward only: it
+# is a diagnostic, not yet a differentiated output, so nothing may train against it.
+enable_depth_variance: false
 enable_hitcounts: true
 enable_kernel_timings: false
 particle_feature_half: false
