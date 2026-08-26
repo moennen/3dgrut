@@ -437,7 +437,9 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
                                                          int cudaDeviceIndex,
                                                          cudaStream_t cudaStream,
                                                          const vec3* worldHitNormalCudaPtr,
-                                                         const vec3* worldHitNormalGradientCudaPtr) {
+                                                         const vec3* worldHitNormalGradientCudaPtr,
+                                                         const float* worldHitDistanceSqCudaPtr,
+                                                         const float* worldHitDistanceSqGradientCudaPtr) {
 
     if (!m_forwardContext || (m_forwardContext->cudaStream != cudaStream)) {
         RETURN_ERROR(m_logger, ErrorCode::BadInput,
@@ -498,7 +500,9 @@ threedgut::Status threedgut::GUTRenderer::renderBackward(const RenderParameters&
             (float*)m_forwardContext->particlesPrecomputedFeaturesGradient.data(),
             parameters.m_dptrGradientsBuffer,
             (const tcnn::vec3*)worldHitNormalCudaPtr,
-            (const tcnn::vec3*)worldHitNormalGradientCudaPtr);
+            (const tcnn::vec3*)worldHitNormalGradientCudaPtr,
+            (const float*)worldHitDistanceSqCudaPtr,
+            (const float*)worldHitDistanceSqGradientCudaPtr);
         CUDA_CHECK_STREAM_RETURN(cudaStream, m_logger);
     }
 

@@ -172,14 +172,17 @@ def test_two_particles_match_front_to_back_prediction():
     np.testing.assert_allclose(m2_both[valid], w_near * t_near**2 + w_far * t_far**2, atol=2e-2)
 
 
-def test_second_moment_is_not_differentiable():
-    """Stage 0 renders the moment but does not back-propagate it, so a loss must fail loudly.
+def test_second_moment_is_differentiable_on_this_configuration():
+    """The moment carries a gradient on the compositing path this file renders through.
 
-    The forward marks the output non-differentiable, which is what keeps a later loss from
-    quietly training against a zero gradient.
+    Differentiability is configuration-dependent -- only the hand-written CUDA backward
+    unwinds the moment, so `Tracer._dist_sq_differentiable` withholds the gradient elsewhere.
+    This pins that the default `enable_depth_variance` build is on the supported side of that
+    split, so a loss here trains rather than raising. Whether the gradient is *correct* is
+    `test_depth_variance_gradient.py`; whether it is refused off-path is pinned there too.
     """
     _, _, _, requires_grad = _render([[0.0, 0.0, 2.0]])
-    assert not requires_grad
+    assert requires_grad
 
 
 if __name__ == "__main__":

@@ -98,7 +98,9 @@ public:
                           int cudaDeviceIndex,
                           cudaStream_t cudaStream,
                           const tcnn::vec3* worldHitNormalCudaPtr         = nullptr,
-                          const tcnn::vec3* worldHitNormalGradientCudaPtr = nullptr);
+                          const tcnn::vec3* worldHitNormalGradientCudaPtr = nullptr,
+                          const float* worldHitDistanceSqCudaPtr          = nullptr,
+                          const float* worldHitDistanceSqGradientCudaPtr  = nullptr);
 };
 
 } // namespace threedgut

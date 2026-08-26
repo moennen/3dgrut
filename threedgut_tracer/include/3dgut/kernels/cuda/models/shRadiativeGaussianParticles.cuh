@@ -518,7 +518,14 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                   const TFeaturesVec& featuresGradient,
                                                   float& hitT,
                                                   float hitTBackward,
-                                                  float hitTGradient) const {
+                                                  float hitTGradient
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+                                                  ,
+                                                  float& hitTSq,
+                                                  float hitTSqBackward,
+                                                  float hitTSqGradient
+#endif
+    ) const {
 
         threedgut::processHitBwd<ExtParams::KernelDegree, GAUSSIAN_PARTICLE_SURFEL, PerRayRadiance>(
             reinterpret_cast<const float3&>(rayOrigin),
@@ -541,7 +548,14 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
             reinterpret_cast<const float3&>(featuresGradient),
             hitTBackward,
             hitT,
-            hitTGradient);
+            hitTGradient
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+            ,
+            hitTSqBackward,
+            hitTSq,
+            hitTSqGradient
+#endif
+        );
     }
 
     template <bool synchedThread = true>

@@ -23,6 +23,10 @@ struct RayPayloadBackward : public RayPayload<FeatN>, public TOptionalNormalGrad
     float transmittanceGradient;
     float hitTBackward;
     float hitTGradient;
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    float hitTSqBackward;
+    float hitTSqGradient;
+#endif
     tcnn::vec<FeatN> featuresBackward;
     tcnn::vec<FeatN> featuresGradient;
 };
@@ -33,7 +37,9 @@ struct RayPayloadBackward : public RayPayload<FeatN>, public TOptionalNormalGrad
 // optimization applies; this pins that rather than trusting it.
 static_assert(GAUSSIAN_PARTICLE_ENABLE_NORMAL ||
                   sizeof(RayPayloadBackward<RAY_FEATURE_DIM>) ==
-                      sizeof(RayPayload<RAY_FEATURE_DIM>) + 4 * sizeof(float) + 2 * sizeof(tcnn::vec<RAY_FEATURE_DIM>),
+                      sizeof(RayPayload<RAY_FEATURE_DIM>) +
+                          (GAUSSIAN_ENABLE_HIT_DISTANCE_SQ ? 6 : 4) * sizeof(float) +
+                          2 * sizeof(tcnn::vec<RAY_FEATURE_DIM>),
               "compiling normals out must not grow the backward ray payload");
 
 template <typename RayPayloadT>
@@ -46,7 +52,9 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
                                                         const float* __restrict__ featuresDensityGradientPtr,
                                                         const tcnn::mat4x3& sensorToWorldTransform,
                                                         const tcnn::vec3* __restrict__ worldHitNormalPtr         = nullptr,
-                                                        const tcnn::vec3* __restrict__ worldHitNormalGradientPtr = nullptr) {
+                                                        const tcnn::vec3* __restrict__ worldHitNormalGradientPtr = nullptr,
+                                                        const float* __restrict__ worldHitDistanceSqPtr          = nullptr,
+                                                        const float* __restrict__ worldHitDistanceSqGradientPtr  = nullptr) {
 
     // NB : no backpropagation through the forward ray initialization / finalization
     RayPayloadT ray = initializeRay<RayPayloadT>(params,
@@ -78,6 +86,15 @@ __device__ __inline__ RayPayloadT initializeBackwardRay(const threedgut::RenderP
 #endif
         ray.hitTBackward = worldHitDistancePtr[ray.idx];
         ray.hitTGradient = worldHitDistanceGradientPtr[ray.idx];
+
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        // Replayed the same way as the depth: seed with the forward total and carry the
+        // upstream gradient. A caller that renders the moment but takes no gradient from it
+        // passes null, which must leave a zero gradient rather than reading uninitialized
+        // memory -- `hitTSq` itself is reset by `initializeRay`.
+        ray.hitTSqBackward = (worldHitDistanceSqPtr != nullptr) ? worldHitDistanceSqPtr[ray.idx] : 0.0f;
+        ray.hitTSqGradient = (worldHitDistanceSqGradientPtr != nullptr) ? worldHitDistanceSqGradientPtr[ray.idx] : 0.0f;
+#endif
 
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
         // The normal has no separate `*Backward` slot: the compositing replay unwinds the

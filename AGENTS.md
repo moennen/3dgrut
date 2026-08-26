@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~8 min, currently 302 passed, 1 skipped
+# ~13 min, currently 315 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -78,6 +78,13 @@ buffer that loses to that control.
   relative gradient of the existing depth gets within 0.02-0.10 AUC of the new variance buffer
   at spotting bad depth, which reframes the variance term as an optimisation target rather than
   a diagnostic advance. `scripts/ablation/depth_variance_diagnostic.py` runs this comparison.
+- 3DGUT has *three* backward compositing paths, and a forward accumulator added to the shared
+  hit processing appears on all of them while only one can differentiate it: hand-written CUDA
+  `processHitBwd` (`k_buffer_size=0`, normals off) versus two Slang autodiff entry points
+  (`k_buffer_size>0`, or `enable_normals=true`). Gate `mark_non_differentiable` on the config
+  so an unsupported build raises instead of training on a silent zero, as
+  `Tracer._dist_sq_differentiable` does. The C++ is not `clang-format` clean at HEAD, so do
+  not run it over a touched file; match the surrounding alignment by hand.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

@@ -303,7 +303,9 @@ SplatRaster::traceBwd(uint32_t frameNumber, int numActiveFeatures,
                       torch::Tensor rayHitDistance,
                       torch::Tensor rayHitDistanceGradient,
                       torch::Tensor rayHitNormal,
-                      torch::Tensor rayHitNormalGradient) {
+                      torch::Tensor rayHitNormalGradient,
+                      torch::Tensor rayHitDistanceSq,
+                      torch::Tensor rayHitDistanceSqGradient) {
 
     const int cudaDeviceIndex = rayOrigin.get_device();
     cudaStream_t cudaStream   = at::cuda::getCurrentCUDAStream(cudaDeviceIndex);
@@ -368,7 +370,14 @@ SplatRaster::traceBwd(uint32_t frameNumber, int numActiveFeatures,
         m_parameters, cudaDeviceIndex, cudaStream,
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
         reinterpret_cast<const tcnn::vec3*>(voidDataPtr(rayHitNormal)),
-        reinterpret_cast<const tcnn::vec3*>(voidDataPtr(rayHitNormalGradient))
+        reinterpret_cast<const tcnn::vec3*>(voidDataPtr(rayHitNormalGradient)),
+#else
+        nullptr,
+        nullptr,
+#endif
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        reinterpret_cast<const float*>(voidDataPtr(rayHitDistanceSq)),
+        reinterpret_cast<const float*>(voidDataPtr(rayHitDistanceSqGradient))
 #else
         nullptr,
         nullptr

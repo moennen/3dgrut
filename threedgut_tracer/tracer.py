@@ -213,6 +213,7 @@ class Tracer:
             mog_sph,
             sensor_params,
             sensor_poses,
+            dist_sq_differentiable,
         ):
             particle_density = torch.concat(
                 [mog_pos, mog_dns, mog_rot, mog_scl, torch.zeros_like(mog_dns)], dim=1
@@ -259,12 +260,15 @@ class Tracer:
                 # Needed by the backward: the compositing replay unwinds the accumulated
                 # normal in place, so it has to start from the forward result.
                 ray_hit_normal,
+                # Likewise for the second moment.
+                ray_hit_distance_sq,
             )
 
-            # Forward-only: the kernel accumulates the second moment but no backward
-            # unwinds it. Marking it non-differentiable makes autograd raise on any loss
-            # built from it, instead of silently returning a zero gradient.
-            ctx.mark_non_differentiable(ray_hit_distance_sq)
+            # The second moment only has a backward on the hand-written CUDA compositing
+            # path. Where it does not, mark it non-differentiable so autograd raises on any
+            # loss built from it rather than silently returning a zero gradient.
+            if not dist_sq_differentiable:
+                ctx.mark_non_differentiable(ray_hit_distance_sq)
 
             ctx.frame_id = frame_id
             ctx.n_active_features = n_active_features
@@ -280,7 +284,8 @@ class Tracer:
                 # Empty unless normals are compiled in, in which case it is differentiable
                 # w.r.t. position / rotation / scale / density.
                 ray_hit_normal,
-                # Empty unless render.enable_depth_variance is set. Never differentiable.
+                # Empty unless render.enable_depth_variance is set; differentiable only on
+                # the configurations listed in Tracer._dist_sq_differentiable.
                 ray_hit_distance_sq,
             )
 
@@ -292,7 +297,7 @@ class Tracer:
             ray_hit_count_grd_UNUSED,
             mog_visibility_grd_UNUSED,
             ray_hit_normal_grd,
-            ray_hit_distance_sq_grd_UNUSED,  # non-differentiable output, always None
+            ray_hit_distance_sq_grd,  # None unless ctx.dist_sq_differentiable
         ):
             (
                 ray_ori,
@@ -303,12 +308,18 @@ class Tracer:
                 particle_density,
                 particle_features,
                 ray_hit_normal,
+                ray_hit_distance_sq,
             ) = ctx.saved_variables
 
             # Autograd passes None when nothing downstream consumed the normals, and the
             # kernel reads the buffer unconditionally once normals are compiled in.
             if ray_hit_normal_grd is None:
                 ray_hit_normal_grd = torch.zeros_like(ray_hit_normal)
+            # Same for the second moment: None both when it is non-differentiable and when
+            # nothing downstream used it. The kernel reads whatever it is handed, so an
+            # explicit zero is what keeps it from adding a stale gradient.
+            if ray_hit_distance_sq_grd is None:
+                ray_hit_distance_sq_grd = torch.zeros_like(ray_hit_distance_sq)
 
             frame_id = ctx.frame_id
             n_active_features = ctx.n_active_features
@@ -334,6 +345,8 @@ class Tracer:
                 ray_hit_distance_grd,
                 ray_hit_normal,
                 ray_hit_normal_grd.contiguous(),
+                ray_hit_distance_sq,
+                ray_hit_distance_sq_grd.contiguous(),
             )
 
             mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, _ = torch.split(
@@ -354,6 +367,7 @@ class Tracer:
                 mog_sph_grd.contiguous(),
                 None,  # sensor_params
                 None,  # sensor_poses
+                None,  # dist_sq_differentiable
             )
 
     def __init__(self, conf):
@@ -364,6 +378,24 @@ class Tracer:
         load_3dgut_plugin(conf)
 
         self.tracer_wrapper = _3dgut_plugin.SplatRaster(OmegaConf.to_container(conf))
+
+    def _dist_sq_differentiable(self) -> bool:
+        """Whether a gradient can flow from the depth second moment.
+
+        The moment is accumulated by the shared forward hit processing, so it is rendered on
+        every configuration, but only one of the three backward compositing paths knows how to
+        unwind it: the hand-written CUDA `processHitBwd`, which the K=0 renderer uses when
+        normals are compiled out. The other two are Slang autodiff entry points that would
+        have to differentiate the moment in the `.slang` source instead, and until they do
+        they must not pretend to -- returning False here keeps the output non-differentiable
+        so a loss raises rather than training on a silent zero.
+        """
+        render = self.conf.render
+        return (
+            bool(getattr(render, "enable_depth_variance", False))
+            and not bool(render.enable_normals)
+            and int(render.splat.k_buffer_size) == 0
+        )
 
     @property
     def timings(self):
@@ -400,6 +432,7 @@ class Tracer:
                 gaussians.get_features().contiguous(),
                 sensor,
                 poses,
+                self._dist_sq_differentiable(),
             )
 
             # pred_features_alpha is [..., RAY_FEATURE_DIM + 1]: features (fp32) + density

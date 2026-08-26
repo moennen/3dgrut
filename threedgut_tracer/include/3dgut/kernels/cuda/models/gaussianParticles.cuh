@@ -514,7 +514,14 @@ __device__ inline void processHitBwd(
     float3 radianceGrad,
     float integratedDepth,
     float& depth,
-    float integratedDepthGrad) {
+    float integratedDepthGrad
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+    ,
+    float integratedDepthSq,
+    float& depthSq,
+    float integratedDepthSqGrad
+#endif
+) {
     float3 particlePosition;
     float3 gscl;
     float33 particleRotation;
@@ -574,11 +581,32 @@ __device__ inline void processHitBwd(
         // ===> d_hitT / d_galpha = gdist * prevTrm - residualHitT * prevTrm
         //                        = (gdist - residualHitT) * prevTrm
         //
-        const float galphaRayHitGrd = (gdist - residualHitT) * transmittance * integratedDepthGrad;
+        float galphaRayHitGrd = (gdist - residualHitT) * transmittance * integratedDepthGrad;
         //
         // ===> d_hitT / d_gsqdist = weight / (2*gdist)
         // ===> d_gsqdist / d_grds =  2 * grds
-        const float3 grdsRayHitGrd = gsqdist > 0.0f ? ((2 * grds * weight) / (2 * gdist)) * integratedDepthGrad : make_float3(0.0f);
+        float3 grdsRayHitGrd = gsqdist > 0.0f ? ((2 * grds * weight) / (2 * gdist)) * integratedDepthGrad : make_float3(0.0f);
+
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        // The second moment composites exactly as the depth does, with gsqdist in place of
+        // gdist, so it replays through the same residual and folds into the same two
+        // gradients -- everything downstream of these is shared and needs no change.
+        //
+        // ---> hitTSq = accumulatedHitTSq + galpha * prevTrm * gsqdist
+        //                                + (1-galpha) * prevTrm * residualHitTSq
+        depthSq += weight * gsqdist;
+        const float residualHitTSq =
+            fmaxf((nextTransmit <= minTransmittance ? 0 : (integratedDepthSq - depthSq) / nextTransmit),
+                  0);
+        //
+        // ===> d_hitTSq / d_galpha = (gsqdist - residualHitTSq) * prevTrm
+        galphaRayHitGrd += (gsqdist - residualHitTSq) * transmittance * integratedDepthSqGrad;
+        //
+        // ===> d_hitTSq / d_gsqdist = weight        (no sqrt on this path, unlike the depth)
+        // ===> d_gsqdist / d_grds   = 2 * grds
+        grdsRayHitGrd += (2 * grds * weight) * integratedDepthSqGrad;
+#endif
 
         // ---> grds = gscl * grd * p  where p = dot(grd, -gro) [non-surfel] or p = -gro.z/grd.z [surfel]
         //

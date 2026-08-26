@@ -474,6 +474,34 @@ the depth-normal term. Measure it there rather than as a four-scene average.
   the local z axis, and is unchanged by which axis is shortest. `load_3dgut_plugin` now
   raises on a mismatch, and the new tests render in a child process.
 
+#### Stage 1: the backward
+
+Landed for the 3DGUT hand-written compositing path. The moment turns out to be *cheaper* to
+differentiate than the depth: `t^2` is `gsqdist = dot(grds, grds)`, which the forward already
+computes before taking the square root for `gdist`, so `d(t^2)/d(grds) = 2 * grds` with no
+division by `gdist` and no degenerate case at zero distance. Its two contributions fold into
+the same `galphaRayHitGrd` and `grdsRayHitGrd` the depth uses, and everything downstream of
+those — scale, rotation, position, density — is shared unchanged. The whole backward is about
+fifteen lines.
+
+That sharing is also the risk, so the tests differentiate three losses rather than one: the
+moment alone, the depth alone, and their sum. A backward that assigned to the shared gradient
+instead of accumulating into it would pass the first two and fail the third. A further check
+renders the depth-only gradient with the moment compiled *out*, in a nested subprocess, and
+requires it to match the moment-enabled build — the regression that folding into shared
+accumulators invites.
+
+**Only one of the three backward paths carries it.** The renderer has three: the hand-written
+CUDA `processHitBwd` (K=0, normals off), and two Slang autodiff entry points (K>0, or normals
+on) whose `.slang` sources would each have to differentiate the moment themselves. The
+forward accumulates on all three, because it is shared, so the moment is *rendered*
+everywhere and differentiable only on one. Rather than let that be a silent zero,
+`Tracer._dist_sq_differentiable` gates `mark_non_differentiable` on the configuration, so a
+loss on an unsupported build raises. This is a real limitation: **item 7 cannot currently be
+combined with the depth-normal loss of item 5**, which needs normals compiled in, and the
+diagnostic above suggests that combination is the interesting one, since the depth-normal term
+already removes two-thirds of the spread. Extending the Slang path is the obvious follow-up.
+
 ### 4. Pseudo-depth supervision
 
 Nothing landed. Needs a monocular depth predictor and a cache — the dependency is heavier

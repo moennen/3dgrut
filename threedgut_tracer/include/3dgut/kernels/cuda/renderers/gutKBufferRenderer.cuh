@@ -777,7 +777,14 @@ struct GUTKBufferRenderer : Params {
                             ray.featuresGradient,
                             ray.hitT,
                             ray.hitTBackward,
-                            ray.hitTGradient);
+                            ray.hitTGradient
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+                            ,
+                            ray.hitTSq,
+                            ray.hitTSqBackward,
+                            ray.hitTSqGradient
+#endif
+                        );
                         if (ray.transmittance < Particles::MinTransmittanceThreshold) {
                             ray.kill();
                         }
