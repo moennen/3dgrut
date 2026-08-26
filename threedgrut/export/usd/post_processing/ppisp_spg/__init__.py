@@ -118,9 +118,7 @@ def select_spg_files_for_export(
     if ppisp_module is None or camera_indices is None:
         raise ValueError("ppisp_module and camera_indices are required when enable_ppisp_controller_export=True")
 
-    from threedgrut.export.usd.post_processing.ppisp_controller_writer import (
-        get_ppisp_embedded_controller_spg_files,
-    )
+    from threedgrut.export.usd.post_processing.ppisp_controller_writer import get_ppisp_embedded_controller_spg_files
 
     files = list(get_ppisp_auto_spg_files())
     deduped_camera_indices = list(dict.fromkeys(camera_indices))

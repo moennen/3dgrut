@@ -25,10 +25,7 @@ import logging
 from typing import Dict, List, Optional
 
 import numpy as np
-from ncore.data import (
-    OpenCVFisheyeCameraModelParameters,
-    OpenCVPinholeCameraModelParameters,
-)
+from ncore.data import OpenCVFisheyeCameraModelParameters, OpenCVPinholeCameraModelParameters
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
 from threedgrut.export.transforms import column_vector_4x4_to_usd_matrix

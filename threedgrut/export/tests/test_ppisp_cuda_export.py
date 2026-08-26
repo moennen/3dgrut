@@ -14,9 +14,7 @@ pytest.importorskip("pxr", reason="usd-core (pxr) is only available on linux x86
 
 from pxr import Gf, Sdf, Usd, UsdGeom
 
-from threedgrut.export.usd.post_processing.ppisp_controller_weights import (
-    EXPECTED_CONTROLLER_WEIGHTS_LEN,
-)
+from threedgrut.export.usd.post_processing.ppisp_controller_weights import EXPECTED_CONTROLLER_WEIGHTS_LEN
 from threedgrut.export.usd.post_processing.ppisp_controller_writer import (
     CONTROLLER_FEATURES_RENDER_VAR,
     CONTROLLER_PARAMS_RENDER_VAR,
@@ -33,10 +31,7 @@ from threedgrut.export.usd.post_processing.ppisp_controller_writer import (
     add_ppisp_auto_shader_to_render_product,
     get_ppisp_embedded_controller_spg_files,
 )
-from threedgrut.export.usd.post_processing.ppisp_spg import (
-    get_ppisp_auto_spg_files,
-    get_ppisp_spg_files,
-)
+from threedgrut.export.usd.post_processing.ppisp_spg import get_ppisp_auto_spg_files, get_ppisp_spg_files
 from threedgrut.export.usd.post_processing.ppisp_writer import (
     PPISP_ATTR_NAMESPACE,
     PPISP_CAMERA_SUFFIX,
@@ -303,9 +298,7 @@ def test_exported_embedded_cuda_controller_matches_torch_controller() -> None:
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_controller_runtime import (
-        ExportedEmbeddedCudaController,
-    )
+    from threedgrut.export.tests.ppisp_cuda_controller_runtime import ExportedEmbeddedCudaController
 
     device = torch.device("cuda")
     ppisp = PPISP(num_cameras=1, num_frames=1, config=PPISPConfig(use_controller=True)).to(device).eval()
@@ -325,9 +318,7 @@ def test_exported_embedded_cuda_controller_responsivity_matches_prescaled_hdr() 
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_controller_runtime import (
-        ExportedEmbeddedCudaController,
-    )
+    from threedgrut.export.tests.ppisp_cuda_controller_runtime import ExportedEmbeddedCudaController
 
     device = torch.device("cuda")
     ppisp = PPISP(num_cameras=1, num_frames=1, config=PPISPConfig(use_controller=True)).to(device).eval()
@@ -354,9 +345,7 @@ def test_exported_embedded_cuda_controller_tiled_params_match_per_tile() -> None
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_controller_runtime import (
-        ExportedEmbeddedCudaController,
-    )
+    from threedgrut.export.tests.ppisp_cuda_controller_runtime import ExportedEmbeddedCudaController
 
     device = torch.device("cuda")
     ppisp = PPISP(num_cameras=1, num_frames=1, config=PPISPConfig(use_controller=True)).to(device).eval()
@@ -380,10 +369,7 @@ def test_exported_static_cuda_ppisp_matches_torch_ppisp() -> None:
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import (
-        ExportedCudaPPISP,
-        pack_static_ppisp_params,
-    )
+    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import ExportedCudaPPISP, pack_static_ppisp_params
 
     device = torch.device("cuda")
     ppisp = PPISP(num_cameras=1, num_frames=1, config=PPISPConfig(use_controller=False)).to(device).eval()
@@ -416,10 +402,7 @@ def test_exported_static_cuda_ppisp_tiled_atlas_matches_per_tile_untiled() -> No
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import (
-        ExportedCudaPPISP,
-        pack_static_ppisp_params,
-    )
+    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import ExportedCudaPPISP, pack_static_ppisp_params
 
     device = torch.device("cuda")
     ppisp = PPISP(num_cameras=1, num_frames=1, config=PPISPConfig(use_controller=False)).to(device).eval()
@@ -452,13 +435,8 @@ def test_exported_auto_cuda_ppisp_matches_torch_ppisp() -> None:
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_controller_runtime import (
-        ExportedEmbeddedCudaController,
-    )
-    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import (
-        ExportedCudaPPISP,
-        pack_auto_ppisp_params,
-    )
+    from threedgrut.export.tests.ppisp_cuda_controller_runtime import ExportedEmbeddedCudaController
+    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import ExportedCudaPPISP, pack_auto_ppisp_params
 
     device = torch.device("cuda")
     ppisp = (
@@ -508,10 +486,7 @@ def test_exported_auto_cuda_ppisp_tiled_atlas_selects_per_tile_controller_params
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import (
-        ExportedCudaPPISP,
-        pack_auto_ppisp_params,
-    )
+    from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import ExportedCudaPPISP, pack_auto_ppisp_params
 
     device = torch.device("cuda")
     ppisp = (
@@ -557,9 +532,7 @@ def test_exported_cuda_ppisp_performance_smoke() -> None:
     _requires_cuda_ppisp()
     from ppisp import PPISP, PPISPConfig  # type: ignore[import-not-found]
 
-    from threedgrut.export.tests.ppisp_cuda_controller_runtime import (
-        ExportedEmbeddedCudaController,
-    )
+    from threedgrut.export.tests.ppisp_cuda_controller_runtime import ExportedEmbeddedCudaController
     from threedgrut.export.tests.ppisp_cuda_ppisp_runtime import (
         ExportedCudaPPISP,
         pack_auto_ppisp_params,

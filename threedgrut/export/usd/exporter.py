@@ -27,11 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from ncore.data import (
-    OpenCVFisheyeCameraModelParameters,
-    OpenCVPinholeCameraModelParameters,
-    ShutterType,
-)
+from ncore.data import OpenCVFisheyeCameraModelParameters, OpenCVPinholeCameraModelParameters, ShutterType
 from pxr import Usd
 
 from threedgrut.export.accessor import GaussianExportAccessor
@@ -41,10 +37,7 @@ from threedgrut.export.transforms import (
     estimate_normalizing_transform,
     get_3dgrut_to_usdz_coordinate_transform,
 )
-from threedgrut.export.usd.camera_copy import (
-    merge_source_prims_and_collect_sidecars,
-    save_serialized_files,
-)
+from threedgrut.export.usd.camera_copy import merge_source_prims_and_collect_sidecars, save_serialized_files
 from threedgrut.export.usd.particle_field_hints import (
     DEFAULT_PARTICLE_FIELD_SORTING_MODE_HINT,
     normalize_particle_field_sorting_mode_hint,
@@ -54,10 +47,7 @@ from threedgrut.export.usd.post_processing.ppisp_spg import (
     resolve_ppisp_controller_export_enabled,
     select_spg_files_for_export,
 )
-from threedgrut.export.usd.post_processing.sh_bake import (
-    MODE_PPISP_BAKE_VIGNETTING_NONE,
-    scale_sh_output,
-)
+from threedgrut.export.usd.post_processing.sh_bake import MODE_PPISP_BAKE_VIGNETTING_NONE, scale_sh_output
 from threedgrut.export.usd.stage_utils import (
     NamedSerialized,
     NamedUSDStage,
@@ -658,7 +648,9 @@ class USDExporter(ModelExporter):
         # largest partition instead of the combined total.
         if package_as_usdz:
             if use_separate_layers:
-                guard_count = max(int(r.metrics.get("count_max", r.metrics.get("total_exported", 0))) for r in partition_list)
+                guard_count = max(
+                    int(r.metrics.get("count_max", r.metrics.get("total_exported", 0))) for r in partition_list
+                )
                 guard_degree = max(
                     (r.capabilities.sh_degree for r in partition_list if r.capabilities is not None),
                     default=caps.sh_degree,
@@ -765,7 +757,9 @@ class USDExporter(ModelExporter):
                     _make_gaussian_root(part_stage)
                     part_root = f"{gaussians_root}/Partition_{running:0{width}d}"
                     _author_partition_prim(part_stage, part_root, src_t, sub, result_caps)
-                    partition_layers.append(NamedUSDStage(filename=f"gaussians_{running:0{width}d}.usdc", stage=part_stage))
+                    partition_layers.append(
+                        NamedUSDStage(filename=f"gaussians_{running:0{width}d}.usdc", stage=part_stage)
+                    )
                     running += 1
             logger.info("Authored %d ParticleField partition layer(s)", len(partition_layers))
         else:

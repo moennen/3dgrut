@@ -31,9 +31,7 @@ from threedgrut.export.transforms import (
 )
 from threedgrut.export.usd.nurec.templates import NamedSerialized
 from threedgrut.export.usd.stage_utils import NamedUSDStage
-from threedgrut.export.usd.stage_utils import (
-    initialize_usd_stage as _initialize_usd_stage,
-)
+from threedgrut.export.usd.stage_utils import initialize_usd_stage as _initialize_usd_stage
 
 logger = logging.getLogger(__name__)
 

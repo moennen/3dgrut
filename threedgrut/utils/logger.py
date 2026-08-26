@@ -18,14 +18,7 @@ import warnings
 from typing import Optional
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    ProgressColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+from rich.progress import BarColumn, Progress, ProgressColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 

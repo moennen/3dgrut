@@ -21,11 +21,7 @@ from typing import Optional
 import ncore.sensors
 import numpy as np
 import torch
-from ncore.data import (
-    OpenCVFisheyeCameraModelParameters,
-    OpenCVPinholeCameraModelParameters,
-    ShutterType,
-)
+from ncore.data import OpenCVFisheyeCameraModelParameters, OpenCVPinholeCameraModelParameters, ShutterType
 from PIL import Image
 from torch.utils.data import Dataset
 

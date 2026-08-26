@@ -28,12 +28,7 @@ from torch.utils.data import Dataset
 from threedgrut.utils.logger import logger
 
 from .protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
-from .utils import (
-    create_camera_visualization,
-    create_pixel_coords,
-    get_center_and_diag,
-    get_worker_id,
-)
+from .utils import create_camera_visualization, create_pixel_coords, get_center_and_diag, get_worker_id
 
 
 class NeRFDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):

@@ -18,10 +18,7 @@
 import pytest
 import torch
 
-from threedgrut.export.usd.post_processing.sh_bake import (
-    estimate_achromatic_vignetting,
-    scale_sh_output,
-)
+from threedgrut.export.usd.post_processing.sh_bake import estimate_achromatic_vignetting, scale_sh_output
 from threedgrut.utils.render import C0
 
 
@@ -99,10 +96,7 @@ def test_estimate_achromatic_vignetting_uses_max_resolution_for_portrait_images(
 
 def test_apply_jacobian_to_specular_clips_nonfinite_and_large_jacobians() -> None:
     pytest.importorskip("ppisp")
-    from threedgrut.export.usd.post_processing.sh_simple_bake import (
-        JACOBIAN_FRO_NORM_CLIP,
-        _apply_jacobian_to_specular,
-    )
+    from threedgrut.export.usd.post_processing.sh_simple_bake import JACOBIAN_FRO_NORM_CLIP, _apply_jacobian_to_specular
 
     features_specular = torch.nn.Parameter(
         torch.tensor(

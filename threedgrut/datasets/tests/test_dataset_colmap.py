@@ -19,10 +19,7 @@ from PIL import Image
 
 pytest.importorskip("ncore")
 
-from threedgrut.datasets.dataset_colmap import (
-    _opencv_pinhole_intrinsics_from_colmap,
-    _resize_image_folder,
-)
+from threedgrut.datasets.dataset_colmap import _opencv_pinhole_intrinsics_from_colmap, _resize_image_folder
 
 
 @pytest.mark.parametrize(

@@ -986,10 +986,7 @@ class TestNuRecExport:
 
     def test_nurec_export_rejects_unsupported_render_method(self):
         """The exporter refuses anything other than 3dgut / 3dgrt up front."""
-        from threedgrut.export.usd.nurec.exporter import (
-            NuRecExporter,
-            _get_default_nurec_conf,
-        )
+        from threedgrut.export.usd.nurec.exporter import NuRecExporter, _get_default_nurec_conf
 
         model = MockGaussianModel(num_gaussians=4, sh_degree=3)
         conf = _get_default_nurec_conf()

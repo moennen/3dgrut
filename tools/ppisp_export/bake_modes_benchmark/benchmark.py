@@ -54,9 +54,7 @@ from threedgrut.export.usd.post_processing_sh_bake import (  # noqa: E402
     PPISPPostProcessingBakeAdapter,
     bake_post_processing_into_sh,
 )
-from threedgrut.export.usd.post_processing_sh_simple_bake import (  # noqa: E402
-    simple_bake,
-)
+from threedgrut.export.usd.post_processing_sh_simple_bake import simple_bake  # noqa: E402
 from threedgrut.render import Renderer  # noqa: E402
 from threedgrut.utils.render import apply_post_processing  # noqa: E402
 

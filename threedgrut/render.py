@@ -31,11 +31,7 @@ from threedgrut.utils.color_correct import color_correct_affine
 from threedgrut.utils.depth_normal_metrics import geometry_metrics, world_view_dirs
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
-from threedgrut.utils.render import (
-    apply_background,
-    apply_feature_decoder,
-    apply_post_processing,
-)
+from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 
 
 class Renderer:
@@ -128,9 +124,7 @@ class Renderer:
         post_processing = None
         method = conf.post_processing.method
         if "post_processing" in checkpoint and method == "linear-to-srgb":
-            from threedgrut.utils.post_processing_linear_to_srgb import (
-                LinearToSrgbPostProcessing,
-            )
+            from threedgrut.utils.post_processing_linear_to_srgb import LinearToSrgbPostProcessing
 
             post_processing = LinearToSrgbPostProcessing()
             post_processing.load_state_dict(checkpoint["post_processing"]["module"])

@@ -45,12 +45,7 @@ from typing import Optional, Tuple
 from threedgrut.export.adapter import AttributesExportAdapter
 from threedgrut.export.base import ModelExporter
 from threedgrut.export.formats import PLYExporter
-from threedgrut.export.importers import (
-    FormatImporter,
-    NuRecUSDImporter,
-    PLYImporter,
-    USDImporter,
-)
+from threedgrut.export.importers import FormatImporter, NuRecUSDImporter, PLYImporter, USDImporter
 from threedgrut.export.usd.camera_copy import usd_stage_path_context_for_camera_copy
 from threedgrut.export.usd.exporter import USDExporter
 from threedgrut.export.usd.nurec.exporter import NuRecExporter

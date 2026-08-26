@@ -22,9 +22,7 @@ from kaolin.render.camera import Camera
 from scipy.interpolate import splev, splprep
 from tqdm import tqdm
 
-from threedgrut_playground.utils.kaolin_future.interpolated_cameras import (
-    camera_path_generator,
-)
+from threedgrut_playground.utils.kaolin_future.interpolated_cameras import camera_path_generator
 
 
 class VideoRecorder:

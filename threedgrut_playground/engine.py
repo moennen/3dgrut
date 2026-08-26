@@ -24,11 +24,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import kaolin
 import torch
-from kaolin.render.camera import (
-    Camera,
-    generate_centered_pixel_coords,
-    generate_pinhole_rays,
-)
+from kaolin.render.camera import Camera, generate_centered_pixel_coords, generate_pinhole_rays
 
 from threedgrut.model.background import BackgroundColor
 from threedgrut.model.model import MixtureOfGaussians

@@ -31,10 +31,7 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 import threedgrut.datasets as datasets
-from threedgrut.datasets.protocols import (
-    BoundedMultiViewDataset,
-    get_dataset_world_transform,
-)
+from threedgrut.datasets.protocols import BoundedMultiViewDataset, get_dataset_world_transform
 from threedgrut.datasets.utils import DEFAULT_DEVICE, MultiEpochsDataLoader, PointCloud
 from threedgrut.model.losses import ssim
 from threedgrut.model.model import MixtureOfGaussians
@@ -44,11 +41,7 @@ from threedgrut.strategy.base import BaseStrategy
 from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
-from threedgrut.utils.render import (
-    apply_background,
-    apply_feature_decoder,
-    apply_post_processing,
-)
+from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 from threedgrut.utils.timer import CudaTimer
 
 
@@ -515,9 +508,7 @@ class Trainer3DGRUT:
 
             logger.info(f"📷 {method.upper()} initialized: {num_cameras} cameras, {num_frames} frames")
         elif method == "linear-to-srgb":
-            from threedgrut.utils.post_processing_linear_to_srgb import (
-                LinearToSrgbPostProcessing,
-            )
+            from threedgrut.utils.post_processing_linear_to_srgb import LinearToSrgbPostProcessing
 
             self.post_processing = LinearToSrgbPostProcessing().to(self.device)
             self.post_processing_optimizers = []

@@ -104,10 +104,7 @@ class BenchmarkResult:
 def _make_dataloader(conf: DictConfig):
     """Construct dataset + dataloader from a fully-composed Hydra config (same path as Trainer)."""
     import threedgrut.datasets as datasets
-    from threedgrut.datasets.utils import (
-        MultiEpochsDataLoader,
-        configure_dataloader_for_platform,
-    )
+    from threedgrut.datasets.utils import MultiEpochsDataLoader, configure_dataloader_for_platform
 
     train_dataset, _ = datasets.make(name=conf.dataset.type, config=conf, ray_jitter=None)
 

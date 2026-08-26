@@ -76,10 +76,7 @@ __all__ = [
 ]
 
 try:
-    from threedgrut.export.scripts.filter_visibility import (
-        compute_average_visibility,
-        compute_visibility_and_filter,
-    )
+    from threedgrut.export.scripts.filter_visibility import compute_average_visibility, compute_visibility_and_filter
     from threedgrut.export.transforms import estimate_normalizing_transform
 
     __all__ += [

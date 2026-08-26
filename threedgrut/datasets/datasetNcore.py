@@ -33,11 +33,7 @@ from ncore.data import PointCloudsSourceProtocol
 from ncore.impl.common.transformations import HalfClosedInterval
 from scipy import ndimage
 
-from threedgrut.datasets.protocols import (
-    Batch,
-    BoundedMultiViewDataset,
-    DatasetVisualization,
-)
+from threedgrut.datasets.protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
 from threedgrut.datasets.utils import (
     PointCloud,
     create_camera_visualization,
