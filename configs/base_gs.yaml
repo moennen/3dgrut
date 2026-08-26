@@ -188,9 +188,16 @@ loss:
   # that differentiates the normal buffer (render.pipeline_type=referenceSlang); the tracer
   # rejects the combination rather than training on zero normal gradients.
   use_depth_normal: false
-  lambda_depth_normal: 0.0
+  # 0.05 measured on OB3D at 7k: normals beat the view-direction control by 9-19 degrees and
+  # depth abs_rel improves up to 20%, for 0.1-0.5 PSNR and ~15% throughput. Normal accuracy
+  # plateaus above this while PSNR keeps falling. Prefer 0.005 if appearance comes first.
+  lambda_depth_normal: 0.05
   # Iteration the term switches on. Normals are meaningless until the geometry roughly settles.
   depth_normal_from_iter: 7000
+  # Drops the steepest tail of the relative depth gradient, where an expected depth lands
+  # between two surfaces at an occlusion boundary and describes neither. Measured worth
+  # 1.5-2 degrees of target quality on OB3D, so a trim rather than a fix; null disables it.
+  depth_normal_grad_percentile: 0.9
 
 # Post-processing configuration
 post_processing:

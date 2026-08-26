@@ -71,6 +71,31 @@ BASELINE_VARIANTS: tuple[Variant, ...] = (
     ),
 )
 
+# Depth-normal consistency, swept over weight on both primitives. Measurement found the
+# depth-implied normal to be a worse target than trisurfel's rendered normal, so a large
+# weight is expected to degrade trisurfel's normals while helping its depth; the point of
+# sweeping the weight rather than picking one is to locate that trade-off instead of
+# asserting it. See docs/normal-supervision.md.
+DEPTH_NORMAL_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"dn{weight_name}_{primitive_name}",
+        (
+            f"render.primitive_type={primitive}",
+            "loss.use_depth_normal=true",
+            f"loss.lambda_depth_normal={weight}",
+            # The config default holds the term off until 7000, which is sized for a full
+            # 30k run and would switch it on exactly as a 7k sweep ends -- a no-op sweep
+            # that looks like a null result. Kept at a comparable fraction of training.
+            "loss.depth_normal_from_iter=3000",
+        ),
+        f"Depth-normal consistency at lambda={weight} on {primitive_name}.",
+    )
+    for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
+    for weight_name, weight in (("005", 0.005), ("05", 0.05), ("2", 0.2))
+)
+
+ALL_VARIANTS: tuple[Variant, ...] = BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS
+
 
 def scene_dirs(dataset_root: Path, scenes: list[str] | None) -> list[Path]:
     """Resolve scene directories, rejecting names that do not exist.
@@ -216,7 +241,13 @@ def main() -> int:
     parser.add_argument("--dataset-root", type=Path, required=True, help="Directory holding OB3D COLMAP scenes")
     parser.add_argument("--out-dir", type=Path, required=True, help="Where runs, logs and results.jsonl are written")
     parser.add_argument("--scenes", nargs="*", default=None, help="Scene names; default is every scene found")
-    parser.add_argument("--variants", nargs="*", default=None, help="Variant names; default is all baselines")
+    parser.add_argument(
+        "--variants",
+        nargs="*",
+        default=None,
+        help="Variant names; default is the two baselines, since the others are only "
+        "interpretable next to a baseline run on the same scenes",
+    )
     parser.add_argument("--n-iterations", type=int, default=7000, help="Training iterations per cell")
     parser.add_argument("--config-name", default="apps/colmap_3dgut.yaml")
     parser.add_argument("--override", action="append", default=[], help="Extra Hydra override for every cell")
@@ -231,7 +262,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the planned commands and exit")
     args = parser.parse_args()
 
-    by_name = {variant.name: variant for variant in BASELINE_VARIANTS}
+    by_name = {variant.name: variant for variant in ALL_VARIANTS}
     if args.variants:
         unknown = sorted(set(args.variants) - set(by_name))
         if unknown:

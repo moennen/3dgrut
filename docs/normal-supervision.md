@@ -180,7 +180,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 
 | Plan item | Status | What is missing |
 |---|---|---|
-| 5. Depth-normal consistency | Not started | Loss term; decision on expected vs median depth, valid-pixel norm, and `referenceSlang` throughput |
+| 5. Depth-normal consistency | Landed, measured at 7k | 30k confirmation; `referenceSlang` throughput on 3DGRT |
 | 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
 | 7. Depth variance along the ray | Not started | Kernel accumulator for `w·t` and `w·t²`; backward pass |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
@@ -278,14 +278,102 @@ aligns primitives rather than merely relabelling them. It also predicts that a l
 `lambda_depth_normal` will degrade trisurfel normals, which the ablation should test rather
 than assume.
 
+**That last prediction was wrong, and the error is worth keeping.** See the sweep below:
+trisurfel normals improve from 45.1 to 23.9 degrees on sponza and 49.2 to 37.0 on
+emerald-square, monotonically in the weight until they plateau. The static measurement above
+does not predict the training outcome, because it treats the target as fixed. Under
+optimisation it is not: the depth-implied normal *itself* improves from 64.9 to 40.8 degrees on
+emerald-square as the weight rises. Both sides move towards each other, so measuring where the
+target sits at iteration 7000 of an unconstrained run says little about where the constrained
+run ends up. The mutual-constraint reasoning was right; using the frozen target's quality to
+forecast the outcome was not.
+
 **(b) Invalid-pixel normalisation.** The reference does `masked_fill_(0).mean()`, averaging
 over *all* pixels, so invalid ones dilute the loss rather than being excluded, and the
 effective weight then drifts with the valid fraction. Dividing by the valid count is the
-better default; matching the reference bit-for-bit is the argument against.
+better default; matching the reference bit-for-bit is the argument against. Settled in favour
+of the valid count, so a frame that is half sky carries the same weight per surface pixel as
+one that is all surface.
 
 **(c) 3DGRT requires `referenceSlang`,** which the startup assertion now enforces. Its
 throughput relative to the default `reference` pipeline has not been measured, and it
 determines whether normal supervision is affordable on 3DGRT at all.
+
+#### As implemented
+
+`threedgrut/utils/depth_normal_loss.py`, wired into `Trainer.get_losses` next to the other
+regularisers, with `depth_normal_grad_percentile` added to the config.
+
+- Gradient flows to **both** the depth and the normal. This follows from the measurement
+  above: as a one-way normal target the term is harmful for trisurfel, and its value is on
+  the depth side, where the normal supplies the local smoothness the depth lacks.
+- No host synchronisation. The term runs every iteration, so it returns device tensors and
+  handles the empty-mask case with a clamped division rather than reading a mask population
+  back to branch on it. The gradient percentile is taken over a `+inf`-padded buffer with a
+  rescaled quantile, which keeps it a fixed-shape kernel instead of a gather.
+- A normal loss without `render.enable_normals` is now **rejected** by both backends
+  (`threedgrut/utils/normal_supervision.py`). This is not a cosmetic check: with normals
+  disabled the tracers substitute a *constant* placeholder, so the term would supervise
+  against a constant while producing a perfectly healthy-looking loss curve.
+- The 7k sweep overrides `depth_normal_from_iter` to 3000. The config default of 7000 is
+  sized for a 30k run and would switch the term on exactly as a 7k sweep ends, producing a
+  null result that looks like a negative one.
+
+#### Measured (7k, weight sweep, `dn*` variants in `scripts/ablation/run_ob3d.py`)
+
+`n` is the rendered normal error against the reference, `gain` is that against the
+view-direction control, `dn` is the depth-implied normal's own error, and `agree` is the
+disagreement between the two that the term penalises directly.
+
+sponza:
+
+| lambda | primitive | psnr | d_absrel | n | gain | it/s |
+|---|---|---|---|---|---|---|
+| off | gaussian | 36.21 | 0.0598 | 52.2 | -9.4 | 103.6 |
+| 0.005 | gaussian | 36.06 | 0.0516 | 30.9 | +12.0 | 88.6 |
+| 0.05 | gaussian | 36.15 | 0.0478 | 25.5 | +17.3 | 87.8 |
+| 0.2 | gaussian | 35.01 | 0.0515 | 25.0 | +17.8 | 87.7 |
+| off | trisurfel | 36.07 | 0.0598 | 45.1 | -2.2 | 102.4 |
+| 0.005 | trisurfel | 36.11 | 0.0517 | 30.1 | +12.8 | 88.9 |
+| 0.05 | trisurfel | 36.10 | 0.0483 | 23.9 | +18.9 | 88.4 |
+| 0.2 | trisurfel | 35.60 | 0.0542 | 23.9 | +19.0 | 86.2 |
+
+emerald-square:
+
+| lambda | primitive | psnr | d_absrel | n | gain | dn | agree |
+|---|---|---|---|---|---|---|---|
+| off | gaussian | 32.68 | 0.1395 | 64.8 | -14.4 | 63.1 | 81.2 |
+| 0.005 | gaussian | 32.76 | 0.1333 | 44.2 | +6.1 | 51.2 | 36.9 |
+| 0.05 | gaussian | 32.49 | 0.1315 | 40.9 | +9.4 | 43.5 | 16.7 |
+| 0.2 | gaussian | 31.67 | 0.1395 | 41.1 | +9.2 | 42.7 | 11.5 |
+| off | trisurfel | 32.80 | 0.1322 | 49.2 | +1.1 | 64.9 | 73.3 |
+| 0.005 | trisurfel | 32.62 | 0.1222 | 37.2 | +13.1 | 50.4 | 41.7 |
+| 0.05 | trisurfel | 32.25 | 0.1305 | 37.0 | +13.3 | 43.1 | 18.2 |
+| 0.2 | trisurfel | 31.44 | 0.1324 | 37.3 | +13.0 | 40.8 | 12.0 |
+
+This is the first change in this work to clear the control by a wide margin. The baseline's
+finding was that both primitives' normals *lose* to a view-direction control, gaussians by 9-14
+degrees; with the term at 0.05 they win by 9-19. Trisurfel goes from 45.1 to 23.9 on sponza,
+which is the result the whole exercise was after.
+
+Depth improves too, most at 0.05 on sponza (0.0598 to 0.0478, a 20% reduction in `abs_rel`)
+and at 0.005 on emerald-square (0.1322 to 0.1222). So the term is not trading depth for
+normals; below 0.05 it improves both.
+
+The cost is appearance and throughput. PSNR is roughly free up to 0.05 on sponza (-0.06 for
+trisurfel) but already -0.55 on emerald-square, and 0.2 costs 0.5-1.4 PSNR on every cell while
+buying no further normal accuracy -- the normals plateau by 0.05, and past it the term is only
+distorting radiance. Throughput is -15% (103.6 to 87.8 it/s), measured at 0.005 where the
+primitive counts match, so that is the term's own cost rather than a densification difference.
+
+`agree` falling to 11-18 degrees at the higher weights while `n` plateaus is worth noting: the
+term keeps successfully minimising exactly what it optimises, after that has stopped
+corresponding to accuracy. It is a consistency constraint, not a supervision signal, so past
+the plateau the two buffers agree with each other about a geometry that is no better.
+
+Default set to `lambda_depth_normal: 0.05`, still behind `use_depth_normal: false`. 0.05 rather
+than 0.005 because normal accuracy is the objective here and it is worth 0.3-0.5 PSNR;
+appearance-first configurations should prefer 0.005, which is nearly free on both.
 
 ### 2. Re-measure
 
@@ -369,14 +457,20 @@ than attacking it directly.
 
 ## Verifying
 
+The venv must be on `PATH`, not merely used as the interpreter: the pipeline-consistency test
+compiles Slang in a subprocess that resolves `slangc` from `PATH`, and without it that test
+fails with a `FileNotFoundError` unrelated to anything it is testing.
+
 ```bash
-# Full suite (~14 min): 264 passed, 1 skipped
+# Full suite (~11 min): 295 passed, 1 skipped
 python -m pytest threedgrut threedgut_tracer threedgrt_tracer scripts -q
 
 # The normal-specific tests
 python -m pytest threedgut_tracer/tests/test_normal_gradient.py \
                  threedgrt_tracer/tests/test_normal_gradient_support.py \
-                 threedgrt_tracer/tests/test_normal_pipeline_consistency.py -q
+                 threedgrt_tracer/tests/test_normal_pipeline_consistency.py \
+                 threedgrut/utils/tests/test_depth_normal_loss.py \
+                 threedgrut/utils/tests/test_normal_supervision.py -q
 
 black --check . && isort --check-only .   # line-length 120, configured in pyproject.toml
 ```

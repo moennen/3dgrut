@@ -41,6 +41,7 @@ from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.optimizers import SelectiveAdam
 from threedgrut.render import Renderer
 from threedgrut.strategy.base import BaseStrategy
+from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
 from threedgrut.utils.render import (
@@ -736,8 +737,36 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
+        # Depth-normal consistency. Held off until depth_normal_from_iter: before the
+        # geometry roughly settles both buffers are noise, and agreeing on noise is not a
+        # constraint worth imposing.
+        loss_depth_normal = torch.zeros(1, device=self.device)
+        lambda_depth_normal = 0.0
+        if (
+            self.conf.loss.use_depth_normal
+            and not self._in_color_refine
+            and self.global_step >= self.conf.loss.depth_normal_from_iter
+        ):
+            with torch.cuda.nvtx.range(f"loss-depth-normal"):
+                loss_depth_normal, _ = depth_normal_consistency_loss(
+                    outputs["pred_dist"],
+                    outputs["pred_opacity"],
+                    outputs["pred_normals"],
+                    gpu_batch.rays_ori,
+                    gpu_batch.rays_dir,
+                    gpu_batch.T_to_world,
+                    grad_percentile=self.conf.loss.depth_normal_grad_percentile,
+                )
+                lambda_depth_normal = self.conf.loss.lambda_depth_normal
+
         # Total loss
-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
+        loss = (
+            lambda_l1 * loss_l1
+            + lambda_ssim * loss_ssim
+            + lambda_opacity * loss_opacity
+            + lambda_scale * loss_scale
+            + lambda_depth_normal * loss_depth_normal
+        )
         return dict(
             total_loss=loss,
             l1_loss=lambda_l1 * loss_l1,
@@ -745,6 +774,7 @@ class Trainer3DGRUT:
             ssim_loss=lambda_ssim * loss_ssim,
             opacity_loss=lambda_opacity * loss_opacity,
             scale_loss=lambda_scale * loss_scale,
+            depth_normal_loss=lambda_depth_normal * loss_depth_normal,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -884,6 +914,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_scale:
                 scale_loss = np.mean(batch_metrics["losses"]["scale_loss"])
                 writer.add_scalar("loss/scale/train", scale_loss, global_step)
+            if self.conf.loss.use_depth_normal:
+                depth_normal_loss = np.mean(batch_metrics["losses"]["depth_normal_loss"])
+                writer.add_scalar("loss/depth_normal/train", depth_normal_loss, global_step)
             if self.post_processing is not None and "post_processing_reg_loss" in batch_metrics["losses"]:
                 post_processing_reg_loss = np.mean(batch_metrics["losses"]["post_processing_reg_loss"])
                 writer.add_scalar(

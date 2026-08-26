@@ -18,11 +18,14 @@ import os
 
 from threedgrut.model.features import Features
 from threedgrut.utils import jit
+from threedgrut.utils.normal_supervision import check_normals_are_rendered
 
 
 # ----------------------------------------------------------------------------
 #
 def setup_3dgut(conf):
+    check_normals_are_rendered(conf)
+
     # The load-balanced kernel accumulates in a warp-cooperative loop that never touches
     # the normal accumulator, so combining the two would silently yield all-zero normals.
     if conf.render.enable_normals and getattr(conf.render.splat, "fine_grained_load_balancing", False):
