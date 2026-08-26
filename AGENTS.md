@@ -69,6 +69,15 @@ buffer that loses to that control.
   variant mismatch instead; a test needing a new variant (a new `-D`) must render in a child
   process, as `threedgut_tracer/tests/test_depth_variance.py` does. Adding a define also
   changes every variant's flag hash, so the next run rebuilds all of them.
+- OB3D scenes fail differently, so a scene average hides the effect a geometry term has.
+  Sponza and emerald carry floaters (0.2-13% of pixels) that per-ray spread detects well
+  (AUC 0.68-0.90); lone-monk has essentially none (0.01%) yet 17.7% `delta1` failures, its
+  depth being wrong in an opaque, confidently-placed way that no ray-concentration term can
+  reach. Judge a term on the scenes exhibiting the failure it targets, and say which those are.
+- Before adding a buffer to justify a loss, check it against signals already rendered. The
+  relative gradient of the existing depth gets within 0.02-0.10 AUC of the new variance buffer
+  at spotting bad depth, which reframes the variance term as an optimisation target rather than
+  a diagnostic advance. `scripts/ablation/depth_variance_diagnostic.py` runs this comparison.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

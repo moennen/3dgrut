@@ -411,7 +411,52 @@ distribution by the depth that is reported, which is the quantity the depth-norm
 the depth metrics both consume. The L1 distortion form is gentler but answers a different
 question.
 
-Two things this exposed, both recorded in `AGENTS.md`:
+#### Measured (7k checkpoints, `scripts/ablation/depth_variance_diagnostic.py`)
+
+Does the spread actually mark the pixels we want to fix? Per pixel with reference depth and
+enough accumulated opacity, relative spread `sqrt(Var)/depth` is scored as a *detector* of bad
+depth, by AUC — the chance a bad pixel outranks a good one. Controls are the signals already
+available without a new accumulator: ray transparency `1 - opacity`, and the relative gradient
+of the depth we already render, which marks occlusion boundaries.
+
+AUC for floater pixels (`pred < 0.5 * gt`), and for `delta1` failures:
+
+| checkpoint | floater % | spread | transp | d-grad | δ1 % | spread | transp | d-grad |
+|---|---|---|---|---|---|---|---|---|
+| gaussian sponza | 0.35 | **0.884** | 0.596 | 0.848 | 3.8 | **0.927** | 0.691 | 0.844 |
+| trisurfel sponza | 0.23 | **0.898** | 0.629 | 0.867 | 3.5 | **0.918** | 0.700 | 0.834 |
+| dn05 trisurfel sponza | 0.34 | **0.837** | 0.479 | 0.735 | 2.7 | **0.868** | 0.588 | 0.752 |
+| gaussian emerald | 2.4 | 0.684 | **0.752** | 0.693 | 13.7 | **0.785** | 0.583 | 0.716 |
+| trisurfel emerald | 13.3 | **0.736** | 0.424 | 0.681 | 29.8 | **0.728** | 0.451 | 0.675 |
+| gaussian lone-monk | 0.01 | **0.999** | 0.213 | 0.994 | 17.7 | 0.553 | **0.661** | 0.410 |
+
+Rank correlation between spread and relative depth error is 0.35–0.58 across the six.
+
+Four readings, the last three of which argue for restraint:
+
+1. **Spread does see the floaters.** 0.84–0.90 on sponza, and floater pixels carry 1.9–9.4x
+   the spread of the rest. Transparency alone is near or *below* chance, so this is not simply
+   "the ray never became opaque".
+2. **But most of that is visible without a new accumulator.** The relative depth gradient,
+   computed from the depth already rendered, comes within 0.02–0.10 AUC of spread in every row
+   and beats it once. The *incremental* information is modest. This does not sink the term —
+   a depth-gradient penalty would be a bad *loss*, since it fights genuine occlusion
+   boundaries, whereas variance is a legitimate objective — but it does mean the diagnostic
+   value of the buffer is smaller than the first sponza number suggested.
+3. **Spread is not a general depth-error detector.** On lone-monk the δ1 failures sit at 0.553,
+   chance, and the depth gradient is *anti*-correlated at 0.410. That scene has 17.7% δ1
+   failures and essentially no floaters (0.01%): its depth is wrong in an opaque,
+   confidently-placed way that a concentrated ray cannot express. Penalising spread cannot
+   reach that failure mode, so a scene-averaged result would dilute the effect towards nothing.
+4. **The depth-normal loss already does part of the job.** `dn05` has a median spread of 0.014
+   against the baseline's 0.041, a 3x reduction, having never been asked to concentrate
+   anything. Item 7 stacked on top has correspondingly less left to take.
+
+So stage 1 is worth building, but the expectation should be a small effect concentrated on
+floater-heavy scenes (sponza, emerald), largely absent on lone-monk, and partly pre-empted by
+the depth-normal term. Measure it there rather than as a four-scene average.
+
+#### Two things this exposed, both recorded in `AGENTS.md`
 
 - **The depth backward is real, and correct where it is smooth.** Finite differences against
   the analytic gradient of a depth loss agree to 0.01–0.02% on `density`, and to a median
