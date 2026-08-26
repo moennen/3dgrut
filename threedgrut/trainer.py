@@ -737,6 +737,19 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
+        # Flatness regularization: penalise only the shortest axis, so a particle collapses
+        # towards a disk while staying free to grow in the other two. This is what
+        # `use_scale` above does not do -- that one penalises all three axes, which shrinks
+        # particles rather than flattening them. Normalised by the scene extent so a single
+        # lambda transfers between scenes whose world units differ by orders of magnitude.
+        loss_scale_flatten = torch.zeros(1, device=self.device)
+        lambda_scale_flatten = 0.0
+        if self.conf.loss.use_scale_flatten and not self._in_color_refine:
+            with torch.cuda.nvtx.range(f"loss-scale-flatten"):
+                thinnest = self.model.get_scale().min(dim=-1).values
+                loss_scale_flatten = thinnest.mean() / max(self.model.scene_extent, 1e-8)
+                lambda_scale_flatten = self.conf.loss.lambda_scale_flatten
+
         # Depth-normal consistency. Held off until depth_normal_from_iter: before the
         # geometry roughly settles both buffers are noise, and agreeing on noise is not a
         # constraint worth imposing.
@@ -765,6 +778,7 @@ class Trainer3DGRUT:
             + lambda_ssim * loss_ssim
             + lambda_opacity * loss_opacity
             + lambda_scale * loss_scale
+            + lambda_scale_flatten * loss_scale_flatten
             + lambda_depth_normal * loss_depth_normal
         )
         return dict(
@@ -774,6 +788,7 @@ class Trainer3DGRUT:
             ssim_loss=lambda_ssim * loss_ssim,
             opacity_loss=lambda_opacity * loss_opacity,
             scale_loss=lambda_scale * loss_scale,
+            scale_flatten_loss=lambda_scale_flatten * loss_scale_flatten,
             depth_normal_loss=lambda_depth_normal * loss_depth_normal,
         )
 
@@ -914,6 +929,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_scale:
                 scale_loss = np.mean(batch_metrics["losses"]["scale_loss"])
                 writer.add_scalar("loss/scale/train", scale_loss, global_step)
+            if self.conf.loss.use_scale_flatten:
+                scale_flatten_loss = np.mean(batch_metrics["losses"]["scale_flatten_loss"])
+                writer.add_scalar("loss/scale_flatten/train", scale_flatten_loss, global_step)
             if self.conf.loss.use_depth_normal:
                 depth_normal_loss = np.mean(batch_metrics["losses"]["depth_normal_loss"])
                 writer.add_scalar("loss/depth_normal/train", depth_normal_loss, global_step)

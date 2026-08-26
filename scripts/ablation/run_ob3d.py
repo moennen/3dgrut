@@ -94,7 +94,37 @@ DEPTH_NORMAL_VARIANTS: tuple[Variant, ...] = tuple(
     for weight_name, weight in (("005", 0.005), ("05", 0.05), ("2", 0.2))
 )
 
-ALL_VARIANTS: tuple[Variant, ...] = BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS
+DEPTH_NORMAL_OVERRIDES = (
+    "loss.use_depth_normal=true",
+    "loss.lambda_depth_normal=0.05",
+    "loss.depth_normal_from_iter=3000",
+)
+
+# Flatness regularisation, gaussians only: the surfel kernel forces scale.z and drops its
+# gradient, so the term is rejected there rather than silently shrinking dead storage. The
+# weights span from gentle to the PGSR reference's aggressiveness -- that reference applies
+# weight 100 to an unnormalised min-scale, whereas this term is divided by the scene extent
+# (~4 here), so ~300 is the comparable setting. `sf*_dn` stacks it on depth-normal
+# consistency, since flatness and depth-normal agreement are meant to be complementary:
+# one makes a particle disk-like, the other points the disk the right way.
+FLATNESS_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"sf{weight_name}_gaussian" + ("_dn" if with_dn else ""),
+        (
+            "render.primitive_type=instances",
+            "loss.use_scale_flatten=true",
+            f"loss.lambda_scale_flatten={weight}",
+        )
+        + (DEPTH_NORMAL_OVERRIDES if with_dn else ()),
+        f"Flatness at lambda={weight} on gaussians" + (" with depth-normal." if with_dn else "."),
+    )
+    for with_dn in (False, True)
+    # 0.1 and 1 are here because 3 already collapses the aspect ratio to 0.01: without them
+    # the sweep could not distinguish "flattening hurts" from "over-flattening hurts".
+    for weight_name, weight in (("01", 0.1), ("1", 1.0), ("3", 3.0), ("30", 30.0), ("300", 300.0))
+)
+
+ALL_VARIANTS: tuple[Variant, ...] = BASELINE_VARIANTS + DEPTH_NORMAL_VARIANTS + FLATNESS_VARIANTS
 
 
 def scene_dirs(dataset_root: Path, scenes: list[str] | None) -> list[Path]:

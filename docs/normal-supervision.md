@@ -184,7 +184,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
 | 7. Depth variance along the ray | Not started | Kernel accumulator for `w·t` and `w·t²`; backward pass |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
-| 9. Scale-z regularisation | Mis-named | Current `use_scale` penalises size; need a flatness-only term |
+| 9. Scale-z regularisation | Landed, measured, **negative** | Nothing; it degrades normals monotonically and should stay off |
 | 10. Mesh export | Not started | Surface extraction (TSDF or Poisson), Chamfer metric in ablation report |
 
 ### 1. The depth-normal consistency loss
@@ -312,7 +312,7 @@ regularisers, with `depth_normal_grad_percentile` added to the config.
   back to branch on it. The gradient percentile is taken over a `+inf`-padded buffer with a
   rescaled quantile, which keeps it a fixed-shape kernel instead of a gather.
 - A normal loss without `render.enable_normals` is now **rejected** by both backends
-  (`threedgrut/utils/normal_supervision.py`). This is not a cosmetic check: with normals
+  (`threedgrut/utils/geometry_supervision.py`). This is not a cosmetic check: with normals
   disabled the tracers substitute a *constant* placeholder, so the term would supervise
   against a constant while producing a perfectly healthy-looking loss curve.
 - The 7k sweep overrides `depth_normal_from_iter` to 3000. The config default of 7000 is
@@ -430,6 +430,63 @@ Only meaningful for the ellipsoid primitives — trisurfel is already flat by co
 this is the term that lets the gaussian variant compete on geometry, and the baseline says it
 is the variant with the geometry problem (`n_gain` -16.7).
 
+#### Implemented as `use_scale_flatten`, and it does not work
+
+`loss.use_scale_flatten` / `lambda_scale_flatten` penalise `min(scale)` per particle,
+normalised by `scene_extent` so one weight transfers between scenes. The reference (PGSR, via
+`blob-to-spoke/gaussian_wrapping/train.py`) uses weight 100 on an *unnormalised* min-scale
+over visible particles; with the extent divided out, ~300 is the comparable setting here.
+
+Rejected outright for trisurfel. `gaussianParticles.slang` overwrites `scale.z` with 1e-6 on
+fetch and never accumulates a gradient into it, so the stored third scale is dead storage that
+the renderer never reads — yet it is *not* small (measured aspect ratio 0.36), so `min` would
+select it for most particles and the term would spend its entire budget shrinking a number
+with no effect, showing a healthy falling loss curve throughout.
+
+Measured on gaussians at 7k. `aspect` is the mean `min(scale)/max(scale)`, i.e. how flat the
+particles actually became:
+
+| lambda | sponza n | gain | aspect | emerald n | gain | aspect |
+|---|---|---|---|---|---|---|
+| off | 52.4 | -9.5 | 0.398 | 65.4 | -15.1 | 0.225 |
+| 0.1 | 54.9 | -12.1 | 0.163 | 80.5 | -30.2 | 0.003 |
+| 1 | 58.7 | -15.8 | 0.037 | 84.9 | -34.6 | 0.000 |
+| 3 | 63.3 | -20.5 | 0.012 | 84.3 | -34.0 | 0.000 |
+| 30 | 67.6 | -24.8 | 0.001 | 84.6 | -34.3 | 0.000 |
+| 300 | 67.8 | -25.0 | 0.000 | 84.8 | -34.5 | 0.000 |
+
+The term does exactly what it says — the aspect ratio collapses from 0.4 to 0.001 — and the
+normals get monotonically *worse* at every weight on both scenes, 52 to 68 degrees on sponza
+and 65 to 85 on emerald-square. Stacked on depth-normal consistency it is still a monotone
+regression (25.2 to 31.9 on sponza, 42.6 to 46.5 on emerald-square), so it is not that
+flattening needs a partner term. PSNR is untouched throughout (36.1-36.3 on sponza), which
+rules out the runs simply being worse: this is a geometry-specific regression. The 0.1 and 1
+cells were added after the fact precisely because 3 already collapsed the aspect ratio, and
+without them the sweep could not distinguish "flattening hurts" from "over-flattening hurts".
+It is the former.
+
+The mechanism is that `min` is a hard selection on whichever axis is *currently* smallest, so
+the term shrinks that axis and thereby freezes the orientation the particle happened to be
+initialised with. Flattening makes a normal well-defined without making it correct, and a
+thin disk pointing the wrong way is a worse normal than a round blob with no strong
+orientation at all. Nothing in the term references the surface. This also explains why the
+regression is much larger on emerald-square, where the particles start rounder (0.225 versus
+0.398) and so have more arbitrary orientation to lock in.
+
+So the premise recorded above — that this is "the term that lets the gaussian variant compete
+on geometry" — is wrong, and the opposite is true. What fixes gaussian normals is
+depth-normal consistency, which cut them from 52.4 to 25.2 while *raising* the aspect ratio
+slightly: the useful direction is constraining orientation, not shape. Flatness is a
+consequence of good geometry in 2DGS/PGSR, not a cause, and those methods pair it with
+multi-view photometric constraints that pin orientation independently.
+
+Kept in the tree, defaulting off, with the guard and tests. The measurement is only
+reproducible if the term still exists, and it is ~10 lines. It should not be switched on.
+
+Small caveat, recorded so it is not lost: combined with depth-normal consistency, flattening
+does improve *depth* on emerald-square (`abs_rel` 0.1353 to 0.1260). If a later item wants
+depth specifically, that is worth revisiting; it does not redeem the term for normals.
+
 ### 7. Mesh export
 
 Nothing landed, and the existing tooling is unrelated: `threedgrut/export/` writes point
@@ -462,7 +519,7 @@ compiles Slang in a subprocess that resolves `slangc` from `PATH`, and without i
 fails with a `FileNotFoundError` unrelated to anything it is testing.
 
 ```bash
-# Full suite (~11 min): 295 passed, 1 skipped
+# Full suite (~8 min): 299 passed, 1 skipped
 python -m pytest threedgrut threedgut_tracer threedgrt_tracer scripts -q
 
 # The normal-specific tests
@@ -470,7 +527,7 @@ python -m pytest threedgut_tracer/tests/test_normal_gradient.py \
                  threedgrt_tracer/tests/test_normal_gradient_support.py \
                  threedgrt_tracer/tests/test_normal_pipeline_consistency.py \
                  threedgrut/utils/tests/test_depth_normal_loss.py \
-                 threedgrut/utils/tests/test_normal_supervision.py -q
+                 threedgrut/utils/tests/test_geometry_supervision.py -q
 
 black --check . && isort --check-only .   # line-length 120, configured in pyproject.toml
 ```

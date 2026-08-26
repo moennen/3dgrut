@@ -181,8 +181,17 @@ loss:
   use_opacity: false
   lambda_opacity: 0.0
 
+  # Penalises all three axes, so it shrinks particles rather than flattening them. For
+  # flatness use use_scale_flatten below; the two pull in different directions.
   use_scale: false
   lambda_scale: 0.0
+
+  # Penalises only each particle's shortest axis, collapsing it towards a disk while leaving
+  # the other two free to grow. Normalised by the scene extent, so one lambda transfers
+  # between scenes. Only meaningful for the ellipsoid primitives -- trisurfel is already flat
+  # by construction.
+  use_scale_flatten: false
+  lambda_scale_flatten: 0.0
 
   # Depth-normal consistency. Needs render.enable_normals, and under 3DGRT a backward pipeline
   # that differentiates the normal buffer (render.pipeline_type=referenceSlang); the tracer

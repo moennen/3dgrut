@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~11 min, currently 295 passed, 1 skipped
+# ~8 min, currently 299 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```

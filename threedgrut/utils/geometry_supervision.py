@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configuration checks shared by both backends before a normal loss is allowed to run.
+"""Configuration checks shared by both backends before a geometry loss is allowed to run.
+
+Each check here exists because the combination it rejects would otherwise *train*, at full
+cost, while supervising nothing -- a silently wrong run rather than a failed one.
 
 Deliberately free of heavy imports so that either tracer's setup can call it.
 """
@@ -46,4 +49,27 @@ def check_normals_are_rendered(conf) -> None:
         "loss.use_depth_normal is set but render.enable_normals is false, so the tracer "
         "returns a constant placeholder instead of a rendered normal and the term would "
         "supervise against that constant. Set render.enable_normals=true."
+    )
+
+
+def check_flatness_applies(conf) -> None:
+    """Reject the flatness penalty on a primitive that is already flat.
+
+    Surfel kernels overwrite `scale.z` with 1e-6 on fetch and never accumulate a gradient
+    into it (`gaussianParticles.slang`), so the stored third scale is dead storage. A
+    penalty on the smallest axis would therefore select that dead component for most
+    particles and spend the whole term shrinking a number the renderer never reads --
+    costing throughput and reporting a falling loss curve for no effect on the geometry.
+    Flatness is already guaranteed for these primitives, so asking for it is a mistake
+    worth surfacing rather than absorbing.
+    """
+    if not OmegaConf.select(conf, "loss.use_scale_flatten", default=False):
+        return
+    if OmegaConf.select(conf, "render.primitive_type", default="instances") != "trisurfel":
+        return
+
+    raise ValueError(
+        "loss.use_scale_flatten is set with render.primitive_type=trisurfel, which the "
+        "kernel already flattens by forcing scale.z and dropping its gradient. The term "
+        "would only shrink an unused parameter. Use it with the ellipsoid primitives."
     )
