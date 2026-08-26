@@ -3,12 +3,13 @@
 
 """Finite-difference validation of the depth second-moment backward pass.
 
-`sum(w * t^2)` is composited alongside the depth's `sum(w * t)` and its backward is folded
-into the *same* two intermediate gradients the depth uses (`galphaRayHitGrd` and
-`grdsRayHitGrd` in `gaussianParticles.cuh`). That sharing is what makes the term cheap, and
-also what makes it dangerous: a sign error or a missing factor would leak into the depth
-gradient rather than merely producing a wrong moment gradient. Central differences of the
-forward render are the only check that distinguishes the correct Jacobian from a plausible one.
+`sum(w * t^2)` is composited alongside the depth's `sum(w * t)`, and on the hand-written CUDA
+path its backward is folded into the *same* two intermediate gradients the depth uses
+(`galphaRayHitGrd` and `grdsRayHitGrd` in `gaussianParticles.cuh`). That sharing is what makes
+the term cheap, and also what makes it dangerous: a sign error or a missing factor would leak
+into the depth gradient rather than merely producing a wrong moment gradient. Central
+differences of the forward render are the only check that distinguishes the correct Jacobian
+from a plausible one.
 
 Three losses are differentiated, which is the point of the file:
 
@@ -19,11 +20,15 @@ Three losses are differentiated, which is the point of the file:
   handled each loss correctly in isolation but assigned instead of accumulating into the
   shared gradient would pass the first two checks and fail this one.
 
-The moment is differentiable only where the hand-written CUDA compositing runs, so these
-variants all use `k_buffer_size=0` with normals compiled out; see
-`Tracer._dist_sq_differentiable`. The other two backward paths are Slang autodiff entry points
-that do not carry the moment, and `test_second_moment_gradient_is_refused_off_path` pins that
-they refuse a gradient loudly instead of returning a silent zero.
+The renderer has *three* backward compositing paths and the moment had to be taught to all
+three, so each is covered (`BACKWARD_PATHS`). They are selected by configuration rather than
+named in the API, which is exactly why a test that exercised only the default would have left
+two thirds of the feature unverified:
+
+* `cuda` -- `k_buffer_size=0`, normals off: the fused hand-written `processHitBwd`.
+* `slang_raw` -- `k_buffer_size=0`, normals on: Slang `...BwdToRawParameters`, warp-reduced.
+* `slang_buffer` -- `k_buffer_size>0`: Slang `...BwdToBuffer`, via the global gradient buffer.
+  Reached with normals either way, so both are checked for the moment-only loss.
 
 Process isolation and the discontinuity handling follow `test_normal_gradient.py`: one
 subprocess per build variant because `load_3dgut_plugin` caches a single compiled extension,
@@ -54,22 +59,31 @@ FD_STABILITY_RTOL = 0.02
 LOSS_KINDS = ("moment", "depth", "both")
 PRIMITIVES = ("gaussian", "trisurfel")
 
+# name -> (enable_normals, k_buffer_size); see the module docstring.
+BACKWARD_PATHS = {
+    "cuda": (False, 0),
+    "slang_raw": (True, 0),
+    "slang_buffer": (False, 4),
+    "slang_buffer_normals": (True, 4),
+}
+
 
 # ---------------------------------------------------------------------------
 # Worker: everything below runs inside the per-variant subprocess.
 # ---------------------------------------------------------------------------
 
 
-def _make_conf(primitive_type: str, enable_depth_variance: bool = True, enable_normals: bool = False):
+def _make_conf(primitive_type: str, path: str = "cuda", enable_depth_variance: bool = True):
     from threedgrut.utils.build_variants import compose_config
 
+    enable_normals, k_buffer_size = BACKWARD_PATHS[path]
     return compose_config(
         "apps/colmap_3dgut.yaml",
         [
             f"render.primitive_type={primitive_type}",
             f"render.enable_depth_variance={str(enable_depth_variance).lower()}",
             f"render.enable_normals={str(enable_normals).lower()}",
-            "render.splat.k_buffer_size=0",
+            f"render.splat.k_buffer_size={k_buffer_size}",
         ],
         str(CONFIG_DIR),
     )
@@ -291,7 +305,7 @@ def _check_backward_leaves_forward_unchanged(model, batch, loss_fn):
     assert (before > 0).any(), "no ray accumulated a second moment; the scene is misconfigured"
 
 
-def _check_depth_gradient_unaffected_by_the_moment(primitive_type: str):
+def _check_depth_gradient_unaffected_by_the_moment(primitive_type: str, path: str):
     """Compiling the moment in must not change the depth gradient it shares accumulators with.
 
     Rendered with the moment enabled and disabled, a depth-only loss must produce the same
@@ -304,13 +318,13 @@ def _check_depth_gradient_unaffected_by_the_moment(primitive_type: str):
 
     import torch
 
-    conf = _make_conf(primitive_type, enable_depth_variance=True)
+    conf = _make_conf(primitive_type, path, enable_depth_variance=True)
     model = _make_model(conf)
     batch = _make_batch()
     _, analytic = _analytic_gradients(model, _make_loss(model, batch, "depth"))
 
     completed = sp.run(
-        [sys.executable, str(pathlib.Path(__file__).resolve()), "depth-reference", primitive_type],
+        [sys.executable, str(pathlib.Path(__file__).resolve()), "depth-reference", primitive_type, path],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -324,8 +338,8 @@ def _check_depth_gradient_unaffected_by_the_moment(primitive_type: str):
         torch.testing.assert_close(gradient, expected, rtol=2e-3, atol=1e-6)
 
 
-def _run_variant(primitive_type: str, kind: str) -> None:
-    conf = _make_conf(primitive_type)
+def _run_variant(primitive_type: str, kind: str, path: str) -> None:
+    conf = _make_conf(primitive_type, path)
     model = _make_model(conf)
     batch = _make_batch()
     loss_fn = _make_loss(model, batch, kind)
@@ -337,34 +351,39 @@ def _run_variant(primitive_type: str, kind: str) -> None:
     if kind == "moment":
         _check_backward_leaves_forward_unchanged(model, batch, loss_fn)
 
-    print(f"{primitive_type} loss={kind}: {checked} gradient entries matched finite differences")
+    print(f"{primitive_type} {path} loss={kind}: {checked} gradient entries matched finite differences")
 
 
-def _run_depth_reference(primitive_type: str) -> None:
+def _run_depth_reference(primitive_type: str, path: str) -> None:
     """Print the depth-only gradient from a build with the moment compiled *out*."""
     import json
 
-    conf = _make_conf(primitive_type, enable_depth_variance=False)
+    conf = _make_conf(primitive_type, path, enable_depth_variance=False)
     model = _make_model(conf)
     batch = _make_batch()
     _, analytic = _analytic_gradients(model, _make_loss(model, batch, "depth"))
     print(json.dumps({name: gradient.flatten().tolist() for name, gradient in analytic.items()}))
 
 
-def _run_off_path_refusal() -> None:
-    """With normals compiled in, the moment must not offer a gradient it cannot produce."""
-    conf = _make_conf("gaussian", enable_depth_variance=True, enable_normals=True)
+def _run_disabled_refusal() -> None:
+    """With the feature off the buffer is empty, so a loss on it must raise, not read zero.
+
+    This is the failure mode a config typo produces: `enable_depth_variance` left unset while a
+    variance loss is switched on. An empty tensor sums to 0.0 and would train as a no-op, so the
+    forward marks it non-differentiable and autograd refuses instead.
+    """
+    conf = _make_conf("gaussian", "cuda", enable_depth_variance=False)
     model = _make_model(conf)
     batch = _make_batch()
     out = model(batch)
-    assert out["pred_dist_sq"].numel() > 0, "the moment should still be rendered"
-    assert not out["pred_dist_sq"].requires_grad, "the moment must not claim to be differentiable off-path"
+    assert out["pred_dist_sq"].numel() == 0, "the moment should not be rendered when disabled"
+    assert not out["pred_dist_sq"].requires_grad, "a disabled moment must not claim to be differentiable"
     try:
         out["pred_dist_sq"].sum().backward()
     except RuntimeError:
-        print("off-path moment correctly refused a gradient")
+        print("disabled moment correctly refused a gradient")
         return
-    raise AssertionError("a loss on the off-path moment silently succeeded")
+    raise AssertionError("a loss on the disabled moment silently succeeded")
 
 
 # ---------------------------------------------------------------------------
@@ -383,19 +402,34 @@ def _run_worker(*args: str) -> None:
         pytest.fail(f"{' '.join(args)} failed\n--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}")
 
 
-@pytest.mark.parametrize("primitive_type", PRIMITIVES)
+# The full loss matrix on one primitive and every backward path; the second primitive is
+# covered for the moment-only loss below. Each distinct (primitive, path) pair is a separate
+# compiled variant, so widening this multiplies build time rather than test time.
+@pytest.mark.parametrize("path", ["cuda", "slang_raw", "slang_buffer"])
 @pytest.mark.parametrize("kind", LOSS_KINDS)
-def test_second_moment_gradient_matches_finite_differences(kind: str, primitive_type: str) -> None:
-    _run_worker(primitive_type, kind)
+def test_second_moment_gradient_matches_finite_differences(kind: str, path: str) -> None:
+    _run_worker("gaussian", kind, path)
+
+
+@pytest.mark.parametrize("path", sorted(BACKWARD_PATHS))
+@pytest.mark.parametrize("primitive_type", PRIMITIVES)
+def test_second_moment_gradient_on_every_backward_path(primitive_type: str, path: str) -> None:
+    """Each compositing path must differentiate the moment, for both primitives.
+
+    `slang_buffer_normals` is here rather than in the matrix above because it is the
+    configuration a depth-variance loss has to share with the depth-normal loss of item 5,
+    which needs normals compiled in.
+    """
+    _run_worker(primitive_type, "moment", path)
 
 
 @pytest.mark.parametrize("primitive_type", PRIMITIVES)
 def test_depth_gradient_unchanged_by_compiling_the_moment_in(primitive_type: str) -> None:
-    _run_worker("depth-unaffected", primitive_type)
+    _run_worker("depth-unaffected", primitive_type, "cuda")
 
 
-def test_second_moment_gradient_is_refused_off_path() -> None:
-    _run_worker("off-path")
+def test_second_moment_gradient_is_refused_when_disabled() -> None:
+    _run_worker("disabled")
 
 
 if __name__ == "__main__":
@@ -405,10 +439,10 @@ if __name__ == "__main__":
         print("skipped: requires CUDA")
         sys.exit(0)
     if sys.argv[1] == "depth-reference":
-        _run_depth_reference(sys.argv[2])
+        _run_depth_reference(sys.argv[2], sys.argv[3])
     elif sys.argv[1] == "depth-unaffected":
-        _check_depth_gradient_unaffected_by_the_moment(sys.argv[2])
-    elif sys.argv[1] == "off-path":
-        _run_off_path_refusal()
+        _check_depth_gradient_unaffected_by_the_moment(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == "disabled":
+        _run_disabled_refusal()
     else:
-        _run_variant(sys.argv[1], sys.argv[2])
+        _run_variant(sys.argv[1], sys.argv[2], sys.argv[3])

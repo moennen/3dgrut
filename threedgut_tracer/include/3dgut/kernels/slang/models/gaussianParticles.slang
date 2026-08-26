@@ -266,6 +266,7 @@ float integrateHit<let backToFront : bool>(
     inout float transmittance,
     in float depth,
     inout float integratedDepth,
+    inout float integratedDepthSq,
     no_diff bool enableNormal,
     in float3 normal,
     inout float3 integratedNormal)
@@ -274,6 +275,13 @@ float integrateHit<let backToFront : bool>(
    if (backToFront)
    {
        integratedDepth = lerp(integratedDepth, depth, alpha);
+       // `depth * depth` rather than a squared accumulator: the second moment composites with
+       // exactly the depth's weights, so it obeys the same lerp recursion and inverts the same
+       // way in the backward replay below.
+       if (EnableHitDistanceSq)
+       {
+           integratedDepthSq = lerp(integratedDepthSq, depth * depth, alpha);
+       }
        if (enableNormal)
        {
            integratedNormal = lerp(integratedNormal, normal, alpha);
@@ -282,6 +290,10 @@ float integrateHit<let backToFront : bool>(
    else
    {
        integratedDepth += depth * weight;
+       if (EnableHitDistanceSq)
+       {
+           integratedDepthSq += depth * depth * weight;
+       }
        if (enableNormal)
        {
             integratedNormal += normal * weight;
@@ -300,6 +312,7 @@ float processHitFromBuffer<let backToFront : bool>(
     no_diff RawParametersBuffer parametersBuffer,
     inout float transmittance,
     inout float integratedDepth,
+    inout float integratedDepthSq,
     out float3 canonicalIntersection,
     no_diff bool enableNormal,
     inout float3 integratedNormal)
@@ -320,6 +333,7 @@ float processHitFromBuffer<let backToFront : bool>(
                                          transmittance,
                                          depth,
                                          integratedDepth,
+                                         integratedDepthSq,
                                          enableNormal,
                                          normal,
                                          integratedNormal);
@@ -337,6 +351,7 @@ float processHitFromParameters<let backToFront : bool>(
     in Parameters parameters,
     inout float transmittance,
     inout float integratedDepth,
+    inout float integratedDepthSq,
     out float3 canonicalIntersection,
     no_diff bool enableNormal,
     inout float3 integratedNormal)
@@ -357,6 +372,7 @@ float processHitFromParameters<let backToFront : bool>(
                                          transmittance,
                                          depth,
                                          integratedDepth,
+                                         integratedDepthSq,
                                          enableNormal,
                                          normal,
                                          integratedNormal);
@@ -435,6 +451,7 @@ inline bool particleDensityHit(
     inout float transmittance,
     in float depth,
     inout float integratedDepth,
+    inout float integratedDepthSq,
     in bool enableNormal,
     in float3 normal,
     inout float3 integratedNormal)
@@ -444,6 +461,7 @@ inline bool particleDensityHit(
         transmittance,
         depth,
         integratedDepth,
+        integratedDepthSq,
         enableNormal,
         normal,
         integratedNormal);
@@ -457,6 +475,7 @@ inline float particleDensityProcessHitFwdFromBuffer(
     gaussianParticle.CommonParameters commonParameters,
     inout float transmittance,
     inout float integratedDepth,
+    inout float integratedDepthSq,
     out float3 canonicalIntersection,
     in bool enableNormal,
     inout float3 integratedNormal)
@@ -468,6 +487,7 @@ inline float particleDensityProcessHitFwdFromBuffer(
         commonParameters.parametersBuffer,
         transmittance,
         integratedDepth,
+        integratedDepthSq,
         canonicalIntersection,
         enableNormal,
         integratedNormal);
@@ -486,6 +506,8 @@ void particleDensityProcessHitBwdToBuffer(
     in float depth,
     inout float integratedDepth,
     inout float integratedDepthGrad,
+    inout float integratedDepthSq,
+    inout float integratedDepthSqGrad,
     in float3 canonicalIntersectionGrad,
     bool enableNormal,
     in float3 normal,
@@ -501,6 +523,19 @@ void particleDensityProcessHitBwdToBuffer(
 
         integratedDepth = (integratedDepth - depth * alpha) * weight;
         DifferentialPair<float> integratedDepthDiff = DifferentialPair<float>(integratedDepth, integratedDepthGrad);
+
+        // Unwinds with the depth's recursion applied to `depth * depth`; a zero pair when the
+        // moment is compiled out, so the replay never reads the buffer the caller did not pass.
+        DifferentialPair<float> integratedDepthSqDiff;
+        if (gaussianParticle.EnableHitDistanceSq)
+        {
+            integratedDepthSq = (integratedDepthSq - depth * depth * alpha) * weight;
+            integratedDepthSqDiff = DifferentialPair<float>(integratedDepthSq, integratedDepthSqGrad);
+        }
+        else
+        {
+            integratedDepthSqDiff = DifferentialPair<float>(0.0f, 0.0f);
+        }
 
         DifferentialPair<float3> integratedNormalDiff;
         if (enableNormal)
@@ -520,6 +555,7 @@ void particleDensityProcessHitBwdToBuffer(
             commonParameters.parametersBuffer,
             transmittanceDiff,
             integratedDepthDiff,
+            integratedDepthSqDiff,
             canonicalIntersectionGrad,
             enableNormal,
             integratedNormalDiff,
@@ -527,6 +563,10 @@ void particleDensityProcessHitBwdToBuffer(
 
         transmittanceGrad = transmittanceDiff.getDifferential();
         integratedDepthGrad = integratedDepthDiff.getDifferential();
+        if (gaussianParticle.EnableHitDistanceSq)
+        {
+            integratedDepthSqGrad = integratedDepthSqDiff.getDifferential();
+        }
         if (enableNormal)
         {
             integratedNormalGrad = integratedNormalDiff.getDifferential();
@@ -551,6 +591,8 @@ void particleDensityProcessHitBwdToRawParameters(
     in float depth,
     inout float integratedDepth,
     inout float integratedDepthGrad,
+    inout float integratedDepthSq,
+    inout float integratedDepthSqGrad,
     in float3 canonicalIntersectionGrad,
     bool enableNormal,
     in float3 normal,
@@ -571,6 +613,19 @@ void particleDensityProcessHitBwdToRawParameters(
         integratedDepth = (integratedDepth - depth * alpha) * weight;
         DifferentialPair<float> integratedDepthDiff = DifferentialPair<float>(integratedDepth, integratedDepthGrad);
 
+        // Unwinds with the depth's recursion applied to `depth * depth`; a zero pair when the
+        // moment is compiled out, so the replay never reads the buffer the caller did not pass.
+        DifferentialPair<float> integratedDepthSqDiff;
+        if (gaussianParticle.EnableHitDistanceSq)
+        {
+            integratedDepthSq = (integratedDepthSq - depth * depth * alpha) * weight;
+            integratedDepthSqDiff = DifferentialPair<float>(integratedDepthSq, integratedDepthSqGrad);
+        }
+        else
+        {
+            integratedDepthSqDiff = DifferentialPair<float>(0.0f, 0.0f);
+        }
+
         DifferentialPair<float3> integratedNormalDiff;
         if (enableNormal)
         {
@@ -588,6 +643,7 @@ void particleDensityProcessHitBwdToRawParameters(
             parametersDiff,
             transmittanceDiff,
             integratedDepthDiff,
+            integratedDepthSqDiff,
             canonicalIntersectionGrad,
             enableNormal,
             integratedNormalDiff,
@@ -595,6 +651,10 @@ void particleDensityProcessHitBwdToRawParameters(
 
         transmittanceGrad = transmittanceDiff.getDifferential();
         integratedDepthGrad = integratedDepthDiff.getDifferential();
+        if (gaussianParticle.EnableHitDistanceSq)
+        {
+            integratedDepthSqGrad = integratedDepthSqDiff.getDifferential();
+        }
         if (enableNormal)
         {
             integratedNormalGrad = integratedNormalDiff.getDifferential();

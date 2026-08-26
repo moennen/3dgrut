@@ -29,6 +29,23 @@ struct RayPayloadBackward : public RayPayload<FeatN>, public TOptionalNormalGrad
 #endif
     tcnn::vec<FeatN> featuresBackward;
     tcnn::vec<FeatN> featuresGradient;
+
+    // Compile-time nullptr when the moment is off, so the Slang backward reads it the same way
+    // it reads an absent normal and call sites need no preprocessor branch of their own.
+    __device__ __inline__ float* hitTSqBackwardPtr() {
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        return &hitTSqBackward;
+#else
+        return nullptr;
+#endif
+    }
+    __device__ __inline__ float* hitTSqGradientPtr() {
+#if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
+        return &hitTSqGradient;
+#else
+        return nullptr;
+#endif
+    }
 };
 
 // The backward payload lives in registers on the hot path, so the normal gradient must cost

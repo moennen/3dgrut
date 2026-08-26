@@ -382,20 +382,13 @@ class Tracer:
     def _dist_sq_differentiable(self) -> bool:
         """Whether a gradient can flow from the depth second moment.
 
-        The moment is accumulated by the shared forward hit processing, so it is rendered on
-        every configuration, but only one of the three backward compositing paths knows how to
-        unwind it: the hand-written CUDA `processHitBwd`, which the K=0 renderer uses when
-        normals are compiled out. The other two are Slang autodiff entry points that would
-        have to differentiate the moment in the `.slang` source instead, and until they do
-        they must not pretend to -- returning False here keeps the output non-differentiable
-        so a loss raises rather than training on a silent zero.
+        All three backward compositing paths now unwind the moment -- the hand-written CUDA
+        `processHitBwd` and both Slang autodiff entry points -- so this reduces to whether the
+        moment was rendered at all. It still has to be checked: with the feature off the buffer
+        is *empty* rather than absent, and a loss built on an empty tensor is silently zero.
+        Marking it non-differentiable turns that into a raise.
         """
-        render = self.conf.render
-        return (
-            bool(getattr(render, "enable_depth_variance", False))
-            and not bool(render.enable_normals)
-            and int(render.splat.k_buffer_size) == 0
-        )
+        return bool(getattr(self.conf.render, "enable_depth_variance", False))
 
     @property
     def timings(self):

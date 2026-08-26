@@ -203,7 +203,9 @@ struct GUTKBufferRenderer : Params {
                                                           // Slang entry point reads as `enableNormal = false`.
                                                           hitParticle.normalPtr(),
                                                           ray.normalPtr(),
-                                                          ray.normalGradientPtr());
+                                                          ray.normalGradientPtr(),
+                                                          ray.hitTSqBackwardPtr(),
+                                                          ray.hitTSqGradientPtr());
 
             ray.transmittance *= (1.0 - hitParticle.alpha);
 
@@ -650,7 +652,9 @@ struct GUTKBufferRenderer : Params {
                                                                                    canonicalIntersectionGrad,
                                                                                    hitNormal.normalPtr(),
                                                                                    ray.normalPtr(),
-                                                                                   ray.normalGradientPtr());
+                                                                                   ray.normalGradientPtr(),
+                                                                                   ray.hitTSqBackwardPtr(),
+                                                                                   ray.hitTSqGradientPtr());
 
                             ray.transmittance *= (1.0f - hitAlpha);
                         }
@@ -753,7 +757,9 @@ struct GUTKBufferRenderer : Params {
                                                                           canonicalIntersectionGrad,
                                                                           hitNormal.normalPtr(),
                                                                           ray.normalPtr(),
-                                                                          ray.normalGradientPtr());
+                                                                          ray.normalGradientPtr(),
+                                                                          ray.hitTSqBackwardPtr(),
+                                                                          ray.hitTSqGradientPtr());
 
                             ray.transmittance *= (1.0f - hitAlpha);
                         }

@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~13 min, currently 315 passed, 1 skipped
+# ~13 min, currently 326 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -79,12 +79,24 @@ buffer that loses to that control.
   at spotting bad depth, which reframes the variance term as an optimisation target rather than
   a diagnostic advance. `scripts/ablation/depth_variance_diagnostic.py` runs this comparison.
 - 3DGUT has *three* backward compositing paths, and a forward accumulator added to the shared
-  hit processing appears on all of them while only one can differentiate it: hand-written CUDA
-  `processHitBwd` (`k_buffer_size=0`, normals off) versus two Slang autodiff entry points
-  (`k_buffer_size>0`, or `enable_normals=true`). Gate `mark_non_differentiable` on the config
-  so an unsupported build raises instead of training on a silent zero, as
-  `Tracer._dist_sq_differentiable` does. The C++ is not `clang-format` clean at HEAD, so do
-  not run it over a touched file; match the surrounding alignment by hand.
+  hit processing appears on all three, so each must be taught to differentiate it separately:
+  hand-written CUDA `processHitBwd` (`k_buffer_size=0`, normals off), Slang
+  `...BwdToRawParameters` (`k_buffer_size=0`, normals on) and Slang `...BwdToBuffer`
+  (`k_buffer_size>0`). They are selected by *configuration*, so a gradient test that exercises
+  only the default silently covers a third of the feature; parametrize over all three, as
+  `test_depth_variance_gradient.py` does. The Slang backward replays hits back-to-front with
+  `integratedDepth = lerp(integratedDepth, depth, alpha)`, which is easy to extend: an
+  accumulator obeying the same recursion inverts the same way.
+- A rendered buffer that is *empty* when its feature is compiled out will make a loss silently
+  `0.0` rather than raise. Pair the flag with `mark_non_differentiable` so the config typo
+  (loss on, buffer off) fails loudly -- `Tracer._dist_sq_differentiable`.
+- `slangc` resolves the `static const bool` feature flags in `threedgut.slang` as ordinary
+  names, so a flag referenced from a `[CudaDeviceExport]` entry point -- which sits *outside*
+  the `namespace gaussianParticle` block -- must be qualified (`gaussianParticle.EnableFoo`)
+  even though uses inside the namespace need no prefix. Unlike the `#if`-guarded CUDA, a
+  disabled Slang flag still leaves its parameters in the generated signature.
+- The C++ is not `clang-format` clean at HEAD, so do not run it over a touched file; match the
+  surrounding alignment by hand.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

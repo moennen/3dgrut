@@ -116,11 +116,16 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                          float depth,
                                                          float& integratedDepth,
                                                          const tcnn::vec3* normal     = nullptr,
-                                                         tcnn::vec3* integratedNormal = nullptr) const {
+                                                         tcnn::vec3* integratedNormal = nullptr,
+                                                         float* integratedDepthSq     = nullptr) const {
+        // The Slang side reads the moment whenever it is compiled in, so hand it a scratch
+        // local rather than a null when this caller does not want the moment back.
+        float unusedIntegratedDepthSq = 0.f;
         return particleDensityIntegrateHit(alpha,
                                            &transmittance,
                                            depth,
                                            &integratedDepth,
+                                           integratedDepthSq != nullptr ? integratedDepthSq : &unusedIntegratedDepthSq,
                                            normal != nullptr,
                                            normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(normal),
                                            reinterpret_cast<float3*>(integratedNormal));
@@ -131,14 +136,17 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                                     uint32_t particleIdx,
                                                                     float& transmittance,
                                                                     float& integratedDepth,
-                                                                    tcnn::vec3* integratedNormal = nullptr) const {
+                                                                    tcnn::vec3* integratedNormal = nullptr,
+                                                                    float* integratedDepthSq     = nullptr) const {
         float3 unusedCanonicalIntersection = make_float3(0.f, 0.f, 0.f);
+        float unusedIntegratedDepthSq      = 0.f;
         return particleDensityProcessHitFwdFromBuffer(*reinterpret_cast<const float3*>(&rayOrigin),
                                                       *reinterpret_cast<const float3*>(&rayDirection),
                                                       particleIdx,
                                                       {{reinterpret_cast<gaussianParticle_RawParameters_0*>(m_densityRawParameters.ptr), nullptr, true}},
                                                       &transmittance,
                                                       &integratedDepth,
+                                                      integratedDepthSq != nullptr ? integratedDepthSq : &unusedIntegratedDepthSq,
                                                       &unusedCanonicalIntersection,
                                                       integratedNormal != nullptr,
                                                       reinterpret_cast<float3*>(integratedNormal));
@@ -158,9 +166,13 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                                  const float3& canonicalIntersectionGrad,
                                                                  const tcnn::vec3* normal         = nullptr,
                                                                  tcnn::vec3* integratedNormal     = nullptr,
-                                                                 tcnn::vec3* integratedNormalGrad = nullptr
+                                                                 tcnn::vec3* integratedNormalGrad = nullptr,
+                                                                 float* integratedDepthSq         = nullptr,
+                                                                 float* integratedDepthSqGrad     = nullptr
 
     ) const {
+        float unusedIntegratedDepthSq     = 0.f;
+        float unusedIntegratedDepthSqGrad = 0.f;
         if constexpr (TDifferentiable) {
             particleDensityProcessHitBwdToBuffer(*reinterpret_cast<const float3*>(&rayOrigin),
                                                  *reinterpret_cast<const float3*>(&rayDirection),
@@ -175,6 +187,8 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                  depth,
                                                  &integratedDepth,
                                                  &integratedDepthGrad,
+                                                 integratedDepthSq != nullptr ? integratedDepthSq : &unusedIntegratedDepthSq,
+                                                 integratedDepthSqGrad != nullptr ? integratedDepthSqGrad : &unusedIntegratedDepthSqGrad,
                                                  canonicalIntersectionGrad,
                                                  normal != nullptr,
                                                  normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(normal),
@@ -200,9 +214,13 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                                         const float3& canonicalIntersectionGrad,
                                                                         const tcnn::vec3* normal         = nullptr,
                                                                         tcnn::vec3* integratedNormal     = nullptr,
-                                                                        tcnn::vec3* integratedNormalGrad = nullptr
+                                                                        tcnn::vec3* integratedNormalGrad = nullptr,
+                                                                        float* integratedDepthSq         = nullptr,
+                                                                        float* integratedDepthSqGrad     = nullptr
 
     ) const {
+        float unusedIntegratedDepthSq     = 0.f;
+        float unusedIntegratedDepthSqGrad = 0.f;
         if constexpr (TDifferentiable) {
             particleDensityProcessHitBwdToRawParameters(*reinterpret_cast<const float3*>(&rayOrigin),
                                                         *reinterpret_cast<const float3*>(&rayDirection),
@@ -215,6 +233,8 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                         depth,
                                                         &integratedDepth,
                                                         &integratedDepthGrad,
+                                                        integratedDepthSq != nullptr ? integratedDepthSq : &unusedIntegratedDepthSq,
+                                                        integratedDepthSqGrad != nullptr ? integratedDepthSqGrad : &unusedIntegratedDepthSqGrad,
                                                         canonicalIntersectionGrad,
                                                         normal != nullptr,
                                                         normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(normal),

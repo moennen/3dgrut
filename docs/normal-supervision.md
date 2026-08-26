@@ -491,16 +491,36 @@ renders the depth-only gradient with the moment compiled *out*, in a nested subp
 requires it to match the moment-enabled build — the regression that folding into shared
 accumulators invites.
 
-**Only one of the three backward paths carries it.** The renderer has three: the hand-written
-CUDA `processHitBwd` (K=0, normals off), and two Slang autodiff entry points (K>0, or normals
-on) whose `.slang` sources would each have to differentiate the moment themselves. The
-forward accumulates on all three, because it is shared, so the moment is *rendered*
-everywhere and differentiable only on one. Rather than let that be a silent zero,
-`Tracer._dist_sq_differentiable` gates `mark_non_differentiable` on the configuration, so a
-loss on an unsupported build raises. This is a real limitation: **item 7 cannot currently be
-combined with the depth-normal loss of item 5**, which needs normals compiled in, and the
-diagnostic above suggests that combination is the interesting one, since the depth-normal term
-already removes two-thirds of the spread. Extending the Slang path is the obvious follow-up.
+**All three backward paths carry it.** The renderer has three, selected by configuration rather
+than named in the API: the hand-written CUDA `processHitBwd` (K=0, normals off) and two Slang
+autodiff entry points, `...BwdToRawParameters` (K=0, normals on) and `...BwdToBuffer` (K>0).
+The forward accumulator is shared, so a moment taught to only one of them would be *rendered*
+everywhere and differentiable in one configuration — which is what the first cut of this shipped
+as, with `Tracer._dist_sq_differentiable` withholding the gradient elsewhere so a loss raised
+rather than training on a zero. That was not good enough, because normals-on is precisely the
+configuration item 7 has to share with item 5.
+
+The Slang extension turned out to be easy, for a reason worth recording: the Slang backward
+replays hits **back-to-front**, where the depth accumulates as
+`integratedDepth = lerp(integratedDepth, depth, alpha)` and therefore inverts exactly as
+`(D - t*alpha) / (1 - alpha)`. The moment obeys the same recursion with `depth * depth`, so it
+drops in beside the depth with no new algebra. `EnableHitDistanceSq` sits next to the existing
+`EnableNormal` in `threedgut.slang`, and the accumulators are threaded through as possibly-null
+pointers exactly like the normal — the pattern the codebase already had for an optional
+differentiable accumulator.
+
+`_dist_sq_differentiable` survives, now gating on the feature flag alone. That guard is still
+worth having, and not for the reason it was written: with `enable_depth_variance` off the buffer
+is *empty* rather than absent, and a loss on an empty tensor is silently `0.0`. Marking it
+non-differentiable turns the config typo — variance loss on, variance buffer off — into a raise.
+
+One cost note, unmeasured. The CUDA path is `#if`-guarded and compiles to nothing when the
+moment is off; the Slang path is not, because `slangc` sees the flag as a `static const bool`
+and the parameters stay in the signature. The generated CUDA for a disabled build is *not*
+byte-identical to the pre-change version: two dead pointer arguments and one load of an
+unconsumed stack local survive into it. Those should be eliminated by `nvcc`, but that was not
+verified, so treat "free when disabled" as an assumption on the Slang path rather than a
+measured fact.
 
 ### 4. Pseudo-depth supervision
 
