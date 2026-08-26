@@ -162,28 +162,91 @@ def test_gradient_reaches_both_accumulators():
     assert dist_sq.grad is not None and dist_sq.grad.abs().sum() > 0
 
 
-def test_opacity_receives_no_gradient_through_the_normalizer():
-    """The `1/acc` denominator is detached, so opacity gets no gradient from this term here.
+def _per_hit_gradients(weights: list[float], distances: list[float]) -> tuple[list[float], list[float]]:
+    """Backpropagate through the accumulation itself, to per-hit weight and distance.
 
-    Left attached it contributes a `1/acc^2` term that diverges as a ray approaches the
-    opacity floor, letting barely-qualifying rays dominate. Opacity is still supervised
-    through its effect on the two accumulators inside the tracer.
+    The loss only sees the three accumulated buffers, so a test on those alone cannot say what
+    the term does to a *hit*. Re-accumulating them from leaves recovers the quantities the
+    tracer's own backward pass will chain into.
     """
+    w = torch.tensor(weights, dtype=torch.float64, requires_grad=True)
+    t = torch.tensor(distances, dtype=torch.float64, requires_grad=True)
+    shape = (1, 1, 1, 1)
+    loss, _ = depth_variance_loss(
+        (w * t).sum().reshape(shape),
+        (w * t * t).sum().reshape(shape),
+        w.sum().reshape(shape),
+        scene_extent=1.0,
+    )
+    loss.backward()
+    return [float(g) for g in w.grad], [float(g) for g in t.grad]
+
+
+def test_weight_gradient_is_the_squared_distance_from_the_expected_depth():
+    """`dL/dw_i = (t_i - mu)^2`: non-negative, so weight is only ever pushed down.
+
+    This is the test that catches detaching the `acc` denominator, which drops the `+D^2/acc^2`
+    term and leaves `(t_i - mu)^2 - mu^2` -- an offset that is negative and grows with the
+    squared depth, so it pushes opacity *up* hardest on the most distant geometry. That
+    version trained, reported a falling loss, and collapsed the scene towards the camera.
+    """
+    weights, distances = [0.3, 0.4, 0.3], [1.0, 2.0, 4.0]
+    grad_w, _ = _per_hit_gradients(weights, distances)
+
+    mu = sum(x * d for x, d in zip(weights, distances)) / sum(weights)
+    assert grad_w == pytest.approx([(d - mu) ** 2 for d in distances], rel=1e-9)
+    assert all(g >= 0.0 for g in grad_w)
+
+
+def test_distance_gradient_pulls_each_hit_towards_the_expected_depth():
+    """`dL/dt_i = 2*w_i*(t_i - mu)`: hits in front are pushed back, hits behind pulled in."""
+    weights, distances = [0.3, 0.4, 0.3], [1.0, 2.0, 4.0]
+    _, grad_t = _per_hit_gradients(weights, distances)
+
+    mu = sum(x * d for x, d in zip(weights, distances)) / sum(weights)
+    assert grad_t == pytest.approx([2 * x * (d - mu) for x, d in zip(weights, distances)], rel=1e-9)
+    # Descent moves each hit towards mu, so the sign must oppose the offset.
+    for weight, distance, gradient in zip(weights, distances, grad_t):
+        assert gradient * (distance - mu) >= 0.0
+
+
+def test_gradients_are_translation_invariant():
+    """Sliding a whole ray down its own direction changes nothing about its spread.
+
+    The detached-denominator bug failed exactly here, and visibly: shifting a ray by +100 took
+    its weight gradient from about -4 to about -10500.
+    """
+    weights, distances = [0.3, 0.4, 0.3], [1.0, 2.0, 4.0]
+    near_w, near_t = _per_hit_gradients(weights, distances)
+    far_w, far_t = _per_hit_gradients(weights, [d + 100.0 for d in distances])
+
+    assert far_w == pytest.approx(near_w, rel=1e-6)
+    assert far_t == pytest.approx(near_t, rel=1e-6)
+
+
+def test_a_resolved_ray_at_any_distance_has_a_negligible_gradient():
+    """A sharp ray is already optimal, near or far, so nothing should push on it hard.
+
+    Under the bug the same sharp ray gave a weight gradient of -4 at t=2 and -1600 at t=40,
+    which is the scale dependence that destroyed the distant scene.
+    """
+    near_w, _ = _per_hit_gradients([0.3, 0.4, 0.3], [1.9, 2.0, 2.1])
+    far_w, _ = _per_hit_gradients([0.3, 0.4, 0.3], [39.9, 40.0, 40.1])
+
+    assert max(abs(g) for g in near_w) < 1e-2
+    assert far_w == pytest.approx(near_w, rel=1e-6)
+
+
+def test_opacity_receives_gradient():
+    """The accumulated opacity is part of the term, not a constant normalizer."""
     dist, dist_sq, opacity = _ray([0.5, 0.5], [2.0, 6.0])
     opacity = opacity.clone().requires_grad_(True)
 
-    # With opacity the *only* attached input the loss has no graph at all, which is the
-    # property under test stated at its strongest.
-    detached, _ = depth_variance_loss(dist, dist_sq, opacity, scene_extent=1.0)
-    assert detached.grad_fn is None and not detached.requires_grad
-
-    # And with the accumulators attached too, the gradient that does exist reaches them
-    # rather than leaking back into opacity.
-    loss, _ = depth_variance_loss(
-        dist.clone().requires_grad_(True), dist_sq.clone().requires_grad_(True), opacity, scene_extent=1.0
-    )
+    loss, _ = depth_variance_loss(dist, dist_sq, opacity, scene_extent=1.0)
     loss.backward()
-    assert opacity.grad is None or opacity.grad.abs().sum() == 0
+
+    # dL/dacc = +D^2/acc^2 = mu^2, the term that completes the square.
+    assert float(opacity.grad) == pytest.approx(4.0**2, rel=1e-9)
 
 
 def test_empty_buffer_is_rejected_rather_than_averaged():

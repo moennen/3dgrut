@@ -22,21 +22,31 @@ expected depth it reports names a place where nothing is. Penalising it asks the
 resolve such rays into surfaces. This is the distortion-style regulariser of the NeRF
 literature, expressed in the second moment the tracer now accumulates.
 
-Two properties of the formulation are deliberate, and both are places this could go wrong.
+The gradient is the whole point, so it is worth writing down. With `mu = D/acc` the expected
+depth, differentiating `M2 - D^2/acc` gives
 
-**It penalises an un-normalized accumulator, so transparency is an escape hatch.** The term
-falls if the model concentrates a ray's weight -- the intent -- but it *also* falls if the
-model simply makes the scene less opaque, since every `w_i` shrinks. Only the photometric loss
-argues against that, and the same is true of the distortion losses this follows, which are
-used successfully on that basis. It is a genuine risk rather than a theoretical one, so the
-ablation must report accumulated opacity alongside the geometry metrics: a variance
-improvement bought by fading the scene out is not the effect we are looking for.
+    dL/dt_i = 2 * w_i * (t_i - mu)      each hit is pulled towards the expected depth
+    dL/dw_i = (t_i - mu)^2              each hit's weight is pushed down, by how far it is
+
+Both are translation-invariant, and the second is non-negative: the term never asks for more
+weight anywhere, and it discounts a hit in proportion to its *squared* distance from the
+surface the ray is describing. Those are the two mechanisms the term is supposed to have, and
+they only exist if the `acc` in the denominator carries gradient -- see the note at the
+division, which is where an earlier version of this got it wrong and produced exactly the
+scene collapse it was supposed to prevent.
+
+Two honest caveats remain.
+
+**Uniform fading still reduces it.** `L` is homogeneous of degree one in the weights, so
+halving every `w_i` halves the term without resolving anything. Only the photometric loss
+argues against that, as with the distortion losses this follows. The ablation therefore reads
+accumulated opacity (`d_cover`) alongside the geometry metrics.
 
 **Within a scene it is scale-dependent, by choice.** Variance carries squared distance units,
-so a far surface with the same *relative* spread is penalised more than a near one. The
-alternative -- dividing by depth to get a scale-free spread -- needs guarding where the depth
-is small and changes what the term means. Across scenes the dependence is removed, dividing by
-the squared scene extent so one lambda transfers between worlds whose units differ by orders of
+so a far surface with the same *relative* spread contributes more than a near one. The
+alternative -- dividing by depth for a scale-free spread -- needs guarding where depth is small
+and changes what the term means. Across scenes the dependence is removed by dividing by the
+squared scene extent, so one lambda transfers between worlds whose units differ by orders of
 magnitude, as `use_scale_flatten` already does with its linear scale.
 """
 
@@ -76,12 +86,17 @@ def depth_variance_loss(
     accumulated = pred_opacity
     valid = (accumulated >= min_opacity) & torch.isfinite(pred_dist_sq) & torch.isfinite(pred_dist)
 
-    # The denominator is detached. Left attached, d/d(acc) of `D^2/acc` contributes a
-    # `1/acc^2` term that grows without bound as a ray approaches the mask threshold from
-    # above, so rays that barely qualify would dominate the gradient. Detaching keeps the
-    # weight distribution's *shape* as what the term acts on; the opacity still receives
-    # gradient through `M2` and `D`, which is where the concentration signal lives.
-    safe = accumulated.detach().clamp_min(min_opacity)
+    # The denominator must stay attached to the graph. Detaching it drops the `+D^2/acc^2`
+    # term from the gradient, which is what completes the square: with it,
+    # `dL/dw_i = (t_i - mu)^2`, non-negative and translation-invariant, so a hit's weight is
+    # pushed down in proportion to how far it sits from the expected depth. Without it the
+    # gradient is `(t_i - mu)^2 - mu^2`, whose spurious offset is negative and grows with the
+    # *squared depth*, so it pushes opacity up hardest on the most distant geometry. Measured:
+    # that drove accumulated opacity to 1.0, floaters from 0.018 to 0.23 and depth bias from
+    # -4.2 to -12.5 on emerald-square, while barely touching the much nearer sponza. The
+    # `1/acc^2` this looks like is not a divergence -- `D` scales with `acc`, so the term is
+    # just `mu^2` -- and `clamp_min` only guards rays the mask already drops.
+    safe = accumulated.clamp_min(min_opacity)
 
     # Non-negative in exact arithmetic (Jensen), but the difference of two accumulators
     # cancels to a small negative value on a nearly-resolved ray, which would otherwise

@@ -158,6 +158,10 @@ DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = tuple(
     )
     for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
     for with_dn, weight_name, weight in (
+        # 0.001 and 0.01 exist because 0.1 already costs emerald-square 6.5 dB: without a
+        # window below it the sweep cannot distinguish "wrong form" from "wrong weight".
+        (False, "0001", 0.001),
+        (False, "001", 0.01),
         (False, "01", 0.1),
         (False, "1", 1.0),
         (False, "10", 10.0),
