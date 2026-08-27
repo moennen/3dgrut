@@ -279,25 +279,43 @@ PSEUDO_DEPTH_VARIANTS: tuple[Variant, ...] = tuple(
         ("01", 0.1, 0.05, "_gated", ", gated (refuted; see above).", ()),
         ("1", 1.0, 0.05, "_gated", ", gated (refuted; see above).", ()),
         ("10", 10.0, 0.05, "_gated", ", gated (refuted; see above).", ()),
+        # Stacked on depth-normal consistency. Both weights matter: 0.1 is where the ordinal
+        # term measured best alone, so `pd01_*_dn` is the combination of the two terms at their
+        # own optima, and `pd1_*_dn` shows what over-weighting the ordinal half costs once the
+        # normal half is present. Compare both against `dn05_gaussian`, not only against the
+        # baseline, or the depth-normal term's contribution is credited to this one.
+        ("01", 0.1, 0.0, "_dn", " with depth-normal.", DEPTH_NORMAL_OVERRIDES),
         ("1", 1.0, 0.0, "_dn", " with depth-normal.", DEPTH_NORMAL_OVERRIDES),
     )
 )
 
 # The pairing the ordinal term exists to test: an anchor for the relative depth-variance term.
-PSEUDO_DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = (
+#
+# Swept at both terms' own optima and at the over-weighted pair, because the first attempt at
+# this comparison was run at lambda 1 for *both* -- 10x the ordinal term's measured best and
+# 100x the relative-variance term's -- and a null from that configuration says nothing about
+# whether the two compose. `pd01_dvrel001_gaussian` is the honest test.
+PSEUDO_DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = tuple(
     Variant(
-        "pd1_dvrel1_gaussian",
+        f"pd{pd_name}_dvrel{dv_name}_gaussian",
         (
             "render.primitive_type=instances",
             "render.enable_depth_variance=true",
             "loss.use_depth_variance=true",
             "loss.depth_variance_relative=true",
-            "loss.lambda_depth_variance=1.0",
+            f"loss.lambda_depth_variance={dv_weight}",
             "loss.depth_variance_from_iter=3000",
-        )
-        + PSEUDO_DEPTH_OVERRIDES,
-        "Relative depth variance at lambda=1 anchored by ordinal pseudo-depth at lambda=1.",
-    ),
+            "loss.use_pseudo_depth_order=true",
+            f"loss.lambda_pseudo_depth_order={pd_weight}",
+        ),
+        f"Relative depth variance at lambda={dv_weight} anchored by ordinal pseudo-depth at lambda={pd_weight}.",
+    )
+    for pd_name, pd_weight, dv_name, dv_weight in (
+        # Each term at the weight it measured best alone.
+        ("01", 0.1, "001", 0.01),
+        # Both over-weighted; retained because it is what the first pass measured.
+        ("1", 1.0, "1", 1.0),
+    )
 )
 
 ALL_VARIANTS: tuple[Variant, ...] = (

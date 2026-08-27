@@ -133,6 +133,19 @@ buffer that loses to that control.
   prior's weakest structure. High agreement is also a warning for a one-sided loss: at 97% only
   3% of surviving pairs can produce any gradient. Sweep the knob rather than trusting the
   diagnostic that motivated it.
+- Judge a *combination* at each term's own optimum, or a null means nothing. Pairing the ordinal
+  pseudo-depth loss with relative depth variance at lambda 1 for both -- 10x and 100x their
+  measured bests -- said the pair was worse than the ordinal term alone; at 0.1 and 0.01 the pair
+  is the better of the two on sponza and lone-monk. Also compare against *each* single term and
+  not only the baseline, or one term's contribution is silently credited to the other.
+- A term that only touches depth can still be the biggest win for *normals*, via depth-normal
+  consistency. The ordinal pseudo-depth loss alone leaves the rendered normal untouched (52.3 to
+  52.0 deg, still losing to the view-direction control), because the normal is the particle's z
+  axis and depth ordering does not reach it. Stacked on `use_depth_normal` it takes lone-monk from
+  37.4 to 28.3 deg and its `n_gain` from -2.1 to +6.9, the first configuration here whose normals
+  beat that control on all three scenes -- consistency ties the normal to the depth *gradient*, so
+  it can only be as good as the depth handed to it. Check the cross-channel pairing before
+  concluding a depth term is irrelevant to normals.
 - A monocular depth prior is not usable as depth, only as *ordering*. `DepthAnythingV2` fitted
   per frame by the best possible affine still scores `abs_rel` 0.068 on sponza, worse than the
   7k model it would be teaching (0.058); per 16x16 patch it scores 0.011. It also emits

@@ -855,24 +855,72 @@ information. Section 3 predicted that this is what the depth-variance family was
 variance is zero for a Dirac at *any* distance, so it can only ask a ray to commit, not say
 where, and committing at the wrong distance is absorbing — the 170× rise in `wrong | tight`.
 
-Measured (one seed, sponza), the ordinal term does act as that anchor:
+The first pass at this measured λ=1 for *both* terms — 10× the ordinal term's optimum and 100×
+the relative-variance term's — and concluded the pairing was worse than the ordinal term alone.
+That conclusion was an artefact of the weights. At each term's own optimum it reverses:
 
-| Variant | sponza `abs_rel` | sponza floater fraction |
-| --- | --- | --- |
-| `gaussian` | 0.0561 | 0.30% |
-| `dvrel1_gaussian` | 0.0593 (+6%) | 1.62% |
-| `pd1_dvrel1_gaussian` | 0.0528 (−6%) | 1.14% |
-| `pd1_gaussian` | 0.0504 (−10%) | 0.38% |
+| Variant | sponza | lone-monk | emerald-square |
+| --- | --- | --- | --- |
+| `pd01_gaussian` alone | −10.9% | −9.7% | −7.6% |
+| `dvrel001_gaussian` alone | −7.8% | +1.1% | −3.2% |
+| `pd01_dvrel001_gaussian` | **−13.8%** | **−10.4%** | −6.8% |
+| `pd1_dvrel1_gaussian` (both over-weighted) | −7.6% | −12.9% | +10.3% |
 
-Anchoring turns the variance term's +6% into −6% and takes back a third of the floaters it
-created, so the mechanism is real. But the pairing is still worse than the ordinal term *alone*
-on both metrics, on sponza and on emerald-square (+10% vs −2%). The honest reading is that the
-anchor hypothesis was right about the mechanism and wrong about the conclusion: what the variance
-term needed was indeed a reference for *where*, and once it has one the variance term is
-redundant rather than complementary. Nothing here rehabilitates it.
+So the anchor does hold, mildly: at sane weights the pair beats the ordinal term alone on sponza
+by 2.9 points and on lone-monk by 0.7, at a 0.1–0.2 dB PSNR cost, and loses slightly on
+emerald-square. The gain is small and the sponza result is the only one clearly outside seed
+noise, so this is a weak positive and not a reason to run both by default. The lesson is
+methodological: **a null from a combination measured at the wrong weights is not a null about
+the combination**, and the over-weighted cell is retained in the sweep to keep that visible.
 
-`pd1_gaussian_dn`, stacking on depth-normal consistency, gives sponza's best depth (−11% at one
-seed) but costs 0.8 dB there, and does not beat `pd01_gaussian` on the other two scenes.
+#### Compounding with depth-normal consistency: sub-additive on depth, strongly additive on normals
+
+This is the more interesting pairing, and it splits cleanly by channel.
+
+Depth (`abs_rel` against the 3-seed baseline):
+
+| Variant | sponza | lone-monk | emerald-square |
+| --- | --- | --- | --- |
+| `pd01_gaussian` alone | −10.9% | **−9.7%** | −7.6% |
+| `dn05_gaussian` alone | **−17.0%** | −0.6% | −4.3% |
+| `pd01_gaussian_dn` | −17.3% | −7.1% | −7.8% |
+
+The two terms are **not additive on depth** — the combination lands at roughly the *maximum* of
+the two, never the sum, and on lone-monk it is actually worse than the ordinal term alone
+(−7.1% against −9.7%). They are complementary in *which scene* they fix rather than stacking on
+the same one: depth-normal consistency owns sponza and is null on lone-monk, the ordinal prior is
+the reverse. That is the same split the diagnostics predicted — sponza's error is geometric
+inconsistency an internal condition can reach, lone-monk's is confidently-misplaced depth that
+only external information can correct.
+
+Normals are where the combination genuinely compounds:
+
+| Variant | sponza | lone-monk | emerald-square |
+| --- | --- | --- | --- |
+| `pd01_gaussian` alone | 52.0° / n_gain **−9.2** | 52.1° / **−16.9** | 65.7° / **−15.4** |
+| `dn05_gaussian` alone | 25.4° / +17.4 | 37.4° / **−2.1** | 41.3° / +9.0 |
+| `pd01_gaussian_dn` | **24.0° / +18.8** | **28.3° / +6.9** | **30.5° / +19.8** |
+
+The ordinal term **alone does nothing for normals** — 52.3° to 52.0° on sponza, and it still
+loses to the view-direction control on all three scenes, which is the bar `n_gain` exists to
+enforce. That is expected: it constrains depth ordering, and the rendered normal is the
+particle's local z axis, which ordering does not touch.
+
+But it improves normals *substantially through* the depth-normal term, which is the channel that
+converts depth quality into normal quality. Adding it to `dn05` takes lone-monk from 37.4° to
+28.3° and emerald-square from 41.3° to 30.5°. Most importantly, lone-monk's `n_gain` goes from
+−2.1 to +6.9: `dn05` alone **loses to the view-direction control there**, and the pair is the
+first configuration in this document whose normals beat that control on all three scenes.
+
+The mechanism is worth stating because it generalises: depth-normal consistency ties the normal
+to the depth *gradient*, so it can only be as good as the depth it is handed. A term that
+improves depth without touching normals still improves normals if a consistency term is present
+to carry it across. The ordinal prior is a *depth* term whose main value here turns out to be
+what it does for *normals* once paired.
+
+Cost: 0.5 dB PSNR on sponza, 0.2 on lone-monk, 0.9 on emerald-square — the largest photometric
+bill of any combination measured here, and the reason this is not a default. `pd1_gaussian_dn`,
+over-weighting the ordinal half, is worse on every axis except lone-monk depth.
 
 ### 5. Multi-view consistency
 
