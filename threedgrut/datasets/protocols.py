@@ -45,10 +45,11 @@ class Batch:
     # normals are world-space unit vectors, zero where no surface exists.
     depth_gt: Optional[torch.Tensor] = None  # [B, H, W, 1]
     normal_gt: Optional[torch.Tensor] = None  # [B, H, W, 3]
-    # Monocular pseudo-depth prior: **disparity**, so larger means nearer and it is affine to
-    # *inverse* depth. Unlike depth_gt this is predicted from the image, carries no scale, and
-    # is a training signal rather than a reference.
-    pseudo_disparity: Optional[torch.Tensor] = None  # [B, H, W, 1]
+    # Monocular pseudo-depth prior, either disparity (larger is nearer) or depth (larger is
+    # farther) depending on the model that produced it -- ask `PseudoDepthCache.quantity` rather
+    # than assuming. Unlike depth_gt this is predicted from the image, carries no scale, and is a
+    # training signal rather than a reference.
+    pseudo_depth_prior: Optional[torch.Tensor] = None  # [B, H, W, 1]
 
     def __post_init__(self):
         batch_size = self.T_to_world.shape[0]

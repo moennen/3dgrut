@@ -22,6 +22,12 @@ monotonically increasing transform of the prior -- not merely to the affine ambi
 alignment against COLMAP points or anything else is needed, and the disparity-vs-depth
 distinction reduces to a single sign flip.
 
+That sign flip is real, not hypothetical: Depth Anything V2 emits disparity (larger is nearer)
+while Depth Anything 3's monocular model emits depth (larger is farther), so `quantity` is a
+required argument rather than an assumption. Because this loss reads only the ordering, it is
+also the term least able to *benefit* from a better prior's global structure -- see
+`docs/normal-supervision.md`.
+
 The loss is one-sided by construction. A pair the render already orders correctly contributes
 exactly zero and no gradient, so the term cannot fight geometry it agrees with; it only pushes
 where the render contradicts the prior. Measured on sponza, the prior beats the model on 91% of
@@ -62,7 +68,14 @@ import torch
 
 from threedgrut.utils.depth_normal_metrics import MIN_ACCUMULATED_OPACITY, expected_depth
 
-# Quantiles defining the robust spread of a disparity map. The gate is expressed relative to
+# How a prior's values order distance: `+1` when a larger value means *farther* and `-1` when it
+# means *nearer*. A monocular prior is affine either to depth or to inverse depth, and this sign
+# is the entire difference between the two as far as an ordinal loss is concerned. It is named
+# per model rather than guessed, because guessing wrong trains against a mirrored scene while
+# leaving the loss curve smooth and plausible.
+FARTHER_SIGN = {"depth": 1.0, "disparity": -1.0}
+
+# Quantiles defining the robust spread of a prior map. The gate is expressed relative to
 # this so that it is invariant to the prior's arbitrary scale, exactly as the loss itself is --
 # which is what makes gate=0 vs gate>0 a comparison of the gate rather than of the prior's units.
 _IQR_QUANTILES = (0.25, 0.75)
@@ -72,16 +85,16 @@ _IQR_QUANTILES = (0.25, 0.75)
 _MAX_QUANTILE_ELEMENTS = 1 << 23
 
 
-def disparity_scale(prior_disparity: torch.Tensor) -> torch.Tensor:
-    """Robust spread (inter-quartile range) of a disparity map, as a 0-dim tensor."""
-    flat = prior_disparity.reshape(-1)
+def prior_scale(prior: torch.Tensor) -> torch.Tensor:
+    """Robust spread (inter-quartile range) of a prior map, as a 0-dim tensor."""
+    flat = prior.reshape(-1)
     finite = flat[torch.isfinite(flat)]
     if finite.numel() == 0:
-        return prior_disparity.new_zeros(())
+        return prior.new_zeros(())
     if finite.numel() > _MAX_QUANTILE_ELEMENTS:
         finite = finite[:: (finite.numel() // _MAX_QUANTILE_ELEMENTS) + 1]
     quantiles = torch.quantile(finite.float(), torch.tensor(_IQR_QUANTILES, device=finite.device))
-    return (quantiles[1] - quantiles[0]).to(prior_disparity.dtype)
+    return (quantiles[1] - quantiles[0]).to(prior.dtype)
 
 
 def sample_pair_offset(height: int, width: int, shift_fraction: float, rng: Optional[random.Random] = None):
@@ -115,8 +128,10 @@ def _shifted_views(tensor: torch.Tensor, dy: int, dx: int):
 def compute_pseudo_depth_order_loss(
     pred_dist: torch.Tensor,
     pred_opacity: torch.Tensor,
-    prior_disparity: torch.Tensor,
+    prior: torch.Tensor,
     scene_extent: float,
+    *,
+    quantity: str,
     shift_fraction: float = 0.05,
     gate: float = 0.0,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
@@ -124,16 +139,21 @@ def compute_pseudo_depth_order_loss(
 ) -> torch.Tensor:
     """Penalise pixel pairs the render orders opposite to the prior.
 
-    `pred_dist` and `pred_opacity` are the tracer's [B, H, W, 1] buffers; `prior_disparity` is
-    the cached prior as [B, H, W, 1], **disparity** (larger means nearer), which is what
-    `PseudoDepthCache` stores.
+    `pred_dist` and `pred_opacity` are the tracer's [B, H, W, 1] buffers; `prior` is the cached
+    prior as [B, H, W, 1], in whichever quantity the model that produced it emits.
+
+    `quantity` is `"disparity"` (larger means nearer) or `"depth"` (larger means farther) and has
+    no default: the two priors in use here disagree on it, and reading one as the other is a
+    silent failure rather than a loud one. `PseudoDepthCache.quantity` reports what was stored.
 
     Returns a 0-dim tensor: the mean over surviving pairs of the rendered depth gap, in units of
     `scene_extent`, on pairs whose order disagrees with the prior. Zero when no pair survives.
     """
-    if prior_disparity.shape[:-1] != pred_dist.shape[:-1]:
+    if quantity not in FARTHER_SIGN:
+        raise ValueError(f"unknown prior quantity {quantity!r}; expected one of {sorted(FARTHER_SIGN)}")
+    if prior.shape[:-1] != pred_dist.shape[:-1]:
         raise ValueError(
-            f"pseudo-depth prior {tuple(prior_disparity.shape)} does not match the rendered "
+            f"pseudo-depth prior {tuple(prior.shape)} does not match the rendered "
             f"buffers {tuple(pred_dist.shape)}; it must be resampled to the training resolution"
         )
     if scene_extent <= 0:
@@ -144,18 +164,17 @@ def compute_pseudo_depth_order_loss(
     dy, dx = sample_pair_offset(height, width, shift_fraction, rng)
 
     depth_base, depth_shifted = _shifted_views(depth, dy, dx)
-    prior_base, prior_shifted = _shifted_views(prior_disparity, dy, dx)
+    prior_base, prior_shifted = _shifted_views(prior, dy, dx)
     confident_base, confident_shifted = _shifted_views(confident, dy, dx)
 
-    # Disparity is affine to *inverse* depth, so it decreases with distance: the prior's depth
-    # ordering is the negated disparity ordering. Getting this backwards trains against a
-    # mirrored scene while still producing a smooth, plausible-looking loss curve.
+    # A disparity prior is affine to *inverse* depth and so decreases with distance, where a
+    # depth prior increases with it; `FARTHER_SIGN` turns both into the same depth ordering.
     prior_delta = prior_base - prior_shifted
-    prior_order = -torch.sign(prior_delta)
+    prior_order = FARTHER_SIGN[quantity] * torch.sign(prior_delta)
 
     # A pair whose prior difference is within the noise carries no ordering information; see the
     # module docstring for what including them costs.
-    threshold = gate * disparity_scale(prior_disparity)
+    threshold = gate * prior_scale(prior)
     keep = (
         confident_base
         & confident_shifted

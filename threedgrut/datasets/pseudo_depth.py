@@ -21,21 +21,30 @@ for evaluation -- see `dataset.load_depth_gt`, which the training split does not
 
 Three properties of these priors shape the design:
 
-* **The output is disparity, not depth.** Depth Anything predicts a quantity that is affine to
-  *inverse* depth, so it is monotonically *decreasing* in depth. Consumers must not read it as
-  a distance. Measured on sponza, an affine fit to `1/z` reaches R^2 0.96 where a fit to `z`
-  reaches only 0.82, so treating it as depth loses real accuracy while looking plausible.
+* **Whether the output is disparity or depth depends on the model.** Depth Anything V2 predicts
+  a quantity affine to *inverse* depth, monotonically *decreasing* in distance; Depth Anything
+  3's monocular model predicts depth directly, increasing in distance. Measured on sponza frame
+  0, DAv2 correlates +0.977 with `1/z` and -0.907 with `z`, while DA3 correlates +0.986 with `z`.
+  Neither may be read as the other, so each backend declares its quantity, the cache records it,
+  and the ordinal loss requires it to be passed explicitly.
 * **Only the ordering is trustworthy at scene scale.** The prior's local structure is excellent
   and its global structure drifts: aligning one affine per frame gives `abs_rel` 0.068 against
   ground truth, worse than the model being trained (0.058), while a per-16x16-patch affine
-  reaches 0.011. Hence the cache stores the raw disparity and leaves it to the loss to be
+  reaches 0.011. Hence the cache stores the raw prediction and leaves it to the loss to be
   invariant to the unknown transform, rather than baking in a scale that is not reliable.
 * **Inference is far too slow to repeat.** The prediction depends only on the image and the
   model, so it is computed once and cached on disk.
 
-The cache directory embeds the model identity, so switching `dataset.pseudo_depth.model` cannot
-silently reuse another model's predictions -- the failure this would otherwise cause (training
-against the wrong prior) is invisible in the loss curve.
+The cache directory embeds the full identity -- backend, model id, quantity and format version --
+so switching `dataset.pseudo_depth.model` or its backend cannot silently reuse another model's
+predictions. The failure this would otherwise cause (training against the wrong prior, or against
+the right one with the sign inverted) is invisible in the loss curve.
+
+Two backends are available. `transformers` covers any Depth Anything V2 checkpoint through
+`AutoModelForDepthEstimation` and is the default because it is Apache-2.0. `depth_anything_3`
+runs Depth Anything 3, whose published weights are CC BY-NC 4.0 and therefore usable for
+research measurement but not as a shipped default; it also needs the upstream package importable,
+which is why it is imported lazily and only on a cache miss.
 """
 
 from __future__ import annotations
@@ -59,12 +68,16 @@ CACHE_FORMAT_VERSION = 1
 
 
 @dataclass
-class PseudoDepthPredictor:
-    """Lazily-loaded monocular depth model. Returns **disparity** at the model's native size.
+class TransformersPredictor:
+    """Depth Anything V2 (or any `AutoModelForDepthEstimation`) via `transformers`.
+
+    Emits **disparity**: larger is nearer.
 
     The model is only instantiated on the first cache miss, so a run whose cache is already
     complete never pays for loading it (or for having `transformers` importable at all).
     """
+
+    QUANTITY = "disparity"
 
     model_id: str
     device: str = "cuda"
@@ -86,12 +99,7 @@ class PseudoDepthPredictor:
         self._model = AutoModelForDepthEstimation.from_pretrained(self.model_id).to(self.device).eval()
 
     @torch.no_grad()
-    def predict_disparity(self, image: np.ndarray) -> np.ndarray:
-        """Disparity for an HWC uint8 RGB image, at the model's native output resolution.
-
-        Kept at native resolution because that is exactly what the model produced; resampling to
-        the training resolution is the consumer's business and costs nothing to redo.
-        """
+    def predict(self, image: np.ndarray) -> np.ndarray:
         self._ensure_loaded()
         inputs = self._processor(images=image, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -99,8 +107,63 @@ class PseudoDepthPredictor:
         return disparity.squeeze(0).float().cpu().numpy()
 
 
-def _cache_identity(model_id: str) -> dict:
-    return {"model_id": model_id, "format_version": CACHE_FORMAT_VERSION, "quantity": "disparity"}
+@dataclass
+class DepthAnything3Predictor:
+    """Depth Anything 3 through its own `depth_anything_3` package.
+
+    Emits **depth**: larger is farther. DA3 deliberately dropped the disparity parameterisation
+    its predecessors used, so this is the opposite convention to `TransformersPredictor` and the
+    two are not interchangeable.
+
+    Weights are CC BY-NC 4.0, so this backend is for measurement, not for shipping.
+    """
+
+    QUANTITY = "depth"
+
+    model_id: str
+    device: str = "cuda"
+    # Longest side the upstream preprocessing resizes to before enforcing a multiple of its patch
+    # size. `None` keeps DA3's own default, which is what a plain user of the model would get;
+    # raising it trades inference time for a prediction closer to the source resolution.
+    process_res: Optional[int] = None
+    _model: object = field(default=None, init=False, repr=False)
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from depth_anything_3.api import DepthAnything3
+        except ImportError as exc:  # pragma: no cover - depends on the environment
+            raise ImportError(
+                "The depth_anything_3 backend needs the upstream `depth_anything_3` package on "
+                "PYTHONPATH (https://github.com/ByteDance-Seed/Depth-Anything-3). Install it, or "
+                "point dataset.pseudo_depth.cache_dir at an already-populated cache."
+            ) from exc
+        logger.info(f"Loading pseudo-depth model {self.model_id}")
+        self._model = DepthAnything3.from_pretrained(self.model_id).to(self.device).eval()
+
+    @torch.no_grad()
+    def predict(self, image: np.ndarray) -> np.ndarray:
+        self._ensure_loaded()
+        # A single-image call is monocular inference: DA3 can consume several views at once, but
+        # doing so here would make a frame's prior depend on which frames it was batched with,
+        # and the cache is addressed per frame.
+        options = {} if self.process_res is None else {"process_res": self.process_res}
+        prediction = self._model.inference([image], **options)
+        return np.asarray(prediction.depth[0], dtype=np.float32)
+
+
+# Each backend fixes the quantity it emits, so a config cannot pair a model with the wrong one.
+BACKENDS = {"transformers": TransformersPredictor, "depth_anything_3": DepthAnything3Predictor}
+
+
+def _cache_identity(backend: str, model_id: str) -> dict:
+    return {
+        "backend": backend,
+        "model_id": model_id,
+        "format_version": CACHE_FORMAT_VERSION,
+        "quantity": BACKENDS[backend].QUANTITY,
+    }
 
 
 def _slugify(model_id: str) -> str:
@@ -116,14 +179,34 @@ class PseudoDepthCache:
     than read as if it were current.
     """
 
-    def __init__(self, scene_path: str, model_id: str, cache_dir: Optional[str] = None, device: str = "cuda"):
+    def __init__(
+        self,
+        scene_path: str,
+        model_id: str,
+        cache_dir: Optional[str] = None,
+        device: str = "cuda",
+        backend: str = "transformers",
+        **predictor_options,
+    ):
+        if backend not in BACKENDS:
+            raise ValueError(f"unknown pseudo-depth backend {backend!r}; expected one of {sorted(BACKENDS)}")
         self.model_id = model_id
-        identity = _cache_identity(model_id)
+        self.backend = backend
+        identity = _cache_identity(backend, model_id)
         digest = hashlib.sha1(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:8]
         root = Path(cache_dir) if cache_dir else Path(scene_path) / "pseudo_depth_cache"
         self.directory = root / f"{_slugify(model_id)}__{digest}"
         self._identity = identity
-        self._predictor = PseudoDepthPredictor(model_id=model_id, device=device)
+        self._predictor = BACKENDS[backend](model_id=model_id, device=device, **predictor_options)
+
+    @property
+    def quantity(self) -> str:
+        """`"disparity"` or `"depth"`, as the stored values are to be read.
+
+        Consumers must pass this to the loss rather than assume it; the two supported backends
+        disagree, and the disagreement is a sign error that no loss curve reveals.
+        """
+        return self._identity["quantity"]
 
     # -- identity ---------------------------------------------------------------------------
 
@@ -161,7 +244,7 @@ class PseudoDepthCache:
         logger.info(f"Building pseudo-depth cache for {len(missing)}/{len(image_paths)} frames in {self.directory}")
         for image_path in logger.track(missing, description="Pseudo-depth"):
             image = np.asarray(Image.open(image_path).convert("RGB"))
-            disparity = self._predictor.predict_disparity(image)
+            prediction = self._predictor.predict(image)
             # Write via a temporary file so an interrupted run cannot leave a truncated entry
             # that later looks like a valid cache hit.
             target = self.entry_path(image_path)
@@ -169,19 +252,19 @@ class PseudoDepthCache:
             # Written through an open handle rather than by path: `np.save` silently appends
             # `.npy` to a name that lacks it, which would leave the rename with nothing to move.
             with open(temporary, "wb") as handle:
-                np.save(handle, disparity.astype(np.float32))
+                np.save(handle, prediction.astype(np.float32))
             os.replace(temporary, target)
 
     # -- reading ----------------------------------------------------------------------------
 
     def load(self, image_path: str, height: int, width: int) -> np.ndarray:
-        """Disparity for one frame, resampled to `height` x `width`.
+        """The stored prior for one frame, in `self.quantity`, resampled to `height` x `width`.
 
         Bicubic, unlike ground-truth maps which must use nearest neighbour: this is a smooth
         prediction being brought back to full resolution, which is what the upstream model's own
         inference code does, and the alternative would quantise the ordering the loss reads.
         """
-        disparity = np.load(self.entry_path(image_path))
-        tensor = torch.from_numpy(disparity)[None, None].float()
+        prediction = np.load(self.entry_path(image_path))
+        tensor = torch.from_numpy(prediction)[None, None].float()
         resized = torch.nn.functional.interpolate(tensor, size=(height, width), mode="bicubic", align_corners=False)
         return np.ascontiguousarray(resized[0, 0].numpy())

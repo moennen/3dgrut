@@ -289,6 +289,42 @@ PSEUDO_DEPTH_VARIANTS: tuple[Variant, ...] = tuple(
     )
 )
 
+# The same ordinal term reading a Depth Anything 3 prior instead of Depth Anything V2.
+#
+# Measured over 3 seeds at 7k, this buys depth `abs_rel` -15.6% on sponza, -13.2% on lone-monk
+# and -16.0% on emerald-square, against -12.9% / -13.3% / -5.3% for the DAv2 prior: a tie on two
+# scenes and a 3x gain on the third, with less of the PSNR cost (-0.60 dB vs -0.96 dB on
+# emerald). DA3's accuracy gain is concentrated in *global* composition -- one affine per frame,
+# `abs_rel` 0.085 vs 0.123 on emerald -- and nearly gone per 16x16 patch, and emerald is the
+# scene with the widest depth range, which is the best available reading of why it wins there.
+#
+# It is not that DA3 supplies more of what the term consumes. Its ordinal agreement barely
+# differs from DAv2's on emerald (86.7% vs 86.1%) where the training gain is largest, and
+# differs most on sponza (84.7% vs 82.0%) where the gain is smallest -- the wrong way round. A
+# prediction to the contrary is recorded and corrected in `docs/normal-supervision.md`.
+#
+# Held at lambda 0.1, the weight the DAv2 prior measured best at, so that this compares priors
+# and not weights; if DA3 shifts the optimum that is a separate sweep. Note the weights are
+# CC BY-NC 4.0, so a win here cannot simply become the default.
+PSEUDO_DEPTH_DA3_OVERRIDES = (
+    "dataset.pseudo_depth.backend=depth_anything_3",
+    "dataset.pseudo_depth.model=depth-anything/DA3MONO-LARGE",
+)
+
+PSEUDO_DEPTH_DA3_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"pd01da3_{primitive_name}",
+        (
+            f"render.primitive_type={primitive}",
+            "loss.use_pseudo_depth_order=true",
+            "loss.lambda_pseudo_depth_order=0.1",
+        )
+        + PSEUDO_DEPTH_DA3_OVERRIDES,
+        f"Ordinal pseudo-depth at lambda=0.1 on {primitive_name}, from a Depth Anything 3 prior.",
+    )
+    for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
+)
+
 # The pairing the ordinal term exists to test: an anchor for the relative depth-variance term.
 #
 # Swept at both terms' own optima and at the over-weighted pair, because the first attempt at
@@ -324,6 +360,7 @@ ALL_VARIANTS: tuple[Variant, ...] = (
     + FLATNESS_VARIANTS
     + DEPTH_VARIANCE_VARIANTS
     + PSEUDO_DEPTH_VARIANTS
+    + PSEUDO_DEPTH_DA3_VARIANTS
     + PSEUDO_DEPTH_VARIANCE_VARIANTS
     + DEPTH_VARIANCE_RELATIVE_VARIANTS
 )

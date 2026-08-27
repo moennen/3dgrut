@@ -263,6 +263,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             model_id=self.pseudo_depth_config["model"],
             cache_dir=self.pseudo_depth_config.get("cache_dir"),
             device=self.device,
+            backend=self.pseudo_depth_config.get("backend", "transformers"),
         )
         cache.ensure(self.image_paths)
         self.pseudo_depth_cache = cache
@@ -803,8 +804,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             output_dict["normal_gt"] = torch.from_numpy(self._load_normal_gt(idx, actual_h, actual_w)).unsqueeze(0)
 
         if self.pseudo_depth_available:
-            disparity = self.pseudo_depth_cache.load(self.image_paths[idx], actual_h, actual_w)
-            output_dict["pseudo_disparity"] = torch.from_numpy(disparity)[None, ..., None]
+            prior = self.pseudo_depth_cache.load(self.image_paths[idx], actual_h, actual_w)
+            output_dict["pseudo_depth_prior"] = torch.from_numpy(prior)[None, ..., None]
 
         # Add EXIF exposure if available for this frame
         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
@@ -859,7 +860,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = (mask > 0.5).to(torch.float32)
             sample["mask"] = mask
 
-        for key in ("depth_gt", "normal_gt", "pseudo_disparity"):
+        for key in ("depth_gt", "normal_gt", "pseudo_depth_prior"):
             if key in batch:
                 sample[key] = batch[key][0].to(self.device, non_blocking=True)
 

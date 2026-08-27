@@ -78,6 +78,7 @@ def _pseudo_depth_config(config) -> dict:
     wanted = bool(config.loss.get("use_pseudo_depth_order", False))
     return {
         "enabled": bool(settings.get("enabled", False)) or wanted,
+        "backend": settings.get("backend", "transformers"),
         "model": settings.get("model", None),
         "cache_dir": settings.get("cache_dir", None),
     }

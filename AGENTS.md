@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~9 min, currently 387 passed, 1 skipped
+# ~13 min, currently 398 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -73,6 +73,36 @@ the qualitative panels from checkpoints, which needs a GPU and the run directori
   emerald-square, but its mean RGB error against the reference is *worse* (4.28 -> 4.80, closer
   on only 41% of pixels), so the PSNR cost is a real regression rather than a metric artefact.
   `make_figures.py --fig-root` prints that breakdown.
+
+## Pseudo-depth priors
+
+Two backends, selected by `dataset.pseudo_depth.backend`. They emit **different quantities**, so
+`compute_pseudo_depth_order_loss` takes a required `quantity` with no default, each backend
+declares its own, and the quantity is part of the on-disk cache identity:
+
+| backend | model | quantity | licence |
+| --- | --- | --- | --- |
+| `transformers` (default) | `depth-anything/Depth-Anything-V2-Base-hf` | disparity, larger = **nearer** | Apache-2.0 |
+| `depth_anything_3` | `depth-anything/DA3MONO-LARGE` | z-depth, larger = **farther** | CC BY-NC 4.0 |
+
+DA3 is non-commercial, so it must stay opt-in; a test pins the default. It is not installed in
+the venv -- it needs its source tree and a side directory of extra deps on `PYTHONPATH`, kept off
+the venv so its pins cannot disturb 3dgrut's:
+
+```bash
+PYTHONPATH=/mnt/oss/Depth-Anything-3/src:/mnt/oss/da3deps CUDA_VISIBLE_DEVICES=0 .venv/bin/python ...
+```
+
+Prebuild the cache before a multi-GPU sweep, or parallel cells race to write it (~5s/scene for
+100 frames). Compare priors with `scripts/ablation/pseudo_depth_diagnostic.py --backend ...`,
+which drives the same backend classes training uses.
+
+**Offline pseudo-depth metrics have mispredicted training twice.** The prior-gap gate looked
+compelling offline (ordinal agreement 84% to 97%) and cost emerald-square its whole depth gain;
+ordinal agreement with ground truth -- the quantity the loss provably consumes, and the only
+thing it consumes -- is *anti*-correlated with which prior trains better across three scenes.
+Do not accept an offline prior metric as a proxy for the trained outcome; run the ablation.
+Details in `docs/normal-supervision.md`.
 
 ## Conventions
 

@@ -813,7 +813,7 @@ class Trainer3DGRUT:
             and not self._in_color_refine
             and self.global_step >= self.conf.loss.pseudo_depth_from_iter
         ):
-            prior = getattr(gpu_batch, "pseudo_disparity", None)
+            prior = getattr(gpu_batch, "pseudo_depth_prior", None)
             if prior is None or prior.numel() == 0:
                 # The prior is absent whenever the dataset did not build a cache, which would
                 # otherwise leave this term silently at zero for the whole run.
@@ -822,12 +822,22 @@ class Trainer3DGRUT:
                     "prior. The training split must be built with dataset.pseudo_depth.enabled, "
                     "which only the colmap dataset supports."
                 )
+            # Taken from the cache that produced the prior rather than assumed: Depth Anything V2
+            # emits disparity and Depth Anything 3 emits depth, and reading one as the other
+            # silently trains against a mirrored scene.
+            cache = getattr(self.train_dataset, "pseudo_depth_cache", None)
+            if cache is None:
+                raise ValueError(
+                    "loss.use_pseudo_depth_order is set but the training dataset exposes no "
+                    "pseudo-depth cache, so the prior's quantity (disparity or depth) is unknown."
+                )
             with torch.cuda.nvtx.range(f"loss-pseudo-depth-order"):
                 loss_pseudo_depth = compute_pseudo_depth_order_loss(
                     outputs["pred_dist"],
                     outputs["pred_opacity"],
                     prior,
                     self.model.scene_extent,
+                    quantity=cache.quantity,
                     shift_fraction=self.conf.loss.pseudo_depth_shift_fraction,
                     gate=self.conf.loss.pseudo_depth_gate,
                     rng=self._pseudo_depth_rng,

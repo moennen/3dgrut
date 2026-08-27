@@ -922,6 +922,78 @@ Cost: 0.5 dB PSNR on sponza, 0.2 on lone-monk, 0.9 on emerald-square — the lar
 bill of any combination measured here, and the reason this is not a default. `pd1_gaussian_dn`,
 over-weighting the ordinal half, is worse on every axis except lone-monk depth.
 
+#### Swapping the prior: Depth Anything 3, and a prediction that was wrong twice over
+
+The ordinal term is prior-agnostic by construction — it reads only the sign of a pixel-pair
+difference — so the obvious question is what a better prior buys. Depth Anything 3 (Nov 2025)
+is the natural candidate, and its monocular model `DA3MONO-LARGE` is the like-for-like swap for
+`Depth-Anything-V2-Base-hf`.
+
+**The prediction, and the first thing wrong with it.** I expected close to a null, reasoning
+that the loss discards everything except the ordering, so a prior that is more *accurate* need
+not be better *ordered*. The reasoning is sound and the conclusion was wrong: measured over 3
+seeds at 7k on the trisurfel baseline, depth `abs_rel` against baseline is
+
+| Prior | sponza | lone-monk | emerald-square | PSNR cost (emerald) |
+| --- | --- | --- | --- | --- |
+| DAv2-Base (disparity) | −12.9% | −13.3% | −5.3% | −0.96 dB |
+| DA3Mono-Large (depth) | **−15.6%** | −13.2% | **−16.0%** | **−0.60 dB** |
+
+A tie on lone-monk, a marginal win on sponza (2.7 points, against a per-seed spread of ~2.8% of
+the mean — one noise unit, so not on its own a result), and a **3x larger gain on
+emerald-square** for *less* photometric cost. `delta1` agrees: +6.8% against +4.1% on emerald.
+The swap is real, and it is concentrated in one scene.
+
+**The second thing wrong with it.** Having been wrong about the direction, I predicted the
+mechanism: DA3 must be feeding the term more of what it consumes. That is measurable, so
+`scripts/ablation/pseudo_depth_diagnostic.py` now measures it — ordinal agreement with ground
+truth over pixel pairs drawn from the same distribution the loss draws from, on the raw
+unaligned prior:
+
+| Scene | model itself | DAv2 | DA3 | where the model is wrong: DAv2 → DA3 | trained gain, DAv2 → DA3 |
+| --- | --- | --- | --- | --- | --- |
+| sponza | 81.9% | 82.0% | 84.7% | 55.3% → 60.5% (+5.2) | −12.9% → −15.6% (+2.7) |
+| lone-monk | 71.0% | 80.7% | 82.5% | 70.4% → 73.3% (+2.9) | −13.3% → −13.2% (−0.1) |
+| emerald-square | 71.1% | 86.1% | 86.7% | 76.4% → 78.1% (+1.7) | −5.3% → −16.0% (**+10.7**) |
+
+This **refutes the mechanism**, and in the most useful way: the ordering is exactly reversed.
+Emerald-square, where the trained gain improves by 10.7 points, is where DA3's ordinal advantage
+is *smallest*; sponza, where it is largest, gains 2.7. Restricting to the pairs the model
+actually gets wrong — the targeted version, since a prior can only move training there — does
+not rescue it; it is anti-correlated too. The quantity the loss provably consumes does not
+predict the loss's outcome.
+
+What does line up, across three points and therefore weakly, is accuracy under a *single* affine
+per frame:
+
+| Scene | DAv2 global `abs_rel` | DA3 | change | trained gain change |
+| --- | --- | --- | --- | --- |
+| sponza | 0.0646 | 0.0511 | −20.9% | +2.7 |
+| lone-monk | 0.0433 | 0.0365 | −15.7% | −0.1 |
+| emerald-square | 0.1228 | 0.0854 | **−30.5%** | **+10.7** |
+
+Monotone, and it has a plainer reading than any mechanism about the loss: the DA3 win is largest
+where **DAv2 was worst**. On emerald-square, the widest-depth-range scene of the three, the DAv2
+prior's globally-aligned error (0.123) is barely better than the model it is meant to correct;
+it had little to give, and its 5.3% is the outlier needing explanation rather than DA3's 16%.
+Per patch the two priors nearly converge (16x16: 0.0357 vs 0.0311 on emerald), so what DA3
+improves is global *composition*, not local detail — consistent with its architecture, and with
+the fact that the scene with the widest depth range is where composition matters.
+
+The honest summary is that the diagnostic's offline numbers described the priors correctly and
+predicted the training outcome only in the metric nobody would have picked *a priori*. This is
+the second time in this document an offline pseudo-depth metric has led the wrong way — the gate
+was the first — so the diagnostic's docstring now says so rather than presenting the agreement
+as a proxy. Run the ablation.
+
+**Not a default, for a non-technical reason.** DA3's weights are CC BY-NC 4.0. The backend is
+opt-in (`dataset.pseudo_depth.backend=depth_anything_3`), the `transformers`/DAv2 default is
+pinned by a test, and the measurement above is a research result rather than a recommendation to
+ship. The two conventions are handled explicitly: DAv2 emits disparity (larger = nearer), DA3
+emits z-depth (larger = farther), so `compute_pseudo_depth_order_loss` takes a required
+`quantity` argument with no default, each backend declares its own, and the quantity is part of
+the on-disk cache identity so the two can never be confused for one another.
+
 ### 5. Multi-view consistency
 
 Nothing landed. The most expensive item and the one most likely to be cut: it needs
@@ -1101,7 +1173,7 @@ compiles Slang in a subprocess that resolves `slangc` from `PATH`, and without i
 fails with a `FileNotFoundError` unrelated to anything it is testing.
 
 ```bash
-# Full suite (~9 min): 387 passed, 1 skipped
+# Full suite (~13 min): 398 passed, 1 skipped
 python -m pytest threedgrut threedgut_tracer threedgrt_tracer scripts -q
 
 # The normal-specific tests

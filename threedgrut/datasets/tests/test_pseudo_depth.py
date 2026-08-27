@@ -11,12 +11,16 @@ so the identity checks below matter more than the arithmetic.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from threedgrut.datasets.pseudo_depth import CACHE_FORMAT_VERSION, PseudoDepthCache
+from threedgrut.datasets.pseudo_depth import BACKENDS, CACHE_FORMAT_VERSION, PseudoDepthCache
+from threedgrut.utils.pseudo_depth_loss import FARTHER_SIGN
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 class _StubPredictor:
@@ -26,7 +30,7 @@ class _StubPredictor:
         self.calls: list[str] = []
         self._height, self._width = height, width
 
-    def predict_disparity(self, image: np.ndarray) -> np.ndarray:
+    def predict(self, image: np.ndarray) -> np.ndarray:
         self.calls.append(str(image.shape))
         ramp = np.linspace(0.0, 1.0, self._width, dtype=np.float32)
         return np.tile(ramp, (self._height, 1))
@@ -92,6 +96,7 @@ def test_meta_records_the_identity(tmp_path):
     cache.ensure(_scene(tmp_path, count=1))
     meta = json.loads((cache.directory / "meta.json").read_text())
     assert meta == {
+        "backend": "transformers",
         "model_id": "vendor/model-Base-hf",
         "format_version": CACHE_FORMAT_VERSION,
         "quantity": "disparity",
@@ -151,6 +156,40 @@ def test_explicit_cache_dir_is_honoured(tmp_path):
     assert elsewhere in cache.directory.parents
 
 
+class TestBackends:
+    """Each backend owns the convention it emits, so a config cannot pair the two wrongly."""
+
+    def test_the_two_backends_disagree_about_the_quantity(self):
+        """This is the point of the abstraction: DAv2 emits disparity, DA3 emits depth."""
+        assert BACKENDS["transformers"].QUANTITY == "disparity"
+        assert BACKENDS["depth_anything_3"].QUANTITY == "depth"
+
+    def test_every_quantity_is_one_the_loss_understands(self):
+        """A backend naming a quantity the loss has no sign for would fail only at train time."""
+        assert {b.QUANTITY for b in BACKENDS.values()} <= set(FARTHER_SIGN)
+
+    def test_cache_reports_the_backends_quantity(self, tmp_path):
+        assert _cache(tmp_path).quantity == "disparity"
+        assert _cache(tmp_path, backend="depth_anything_3").quantity == "depth"
+
+    def test_switching_backend_cannot_reuse_the_other_cache(self, tmp_path):
+        """Same model id, different backend: the predictions are not interchangeable."""
+        transformers = _cache(tmp_path, backend="transformers")
+        da3 = _cache(tmp_path, backend="depth_anything_3")
+        assert transformers.directory != da3.directory
+
+    def test_unknown_backend_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown pseudo-depth backend"):
+            PseudoDepthCache(str(tmp_path), "vendor/model", device="cpu", backend="depth_anything_2")
+
+    def test_default_backend_is_the_permissively_licensed_one(self):
+        """DA3's weights are CC BY-NC 4.0, so it must never become the default by accident."""
+        from omegaconf import OmegaConf
+
+        config = OmegaConf.load(_REPO_ROOT / "configs" / "dataset" / "colmap.yaml")
+        assert config.pseudo_depth.backend == "transformers"
+
+
 class TestTrainingSplitOptIn:
     """The dataset-side flag is derived from the loss, so the two cannot disagree.
 
@@ -189,6 +228,18 @@ class TestTrainingSplitOptIn:
 
         resolved = _pseudo_depth_config(self._config(use_loss=True, model="vendor/other"))
         assert resolved["model"] == "vendor/other"
+
+    def test_backend_choice_is_carried_through(self):
+        from threedgrut.datasets import _pseudo_depth_config
+
+        config = self._config(use_loss=True)
+        config.dataset.pseudo_depth.backend = "depth_anything_3"
+        assert _pseudo_depth_config(config)["backend"] == "depth_anything_3"
+
+    def test_backend_defaults_when_a_scene_config_predates_the_option(self):
+        from threedgrut.datasets import _pseudo_depth_config
+
+        assert _pseudo_depth_config(self._config(use_loss=True))["backend"] == "transformers"
 
     def test_dataset_without_a_pseudo_depth_section_is_tolerated(self):
         """Only the colmap dataset defines it; the others must not break."""

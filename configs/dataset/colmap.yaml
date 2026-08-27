@@ -20,8 +20,18 @@ pseudo_depth:
   # Enabled by the loss, not here: this only says where the prior comes from. Set by the
   # trainer, which turns it on for the training split when the loss needs it.
   enabled: false
-  # HuggingFace id of the depth model. The cache directory embeds this, so changing it cannot
-  # silently reuse the previous model's predictions. Note the output is *disparity*.
+  # Which inference stack loads the model, and with it *what the prediction means*:
+  #   transformers      - Depth Anything V2 via AutoModelForDepthEstimation. Emits disparity
+  #                       (larger is nearer). Apache-2.0, hence the default.
+  #   depth_anything_3  - Depth Anything 3 via the upstream `depth_anything_3` package, which
+  #                       must be importable. Emits *depth* (larger is farther), the opposite
+  #                       convention. Its weights are CC BY-NC 4.0, so it is for measurement
+  #                       rather than for shipping.
+  # The backend fixes the quantity, so no config can pair a model with the wrong sign.
+  backend: transformers
+  # Model id for that backend. The cache directory embeds the backend, this id and the resulting
+  # quantity, so changing any of them cannot silently reuse the previous model's predictions.
+  # For depth_anything_3, use e.g. depth-anything/DA3MONO-LARGE.
   model: depth-anything/Depth-Anything-V2-Base-hf
   # Where to keep predictions. null puts them under <path>/pseudo_depth_cache, which needs the
   # scene directory to be writable; point this elsewhere for a read-only dataset.
