@@ -986,10 +986,22 @@ the second time in this document an offline pseudo-depth metric has led the wron
 was the first — so the diagnostic's docstring now says so rather than presenting the agreement
 as a proxy. Run the ablation.
 
-**Not a default, for a non-technical reason.** DA3's weights are CC BY-NC 4.0. The backend is
-opt-in (`dataset.pseudo_depth.backend=depth_anything_3`), the `transformers`/DAv2 default is
-pinned by a test, and the measurement above is a research result rather than a recommendation to
-ship. The two conventions are handled explicitly: DAv2 emits disparity (larger = nearer), DA3
+**Which model, and a licence claim I got wrong.** `DA3MONO-LARGE` is the largest published
+*monocular* DA3 checkpoint; there is no mono GIANT, so this is the top of that family rather than
+a mid-size pick. Bigger DA3 models exist only in the **any-view** family — `DA3-GIANT` (1.15B)
+and `DA3NESTED-GIANT-LARGE` (1.40B) against 0.35B here — and using one means moving to the
+pose-conditioned path, not merely scaling up this one.
+
+I first recorded these weights as CC BY-NC 4.0 and said that alone kept them out of the default.
+That is wrong, and the commit that landed this repeats it: CC BY-NC 4.0 covers the any-view
+checkpoints from `DA3-LARGE` up, which is what I had downloaded for the pose-conditioned work,
+while `DA3MONO-LARGE` and `DA3METRIC-LARGE` are **Apache-2.0**, same as DAv2. So nothing but the
+`PYTHONPATH` requirement stands between the result above and promoting it — worth knowing, given
+it is the better prior on two scenes of three.
+
+The backend stays opt-in (`dataset.pseudo_depth.backend=depth_anything_3`) with the DAv2 default
+pinned by a test, on availability grounds: `transformers` installs with the venv and DA3 needs a
+source checkout. The two conventions are handled explicitly: DAv2 emits disparity (larger = nearer), DA3
 emits z-depth (larger = farther), so `compute_pseudo_depth_order_loss` takes a required
 `quantity` argument with no default, each backend declares its own, and the quantity is part of
 the on-disk cache identity so the two can never be confused for one another.

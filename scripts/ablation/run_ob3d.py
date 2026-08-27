@@ -304,8 +304,9 @@ PSEUDO_DEPTH_VARIANTS: tuple[Variant, ...] = tuple(
 # prediction to the contrary is recorded and corrected in `docs/normal-supervision.md`.
 #
 # Held at lambda 0.1, the weight the DAv2 prior measured best at, so that this compares priors
-# and not weights; if DA3 shifts the optimum that is a separate sweep. Note the weights are
-# CC BY-NC 4.0, so a win here cannot simply become the default.
+# and not weights; if DA3 shifts the optimum that is a separate sweep. DA3MONO-LARGE is the
+# largest monocular DA3 checkpoint and is Apache-2.0, so nothing but the PYTHONPATH requirement
+# stands between this result and making it the default.
 PSEUDO_DEPTH_DA3_OVERRIDES = (
     "dataset.pseudo_depth.backend=depth_anything_3",
     "dataset.pseudo_depth.model=depth-anything/DA3MONO-LARGE",

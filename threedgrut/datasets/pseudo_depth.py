@@ -41,10 +41,13 @@ predictions. The failure this would otherwise cause (training against the wrong 
 the right one with the sign inverted) is invisible in the loss curve.
 
 Two backends are available. `transformers` covers any Depth Anything V2 checkpoint through
-`AutoModelForDepthEstimation` and is the default because it is Apache-2.0. `depth_anything_3`
-runs Depth Anything 3, whose published weights are CC BY-NC 4.0 and therefore usable for
-research measurement but not as a shipped default; it also needs the upstream package importable,
-which is why it is imported lazily and only on a cache miss.
+`AutoModelForDepthEstimation`. `depth_anything_3` runs Depth Anything 3, which needs the upstream
+package importable and so is imported lazily, only on a cache miss.
+
+`transformers` remains the default for availability rather than quality: it installs with the
+venv, where DA3 needs a source checkout on `PYTHONPATH`. Licence is not the reason -- DA3's
+*monocular* weights are Apache-2.0, like DAv2's. Only DA3's any-view checkpoints (`DA3-LARGE`
+and larger) are CC BY-NC 4.0, which would matter if the pose-conditioned path is taken up.
 """
 
 from __future__ import annotations
@@ -115,7 +118,9 @@ class DepthAnything3Predictor:
     its predecessors used, so this is the opposite convention to `TransformersPredictor` and the
     two are not interchangeable.
 
-    Weights are CC BY-NC 4.0, so this backend is for measurement, not for shipping.
+    `DA3MONO-LARGE` is the largest published *monocular* DA3 checkpoint -- there is no mono
+    GIANT -- and is Apache-2.0. The larger any-view models are CC BY-NC 4.0, so a switch to one
+    of those would be a licence change as well as a model change.
     """
 
     QUANTITY = "depth"

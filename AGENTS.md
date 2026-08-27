@@ -83,11 +83,13 @@ declares its own, and the quantity is part of the on-disk cache identity:
 | backend | model | quantity | licence |
 | --- | --- | --- | --- |
 | `transformers` (default) | `depth-anything/Depth-Anything-V2-Base-hf` | disparity, larger = **nearer** | Apache-2.0 |
-| `depth_anything_3` | `depth-anything/DA3MONO-LARGE` | z-depth, larger = **farther** | CC BY-NC 4.0 |
+| `depth_anything_3` | `depth-anything/DA3MONO-LARGE` | z-depth, larger = **farther** | Apache-2.0 |
 
-DA3 is non-commercial, so it must stay opt-in; a test pins the default. It is not installed in
-the venv -- it needs its source tree and a side directory of extra deps on `PYTHONPATH`, kept off
-the venv so its pins cannot disturb 3dgrut's:
+`transformers` is the default because it installs with the venv, *not* on licence grounds: DA3's
+monocular weights are Apache-2.0 like DAv2's, and only its any-view checkpoints (`DA3-LARGE` and
+up) are CC BY-NC 4.0. A test pins the default so the swap stays deliberate. DA3 is not in the
+venv -- it needs its source tree and a side directory of extra deps on `PYTHONPATH`, kept off the
+venv so its pins cannot disturb 3dgrut's:
 
 ```bash
 PYTHONPATH=/mnt/oss/Depth-Anything-3/src:/mnt/oss/da3deps CUDA_VISIBLE_DEVICES=0 .venv/bin/python ...

@@ -183,7 +183,7 @@ class TestBackends:
             PseudoDepthCache(str(tmp_path), "vendor/model", device="cpu", backend="depth_anything_2")
 
     def test_default_backend_is_the_permissively_licensed_one(self):
-        """DA3's weights are CC BY-NC 4.0, so it must never become the default by accident."""
+        """DA3 needs a source checkout on PYTHONPATH, so it must not become the default by accident."""
         from omegaconf import OmegaConf
 
         config = OmegaConf.load(_REPO_ROOT / "configs" / "dataset" / "colmap.yaml")
