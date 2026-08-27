@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~13 min, currently 398 passed, 1 skipped
+# ~10 min, currently 407 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -100,11 +100,29 @@ Prebuild the cache before a multi-GPU sweep, or parallel cells race to write it 
 which drives the same backend classes training uses.
 
 **Offline pseudo-depth metrics have mispredicted training twice.** The prior-gap gate looked
-compelling offline (ordinal agreement 84% to 97%) and cost emerald-square its whole depth gain;
-ordinal agreement with ground truth -- the quantity the loss provably consumes, and the only
-thing it consumes -- is *anti*-correlated with which prior trains better across three scenes.
-Do not accept an offline prior metric as a proxy for the trained outcome; run the ablation.
-Details in `docs/normal-supervision.md`.
+compelling offline (ordinal agreement 84% to 97%) and cost emerald-square its whole depth gain.
+Ordinal agreement with ground truth -- the quantity the loss provably consumes, and the only
+thing it consumes -- got the DAv2-to-DA3 swap's *sign* right on all three scenes but their
+*order* wrong: the scene gaining least agreement (emerald-square, +0.6pp) gained most depth
+(-11pp), while accuracy under one affine per frame, which the loss never sees, ordered all three
+correctly. Use an offline metric as a screen, not a proxy, and run the ablation. Details in
+`docs/normal-supervision.md`.
+
+**Report a prior's accuracy at several alignment freedoms, not just the affine.** The diagnostic
+walks no fit / one scale / affine per frame / affine per patch, and the rungs disagree about
+which prior is better. DAv2 and DA3MONO are 0.065 vs 0.051 under one affine but 0.45 vs 0.12
+under one scale -- a disparity prior needs its shift term to be usable at all, a depth prior does
+not -- so a single-affine number conceals a 4x gap at the granularity a sparse-point alignment
+would actually run at. Two rungs to read with care: the unfitted one measures the arbitrary
+COLMAP scale rather than the prior, so it cannot rank relative priors; and by 16x16 patches every
+prior converges, so local structure does not discriminate either.
+
+**A prior can be worse than the model it would teach, and the diagnostic catches that.**
+`DA3-SMALL` orders sponza pixels correctly 71.7% of the time against the trained model's own
+81.9%. Screen a candidate prior against the checkpoint's own agreement before spending a sweep.
+DA3's any-view checkpoints also make *worse* monocular priors than `DA3MONO-LARGE` on every scene
+and rung -- one image is the case they cannot exploit -- so do not reach for a bigger any-view
+model expecting a better single-image prior.
 
 ## Conventions
 

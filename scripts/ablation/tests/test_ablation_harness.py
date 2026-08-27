@@ -12,10 +12,12 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from pseudo_depth_diagnostic import ALIGNMENTS, _align  # noqa: E402
 from report import UNMEASURED_WHEN_ZERO, mean, read_rows, summary_table  # noqa: E402
 from run_ob3d import BASELINE_VARIANTS, Cell, Variant, completed_keys, scene_dirs, tail_of  # noqa: E402
 
@@ -174,3 +176,59 @@ def test_tail_of_returns_the_end_of_the_log(tmp_path: Path) -> None:
     log = tmp_path / "run.log"
     log.write_text("\n".join(str(index) for index in range(100)))
     assert tail_of(log, lines=3) == "97\n98\n99"
+
+
+class TestPriorAlignment:
+    """The alignment ladder in `pseudo_depth_diagnostic`.
+
+    Each rung grants the prior one more degree of freedom, and the whole point of reporting
+    them side by side is that the gaps between them are attributable. A bug that quietly let
+    an offset into the scale-only row, or a fit into the raw row, would not crash -- it would
+    just make a scale-free prior look metric.
+    """
+
+    @staticmethod
+    def _grid():
+        rng = np.random.default_rng(0)
+        z = 2.0 + rng.random((48, 48)) * 8.0
+        return z, np.ones_like(z, dtype=bool)
+
+    @pytest.mark.parametrize("mode,patch", [(None, None), ("scale", None), ("affine", None), ("affine", 16)])
+    def test_an_exact_prior_survives_every_rung(self, mode, patch) -> None:
+        z, valid = self._grid()
+        out = _align(z.copy(), z, valid, mode, patch, trim=0.2, iters=3, invert=False)
+        assert np.nanmax(np.abs(out - z)) < 1e-9
+
+    def test_raw_does_not_fit_anything(self) -> None:
+        """Otherwise the row that exists to expose a missing scale would hide it."""
+        z, valid = self._grid()
+        out = _align(3.0 * z, z, valid, None, None, trim=0.2, iters=3, invert=False)
+        assert np.nanmean(out / z) == pytest.approx(3.0)
+
+    def test_scale_only_recovers_a_pure_scale_but_not_an_offset(self) -> None:
+        z, valid = self._grid()
+        scaled = _align(3.0 * z, z, valid, "scale", None, trim=0.2, iters=3, invert=False)
+        assert np.nanmax(np.abs(scaled - z)) < 1e-9
+        # An offset is exactly what this rung withholds, so it must *not* be absorbed.
+        offset = _align(2.0 * z + 5.0, z, valid, "scale", None, trim=0.2, iters=3, invert=False)
+        assert np.nanmax(np.abs(offset - z)) > 0.1
+        affine = _align(2.0 * z + 5.0, z, valid, "affine", None, trim=0.2, iters=3, invert=False)
+        assert np.nanmax(np.abs(affine - z)) < 1e-9
+
+    def test_inverting_a_disparity_prior_is_a_change_of_variable_not_a_fit(self) -> None:
+        """The raw row for a disparity prior reads 1/p as a distance, with nothing fitted."""
+        z, valid = self._grid()
+        out = _align(1.0 / z, 1.0 / z, valid, None, None, trim=0.2, iters=3, invert=True)
+        assert np.nanmax(np.abs(out - z)) < 1e-9
+
+    def test_unknown_mode_is_rejected(self) -> None:
+        z, valid = self._grid()
+        with pytest.raises(ValueError, match="unknown alignment mode"):
+            _align(z, z, valid, "quadratic", None, trim=0.2, iters=3, invert=False)
+
+    def test_the_ladder_is_ordered_from_least_to_most_freedom(self) -> None:
+        """`report` prints these in order, so a reader compares adjacent rungs."""
+        labels = [label for label, _, _ in ALIGNMENTS]
+        assert labels[:3] == ["raw (no fit)", "scale only", "affine, global"]
+        patches = [patch for _, mode, patch in ALIGNMENTS if mode == "affine" and patch]
+        assert patches == sorted(patches, reverse=True)

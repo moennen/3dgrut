@@ -999,6 +999,57 @@ while `DA3MONO-LARGE` and `DA3METRIC-LARGE` are **Apache-2.0**, same as DAv2. So
 `PYTHONPATH` requirement stands between the result above and promoting it — worth knowing, given
 it is the better prior on two scenes of three.
 
+**The rest of the family, and what alignment was hiding.** With the licence objection gone the
+question became which DA3 checkpoint to use, so I measured five priors against ground truth on
+all three scenes, and added two rungs below the affine fits the diagnostic had been reporting:
+no fit at all, and a single scale with no offset. Each prior is still fitted in its own quantity.
+`abs_rel`, lower better, from `scripts/ablation/pseudo_depth_diagnostic.py --json`:
+
+| prior | family | sponza: scale / affine / 16px | lone-monk | emerald-square |
+| --- | --- | --- | --- | --- |
+| DAv2-Base | mono | 0.4454 / 0.0646 / 0.0107 | 0.2488 / 0.0433 / 0.0121 | **2.1182** / 0.1228 / 0.0357 |
+| DA3MONO-LARGE | mono | 0.1182 / **0.0511** / **0.0103** | 0.0522 / **0.0365** / 0.0116 | 0.1293 / 0.0854 / **0.0311** |
+| DA3METRIC-LARGE | mono, metric | **0.0833** / 0.0649 / 0.0104 | 0.0457 / 0.0395 / **0.0115** | **0.0943** / **0.0811** / 0.0316 |
+| DA3-SMALL | any-view | 0.2536 / 0.2160 / 0.0157 | 0.0905 / 0.0911 / 0.0165 | 0.1938 / 0.1743 / 0.0462 |
+| DA3-LARGE | any-view | 0.1164 / 0.0967 / 0.0119 | 0.0424 / 0.0396 / 0.0128 | 0.1076 / 0.0976 / 0.0377 |
+| DA3-LARGE-1.1 | any-view | 0.1232 / 0.1008 / 0.0122 | **0.0421** / 0.0414 / 0.0130 | 0.1120 / 0.0972 / 0.0380 |
+
+Four things came out of it, one of which changes how the earlier numbers should be read.
+
+*The unfitted rung is not a measurement of the prior.* All the relative priors land at 0.84–1.01
+there, and that is just the arbitrary COLMAP scale: their outputs are normalised near 1 while
+ground-truth depths are tens of units. `DA3METRIC-LARGE`'s 0.39–0.55 says only that COLMAP's
+units happen to fall within about 2x of metres on these scenes. It is reported to show what the
+fit supplies, not to rank anything.
+
+*The affine was hiding a 4x gap.* Denied an offset, DAv2 costs 0.25–2.12 against DA3MONO's
+0.05–0.13, and on emerald-square DAv2 under one scale is **worse than no fit at all** — a
+disparity prior needs its shift term, a depth prior does not. Under one affine per frame the two
+look 0.065 vs 0.051, a 21% gap. Same two priors, same pixels; the extra parameter absorbs most
+of the difference. This matters beyond bookkeeping because a sparse-point alignment is the rung
+where a *regression* loss would live, and section 3's decision to abandon regression was taken on
+affine numbers alone. It does not overturn that decision — 0.05 is still worse than the 0.037
+model being taught — but the margin is not what it appeared to be, and a metric prior changes the
+shape of the problem.
+
+*Any-view checkpoints are worse monocular priors than the monocular one.* `DA3-LARGE` loses to
+`DA3MONO-LARGE` on every scene and every rung, and on sponza loses to DAv2 as well (0.0967 vs
+0.0646 under one affine). Handed a single image they cannot do the thing they exist for, so the
+comparison is fair but unflattering, and it says the pose-conditioned path has to be taken
+properly to be worth taking at all. `DA3-LARGE-1.1` is indistinguishable from `DA3-LARGE`.
+
+*A prior can be worse than the model it would teach.* `DA3-SMALL` orders sponza pixels correctly
+71.7% of the time against the trained model's own 81.9% — supervising with it would actively
+teach the model orderings it already gets right. Ordinal agreement failed to predict the *ranking*
+of the DA3 swap's gains, but it is still the check that catches a prior which should not be used
+at all, which is what it is now documented as: a screen, not a proxy.
+
+So `DA3MONO-LARGE` remains the right choice, now on evidence rather than by assumption, and
+`DA3METRIC-LARGE` is the one to try next: same size, Apache-2.0, best under scale-only alignment
+on two scenes, and it emits *metric* depth plus a sky mask. That is a cheaper route to direct
+depth supervision than the any-view path — no poses to plumb through, no cross-view batching, and
+the existing per-frame cache works unchanged.
+
 The backend stays opt-in (`dataset.pseudo_depth.backend=depth_anything_3`) with the DAv2 default
 pinned by a test, on availability grounds: `transformers` installs with the venv and DA3 needs a
 source checkout. The two conventions are handled explicitly: DAv2 emits disparity (larger = nearer), DA3

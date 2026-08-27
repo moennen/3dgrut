@@ -55,6 +55,47 @@ SCENE_COLOUR = {"sponza": "#4C72B0", "lone-monk": "#DD8452", "emerald-square": "
 PRIOR_ALIGNMENT = (("global\naffine", 0.0677), ("64x64\npatch", 0.0158), ("16x16\npatch", 0.0116))
 PRIOR_MODEL_REFERENCE = 0.0580
 
+# The prior-family diagnostic (`pseudo_depth_diagnostic.py --json`), read from disk rather than
+# transcribed. `PRIOR_ALIGNMENT` above stays hardcoded because it is measured against the
+# *gaussian* 7k checkpoint that Experiment 3 argued about, while this sweep uses the `trisurfel`
+# baselines the DA3 comparison was trained from; the two are not interchangeable.
+#
+# Order is the order plotted and tabulated: the training default first, then DA3's monocular
+# models, then its any-view models smallest-first.
+PRIOR_FAMILY = (
+    ("Depth-Anything-V2-Base-hf", "DAv2-Base", "#4C72B0", "mono"),
+    ("DA3MONO-LARGE", "DA3MONO-L", "#C44E52", "mono"),
+    ("DA3METRIC-LARGE", "DA3METRIC-L", "#8172B2", "mono, metric"),
+    ("DA3-SMALL", "DA3-SMALL", "#CCB974", "any-view"),
+    ("DA3-LARGE", "DA3-LARGE", "#55A868", "any-view"),
+    ("DA3-LARGE-1.1", "DA3-LARGE-1.1", "#64B5CD", "any-view"),
+)
+
+# The rungs of the alignment ladder, as `pseudo_depth_diagnostic.ALIGNMENTS` labels them, with
+# short names for axes. Kept in increasing order of freedom, which is the axis of the argument.
+PRIOR_RUNGS = (
+    ("raw (no fit)", "raw"),
+    ("scale only", "scale\nonly"),
+    ("affine, global", "affine\nglobal"),
+    ("affine, 64x64", "affine\n64x64"),
+    ("affine, 32x32", "affine\n32x32"),
+    ("affine, 16x16", "affine\n16x16"),
+)
+
+# Column headers for the rungs when tabulated, short enough to fit nine of them on a slide.
+_RUNG_HEADER = {
+    "raw (no fit)": "raw",
+    "scale only": "scale",
+    "affine, global": "affine",
+    "affine, 64x64": "64px",
+    "affine, 32x32": "32px",
+    "affine, 16x16": "16px",
+}
+
+# The DA3-vs-DAv2 ablation, all on the trisurfel primitive at lambda=0.1.
+DA3_REFERENCES = ("trisurfel",)
+DA3_VARIANTS = ("pd01_trisurfel", "pd01da3_trisurfel")
+
 # The first sweep named the gated variant `pd01_gaussian` and the ungated one `*_nogate`; the
 # default flipped afterwards. Records keep the original names, so resolve them here.
 UNGATED = "pd01_gaussian_nogate"
@@ -67,16 +108,47 @@ REFERENCES = ("gaussian", "trisurfel")
 
 
 def load(paths: list[Path]) -> dict[tuple[str, str], list[dict]]:
-    """All successful records, grouped by (variant, scene). Repeats are separate seeds."""
+    """All successful records, grouped by (variant, scene). Repeats are separate seeds.
+
+    A results file can contain a torn line: the sweep appends a record per cell, and an
+    interrupted or retried write leaves a fragment spliced onto the next record. One of these
+    was found in the DA3 sweep. Such a line is skipped -- but *loudly*, with a count, because
+    the failure it causes is a cell quietly averaging over fewer seeds than the caption claims,
+    and an error bar shrinking to zero on a single seed looks like a strong result.
+    """
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    skipped = 0
     for path in paths:
-        for line in path.read_text().splitlines():
+        for number, line in enumerate(path.read_text().splitlines(), 1):
             if not line.strip():
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                print(f"WARNING: {path}:{number} is not valid JSON, skipping ({error})")
+                skipped += 1
+                continue
             if record.get("status") == "ok":
                 grouped[(record["variant"], record["scene"])].append(record)
+    if skipped:
+        print(f"WARNING: skipped {skipped} unparseable record(s); check seed counts below")
     return grouped
+
+
+def report_seed_counts(grouped, variants: tuple[str, ...], label: str) -> None:
+    """Print the seed count behind every cell, and flag any that are uneven.
+
+    The deck quotes standard errors, which are only comparable across a row if the row has the
+    same n in every cell. This makes an uneven grid visible at build time instead of leaving it
+    to be inferred from a suspiciously tight error bar.
+    """
+    counts = {(variant, scene): len(grouped.get((variant, scene), [])) for variant in variants for scene in SCENES}
+    distinct = sorted(set(counts.values()))
+    print(f"{label}: seeds per cell {distinct}")
+    if len(distinct) > 1:
+        for (variant, scene), n in sorted(counts.items()):
+            if n != max(distinct):
+                print(f"  WARNING: {variant} / {scene} has {n} seed(s), not {max(distinct)}")
 
 
 def _stat(grouped, variant: str, scene: str, key: str) -> tuple[float, float] | None:
@@ -116,6 +188,177 @@ def fig_prior_alignment(out: Path) -> None:
     ax.set_ylim(0, max(values) * 1.25)
     ax.legend(fontsize=8, loc="upper right")
     _finish(fig, ax, out)
+
+
+def load_prior_diagnostics(directory: Path) -> dict[tuple[str, str], dict]:
+    """Diagnostic summaries keyed by (scene, short model name).
+
+    Read from `--json` output rather than transcribed into this file, because the ladder is 108
+    numbers and the earlier hardcoded three already cost one wrong claim in the deck.
+    """
+    summaries: dict[tuple[str, str], dict] = {}
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text())
+        summaries[(data["scene"], data["model_id"].split("/")[-1])] = data
+    return summaries
+
+
+def _rung(summary: dict, label: str, field: str = "abs_rel") -> float:
+    for row in summary["alignments"]:
+        if row["alignment"] == label:
+            return row[field]
+    raise KeyError(f"{summary['model_id']}: no alignment row {label!r}")
+
+
+def fig_prior_ladder(diag, out: Path) -> None:
+    """How much of each prior's accuracy is the prior, and how much is the fit.
+
+    Log scale, because the interesting span is a factor of 100 between the unfitted and the
+    finely fitted rung, and on a linear axis every prior collapses onto the same flat tail.
+    """
+    fig, axes = plt.subplots(1, len(SCENES), figsize=(11.0, 3.3), sharey=True)
+    x = np.arange(len(PRIOR_RUNGS))
+    for ax, scene in zip(axes, SCENES):
+        for model, label, colour, _ in PRIOR_FAMILY:
+            summary = diag.get((scene, model))
+            if summary is None:
+                continue
+            ax.plot(
+                x,
+                [_rung(summary, rung) for rung, _ in PRIOR_RUNGS],
+                marker="o",
+                ms=3.5,
+                lw=1.4,
+                color=colour,
+                label=label,
+            )
+        # The model the prior would be teaching. A prior above this line has nothing to offer at
+        # that alignment, whatever its ranking against the other priors. Every cell for a scene
+        # scores the same checkpoint, so any one of them carries this number.
+        reference = diag[(scene, "DA3-LARGE")]["model_abs_rel"]
+        ax.axhline(reference, color="k", ls="--", lw=1.1)
+        ax.text(len(x) - 1, reference * 1.12, "7k model taught", ha="right", va="bottom", fontsize=6.5)
+        ax.set_yscale("log")
+        ax.set_xticks(x)
+        ax.set_xticklabels([short for _, short in PRIOR_RUNGS], fontsize=6.5)
+        ax.set_title(scene, fontsize=9, color=SCENE_COLOUR[scene])
+        ax.grid(alpha=0.3, which="both", axis="y")
+    axes[0].set_ylabel("prior abs_rel vs GT")
+    axes[0].legend(fontsize=6, loc="lower left")
+    fig.suptitle("Prior accuracy against ground truth by alignment freedom (lower is better)", fontsize=10)
+    _finish(fig, list(axes), out)
+
+
+def fig_prior_ordinal(diag, out: Path) -> None:
+    """Ordinal agreement per prior, against the trained model's own agreement.
+
+    Separated from the abs_rel ladder because it is alignment-free and so has no ladder, and
+    because it is the quantity the shipped loss actually reads.
+    """
+    fig, ax = plt.subplots(figsize=(7.2, 3.0))
+    width = 0.13
+    base = np.arange(len(SCENES))
+    for index, (model, label, colour, _) in enumerate(PRIOR_FAMILY):
+        values = [100 * diag[(scene, model)]["ordinal"]["prior_agreement"] for scene in SCENES]
+        ax.bar(base + (index - 2.5) * width, values, width=width, color=colour, label=label)
+    for position, scene in zip(base, SCENES):
+        model_agreement = 100 * diag[(scene, "DA3-LARGE")]["ordinal"]["model_agreement"]
+        ax.plot(
+            [position - 3 * width, position + 3 * width],
+            [model_agreement] * 2,
+            color="k",
+            ls="--",
+            lw=1.2,
+            label="trained model" if position == 0 else None,
+        )
+    ax.set_xticks(base)
+    ax.set_xticklabels(SCENES)
+    ax.set_ylim(60, 92)
+    ax.set_ylabel("pair ordering agreement\nwith GT (%)")
+    ax.set_title("What the ordinal loss reads (higher is better)", fontsize=10)
+    ax.legend(fontsize=6, ncol=2, loc="upper left")
+    _finish(fig, ax, out)
+
+
+def fig_prior_offline_vs_trained(diag, grouped_da3, out: Path) -> None:
+    """The mechanism check: which offline number ranked the scenes the way training did.
+
+    Both axes are *changes* from swapping DAv2 for DA3MONO, one point per scene. That is the
+    comparison the question actually asks -- "would this diagnostic have told me where the swap
+    pays?" -- and it is not the same as the sign agreeing: measured per scene, the sign agrees
+    for both candidates, and only the ordering separates them.
+
+    Stated as ranks rather than a correlation coefficient, because with three scenes a
+    coefficient invites more confidence than three points can support.
+    """
+    panels = (
+        ("$\\Delta$ ordinal agreement (pp)", lambda s: 100 * s["ordinal"]["prior_agreement"], "%+.2f"),
+        ("$\\Delta$ abs_rel, one affine per frame", lambda s: _rung(s, "affine, global"), "%+.4f"),
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.4))
+    for ax, (xlabel, extract, _) in zip(axes, panels):
+        points = []
+        for scene in SCENES:
+            gains = []
+            for variant in DA3_VARIANTS:
+                stat = _stat(grouped_da3, variant, scene, "depth_abs_rel")
+                reference = _stat(grouped_da3, "trisurfel", scene, "depth_abs_rel")
+                gains.append(100 * (stat[0] - reference[0]) / reference[0] if stat and reference else np.nan)
+            delta_offline = extract(diag[(scene, "DA3MONO-LARGE")]) - extract(
+                diag[(scene, "Depth-Anything-V2-Base-hf")]
+            )
+            points.append((delta_offline, gains[1] - gains[0], scene))
+            ax.plot(delta_offline, gains[1] - gains[0], "o", ms=7, color=SCENE_COLOUR[scene])
+            ax.annotate(
+                scene,
+                (delta_offline, gains[1] - gains[0]),
+                textcoords="offset points",
+                xytext=(7, 4),
+                fontsize=7,
+                color=SCENE_COLOUR[scene],
+            )
+        # A predictor is useful here if ordering scenes by it orders them by the trained change.
+        by_offline = [scene for _, _, scene in sorted(points)]
+        by_trained = [scene for _, _, scene in sorted(points, key=lambda p: p[1])]
+        ax.set_title("ranks match" if by_offline == by_trained else "ranks disagree", fontsize=9)
+        ax.axhline(0, color="k", lw=0.8)
+        ax.axvline(0, color="k", lw=0.8)
+        ax.set_xlabel(xlabel, fontsize=8)
+        ax.grid(alpha=0.3)
+        ax.margins(0.25)
+    axes[0].set_ylabel("$\\Delta$ trained depth abs_rel\nvs baseline (pp; lower = DA3 better)")
+    fig.suptitle("Does the offline diagnostic rank the scenes the way training did? (DA3MONO $-$ DAv2)", fontsize=9.5)
+    _finish(fig, list(axes), out)
+
+
+def write_prior_family_table(diag, path: Path, rungs: tuple[str, ...]) -> None:
+    """Priors as rows, (scene, rung) as column groups. Best in each column bolded."""
+    lines = [
+        "\\begin{tabular}{l" + ("r" * len(rungs) + "@{\\hskip 1.2em}") * len(SCENES) + "}",
+        "\\toprule",
+        "& " + " & ".join(f"\\multicolumn{{{len(rungs)}}}{{c}}{{\\texttt{{{scene}}}}}" for scene in SCENES) + " \\\\",
+        "prior & " + " & ".join(_RUNG_HEADER[rung] for _ in SCENES for rung in rungs) + r" \\",
+        "\\midrule",
+    ]
+    columns = [(scene, rung) for scene in SCENES for rung in rungs]
+    best = {}
+    for scene, rung in columns:
+        values = [_rung(diag[(scene, m)], rung) for m, _, _, _ in PRIOR_FAMILY if (scene, m) in diag]
+        best[(scene, rung)] = min(values) if values else float("nan")
+    for model, label, _, family in PRIOR_FAMILY:
+        cells = []
+        for scene, rung in columns:
+            summary = diag.get((scene, model))
+            if summary is None:
+                cells.append("---")
+                continue
+            value = _rung(summary, rung)
+            text = f"{value:.4f}"
+            cells.append(rf"\textbf{{{text}}}" if value == best[(scene, rung)] else text)
+        lines.append(rf"\texttt{{{label}}} {{\tiny ({family})}} & " + " & ".join(cells) + r" \\")
+    lines += ["\\bottomrule", "\\end{tabular}", ""]
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
 
 
 def _reference(grouped, scene: str, key: str, lower_better: bool) -> float | None:
@@ -310,6 +553,10 @@ LABELS = {
     "pd01_gaussian_dn": r"\code{pd 0.1 + dn 0.05}",
     "pd01_dvrel001_gaussian": r"\code{pd 0.1 + dvrel 0.01}",
     "pd1_dvrel1_gaussian": r"\code{pd 1 + dvrel 1}",
+    # Experiment 7. Both are lambda=0.1 ordinal supervision on the trisurfel primitive, so the
+    # label names the prior rather than the term: the prior is the only thing that differs.
+    "pd01_trisurfel": r"\code{pd 0.1}, DAv2-Base",
+    "pd01da3_trisurfel": r"\code{pd 0.1}, DA3MONO-L",
 }
 
 
@@ -332,7 +579,9 @@ def _best_cells(grouped, rows, scene, metrics) -> dict[str, list[str]]:
     return cells
 
 
-def write_experiment_table(grouped, path: Path, variants: tuple[str, ...], metrics=METRICS) -> None:
+def write_experiment_table(
+    grouped, path: Path, variants: tuple[str, ...], metrics=METRICS, references: tuple[str, ...] = REFERENCES
+) -> None:
     """Runs as rows, scenes as column groups. Both reference runs are always the first rows.
 
     Generated rather than typed. Transcribing these by hand into the deck produced two wrong
@@ -341,7 +590,7 @@ def write_experiment_table(grouped, path: Path, variants: tuple[str, ...], metri
     Scenes go across rather than down because a slide is wider than it is tall: stacking three
     scene blocks vertically overflowed the frame as soon as a table had more than two treatments.
     """
-    rows = REFERENCES + variants
+    rows = references + variants
     group = "r" * len(metrics)
     scene_heads = " & ".join(rf"\multicolumn{{{len(metrics)}}}{{c}}{{\itshape {scene}}}" for scene in SCENES)
     metric_heads = " & ".join(" & ".join(head for _, head, _, _ in metrics) for _ in SCENES)
@@ -370,7 +619,15 @@ def write_experiment_table(grouped, path: Path, variants: tuple[str, ...], metri
     print(f"wrote {path}")
 
 
-def write_scene_table(grouped, path: Path, variants: tuple[str, ...], key: str, fmt: str, lower_better: bool) -> None:
+def write_scene_table(
+    grouped,
+    path: Path,
+    variants: tuple[str, ...],
+    key: str,
+    fmt: str,
+    lower_better: bool,
+    references: tuple[str, ...] = REFERENCES,
+) -> None:
     """One metric, variants as rows and scenes as columns, with the delta against that scene's
     best reference. Compact enough to sit beside a figure."""
     lines = [
@@ -384,7 +641,7 @@ def write_scene_table(grouped, path: Path, variants: tuple[str, ...], key: str, 
         values = [(_stat(grouped, variant, scene, key) or (float("nan"),))[0] for variant in REFERENCES]
         reference_best[scene] = (min if lower_better else max)(v for v in values if not np.isnan(v))
 
-    for variant in REFERENCES + variants:
+    for variant in references + variants:
         cells = []
         for scene in SCENES:
             stat = _stat(grouped, variant, scene, key)
@@ -428,6 +685,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", nargs="+", type=Path)
     parser.add_argument("--out-dir", default="/tmp/report_fig/plots")
+    parser.add_argument(
+        "--da3-results",
+        nargs="*",
+        type=Path,
+        default=(),
+        help="results.jsonl for the DA3-vs-DAv2 prior sweep; kept separate from `results` so "
+        "that its extra baseline seeds cannot change any number already published in the deck",
+    )
+    parser.add_argument(
+        "--prior-diagnostic-dir",
+        type=Path,
+        default=None,
+        help="directory of `pseudo_depth_diagnostic.py --json` summaries, one per (scene, prior)",
+    )
     parser.add_argument(
         "--fig-root",
         type=Path,
@@ -483,6 +754,24 @@ def main() -> None:
         "{:.1f}",
         lower_better=True,
     )
+
+    # Experiment 7 is a separate data source on both counts: its own sweep for the trained
+    # numbers and the diagnostic JSON for the offline ones. Skipped rather than faked when
+    # either is absent, so the deck still builds from the original artifacts alone.
+    if args.prior_diagnostic_dir:
+        diag = load_prior_diagnostics(args.prior_diagnostic_dir)
+        print(f"{len(diag)} (scene, prior) diagnostic cells")
+        fig_prior_ladder(diag, out_dir / "prior_ladder.pdf")
+        fig_prior_ordinal(diag, out_dir / "prior_ordinal.pdf")
+        write_prior_family_table(
+            diag, out_dir / "tab_prior_family.tex", ("raw (no fit)", "scale only", "affine, global", "affine, 16x16")
+        )
+    if args.da3_results:
+        grouped_da3 = load(args.da3_results)
+        report_seed_counts(grouped_da3, DA3_REFERENCES + DA3_VARIANTS, "DA3 sweep")
+        write_experiment_table(grouped_da3, out_dir / "tab_da3.tex", DA3_VARIANTS, references=DA3_REFERENCES)
+        if args.prior_diagnostic_dir:
+            fig_prior_offline_vs_trained(diag, grouped_da3, out_dir / "prior_offline_vs_trained.pdf")
 
     if args.fig_root:
         report_rgb_cost(args.fig_root, "emerald-square", "pd01_dn", frame=4)

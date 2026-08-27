@@ -542,6 +542,106 @@
   combination. The over-weighted cell is kept in the sweep so the trap stays visible.
 \end{frame}
 
+\section{Experiment 7: choosing the prior}
+
+\begin{frame}{Experiment 7: is the \emph{prior} the limiting factor?}
+  \pre Experiments 3--6 varied the loss and held the prior fixed at
+  \code{DepthAnythingV2-Base}. The ordinal term reads only the prior's ordering, so a prior that
+  orders pixels better should train better --- and Depth Anything 3 rebuilt the model, not just
+  the weights: it predicts \emph{depth} where V2 predicts disparity.
+
+  \expt Swap the prior, change nothing else. Same $\lambda=0.1$ ordinal term, same
+  \code{trisurfel} primitive, 3 seeds. The backend now records which \emph{quantity} it emits,
+  and the loss takes its sign from that, so the two priors cannot be compared with the sign
+  inverted --- a mistake that is invisible in the loss curve.
+  \vspace{-0.2em}
+  \res
+  \begin{center}\scriptsize
+    \input{plots/tab_da3.tex}
+  \end{center}
+  \vspace{-0.3em}
+  \begin{itemize}\small
+    \item \code{emerald-square}: depth gain \up{$-5.3\% \to -16.0\%$}, a factor of 3, at
+          \up{0.36\,dB less} photometric cost. $3.5\sigma$ on the prior-to-prior difference.
+    \item \code{sponza} $1.6\sigma$, \code{lone-monk} $0.0\sigma$: \textbf{two nulls, no
+          regression}. One scene carries this result.
+  \end{itemize}
+  \conc The prior was the limiting factor on the one scene that was barely helped. This was
+  predicted to be a null; it was not.
+\end{frame}
+
+\begin{frame}{Experiment 7: the DA3 family against ground truth}
+  \expt Each prior against reference depth, given increasing freedom to fit: none, one scale per
+  frame, then an affine per frame and per patch. Alignment is fitted \emph{in the prior's own
+  quantity} and against ground truth, so every number is an upper bound on what a
+  sparse-point alignment could reach.
+  \begin{center}
+    \includegraphics[width=0.99\textwidth]{plots/prior_ladder.pdf}
+  \end{center}
+  \vspace{-0.4em}
+  \begin{center}\tiny
+    \input{plots/tab_prior_family.tex}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Experiment 7: reading the ladder}
+  \res
+  \begin{itemize}\small
+    \item \textbf{Unfitted, all the relative priors are useless} (\code{abs\_rel} 0.84--1.01) and
+          this says nothing about them: COLMAP's scale is arbitrary, so the row measures the unit
+          mismatch. \code{DA3METRIC-L} reaching 0.39--0.55 means only that COLMAP's units land
+          within about $2\times$ of metres here.
+    \item \textbf{One scale is enough for DA3, and not for DAv2.} Denied an offset, DAv2 gives
+          0.25--2.12 --- on \code{emerald-square} \emph{worse than no fit at all} --- while the
+          DA3 monocular models give 0.05--0.13. A disparity prior needs its shift term; a depth
+          prior does not. This is the rung a sparse-point alignment would actually live on.
+    \item \textbf{Any-view checkpoints are worse monocular priors.} \code{DA3-LARGE} loses to
+          \code{DA3MONO-L} on every scene and rung, and on \code{sponza} loses to DAv2 as well
+          (0.0967 vs 0.0646, one affine per frame). Handed one image they cannot do the thing
+          they exist for. \code{DA3-LARGE-1.1} is indistinguishable from \code{DA3-LARGE}.
+    \item \textbf{\code{DA3-SMALL} is worse than everything, everywhere}, by $2$--$4\times$ at
+          the global rung. Size matters within the family.
+    \item By 16$\times$16 patches all priors converge to 0.010--0.046: local structure is
+          common to all of them, and the differences above are about global consistency.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Experiment 7: what the ordinal loss actually reads}
+  \begin{center}
+    \includegraphics[width=0.86\textwidth]{plots/prior_ordinal.pdf}
+  \end{center}
+  \vspace{-0.5em}
+  \begin{itemize}\small
+    \item \code{DA3MONO-L} orders best on all three scenes; \code{DA3METRIC-L} is within
+          0.2\,pp of it on two.
+    \item \textbf{\code{DA3-SMALL} falls \emph{below} the trained model on \code{sponza}}
+          (71.7\% vs 81.9\%). Supervising with it would teach the model orderings it already
+          gets right --- a prior can be net harmful, and this is the check that says so before
+          a sweep is spent.
+  \end{itemize}
+  \conc \code{DA3MONO-LARGE} is the best available monocular prior on every offline measure
+  taken, and it is the largest \emph{monocular} checkpoint published --- larger DA3 models exist
+  only in the any-view family, which measured worse here.
+\end{frame}
+
+\begin{frame}{Experiment 7: which diagnostic would have predicted this?}
+  \begin{center}
+    \includegraphics[width=0.92\textwidth]{plots/prior_offline_vs_trained.pdf}
+  \end{center}
+  \vspace{-0.5em}
+  \begin{itemize}\small
+    \item Ordinal agreement is \emph{what the loss consumes}, and it ranks the scenes wrongly:
+          \code{emerald-square} gained the least agreement (+0.6\,pp) and the most depth
+          ($-11$\,pp), \code{sponza} the most agreement and little depth.
+    \item Accuracy under \textbf{one affine per frame} --- a quantity the loss never sees ---
+          ranks all three correctly.
+    \item Hypothesis going in was that training gain would track ordinal agreement. Refuted.
+  \end{itemize}
+  \conc Three scenes and one prior swap: enough to reject ``agreement is the number to optimise'',
+  not enough to install its replacement. Treat the diagnostic as a \emph{screen} --- it caught
+  \code{DA3-SMALL} --- and let the ablation decide.
+\end{frame}
+
 \section{The photometric cost}
 
 \begin{frame}{The photometric cost, localised}
@@ -604,6 +704,10 @@
           \code{lone-monk}. Both pairs clear it on all three, at single seed.
     \item Best per scene: \code{pd + dn} on \code{sponza}, \code{pd} alone on \code{lone-monk}
           and \code{emerald-square}.
+    \item These all use the \code{DepthAnythingV2-Base} prior. Swapping it for
+          \code{DA3MONO-LARGE} (Experiment 7) takes \code{emerald-square} from $-5.3\%$ to
+          $-16.0\%$ at less photometric cost, so the best depth number in this report comes
+          from changing the \emph{prior}, not the loss.
   \end{itemize}
 \end{frame}
 
@@ -634,6 +738,7 @@
     Pseudo-depth regression & \dn{abandoned} & Prior worse than the model it would teach \\
     Pseudo-depth ordinal & \up{landed}, off & Only single term improving depth on all 3 scenes \\
     \quad + confidence gate & \dn{refuted} & Keeps the prior's worst structure \\
+    \quad DA3 prior swap & \up{landed}, off & 3$\times$ the depth gain on \code{emerald-square}, 2 nulls \\
     Multi-view consistency, mesh & not started & \\
     \bottomrule
   \end{tabular}
@@ -643,6 +748,9 @@
     \item Depth, one term: \code{pd 0.1}. $-7$ to $-11\%$ against the best reference on all
           three scenes, $+0.12$ to $-0.63$\,dB.
     \item Depth and normals: \code{pd 0.1 + dn 0.05}. Best normals everywhere, $-0.22$ to $-0.95$\,dB.
+    \item Best prior: \code{DA3MONO-LARGE}. Not the default only because it needs the
+          \code{depth\_anything\_3} package on \code{PYTHONPATH}, where \code{transformers}
+          installs with the venv. Both are Apache-2.0.
     \item All remain \textbf{off by default}: the photometric cost is real and PSNR is what the
           codebase is currently evaluated on.
   \end{itemize}
@@ -660,8 +768,15 @@
     \item \textbf{Why \code{emerald-square} pays most is unexplained.} That the cost is
           concentrated in foliage is measured; the link to its depth range is a hypothesis.
     \item \textbf{No mesh.} Nothing here is evaluated by surface extraction or Chamfer distance.
-    \item \textbf{The prior diagnostic is \code{sponza}-only}, and \code{DepthAnythingV2-Base}
-          only.
+    \item \textbf{The DA3 result rests on one scene.} \code{emerald-square} is $3.5\sigma$;
+          \code{sponza} and \code{lone-monk} are nulls. Why \code{emerald-square} is the scene
+          where the prior binds is unexplained.
+    \item \textbf{The unfitted rung measures units, not priors.} COLMAP scale is arbitrary, so
+          it cannot rank relative priors and is reported only to show what alignment supplies.
+    \item \textbf{Any-view checkpoints were run on single images}, which is not what they are
+          for. Their pose-conditioned path is untested here.
+    \item \textbf{Prior alignment is fitted against ground truth}, so every prior
+          \code{abs\_rel} is an upper bound, not what a COLMAP-sparse-point fit would achieve.
   \end{itemize}
 \end{frame}
 
@@ -683,11 +798,27 @@
           cancelled a planned loss; the PGSR port regressed normals 30$^\circ$ because
           ``min scale'' is not this renderer's normal axis.
     \item \textbf{An offline metric can motivate the wrong mechanism.} The gate's
-          84\%$\to$97\% was real and irrelevant.
+          84\%$\to$97\% was real and irrelevant, and ordinal agreement --- the quantity the
+          shipped loss reads --- ranked the DA3 swap's three scenes wrongly.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Method notes that changed a conclusion (cont.)}
+  \begin{enumerate}
+    \setcounter{enumi}{5}
     \item \textbf{Measure combinations at each term's own optimum}, and against each single
           term, not only against a baseline.
     \item \textbf{Localise a metric before interpreting it.} The RGB difference maps turned an
           assumed metric artefact into a measured regression.
+    \item \textbf{Report how much the alignment is doing.} A prior scored only after an affine
+          fit hides which of the two is being measured. DAv2 and DA3MONO are 0.065 vs 0.051
+          under one affine per frame, and 0.45 vs 0.12 under one scale --- a $4\times$ gap that
+          the affine absorbs, and the rung a sparse-point alignment would really run at.
+    \item \textbf{Check the licence of the artefact you measured}, not the one you downloaded
+          first. \code{DA3MONO-LARGE} was recorded as CC BY-NC 4.0 and given as the reason it
+          could not ship; it is Apache-2.0, like DAv2. Only DA3's \emph{any-view} checkpoints
+          are non-commercial. The constraint was carried across from a sibling model, and it
+          suppressed the better prior for a reason that did not exist.
   \end{enumerate}
 \end{frame}
 

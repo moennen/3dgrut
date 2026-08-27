@@ -15,6 +15,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 ABL_ROOT="${ABL_ROOT:-/tmp/abl_pd}"
+# The DA3-vs-DAv2 prior sweep and its offline diagnostic. Separate from ABL_ROOT: that sweep
+# re-ran the trisurfel baseline with three seeds, and pooling those into the earlier experiments
+# would quietly move numbers the deck has already published.
+DA3_ROOT="${DA3_ROOT:-/mnt/oss/da3cmp}"
+PRIOR_DIAG="${PRIOR_DIAG:-/mnt/oss/da3diag/json}"
 FIG_ROOT="${FIG_ROOT:-/tmp/report_fig}"
 BUILD_DIR="${BUILD_DIR:-/tmp/report_build}"
 DATASET_ROOT="${DATASET_ROOT:-/mnt/data/nerf_datasets/ob3d/OB3D_colmap}"
@@ -36,8 +41,25 @@ if [[ ${#RESULTS[@]} -eq 0 ]]; then
   exit 1
 fi
 echo "figures from ${#RESULTS[@]} results file(s)"
+
+# Experiment 7's sources are optional: without them `make_figures.py` skips those figures, and
+# the build fails at the \input in the .tex rather than silently emitting a deck with stale
+# Experiment 7 numbers.
+EXTRA=()
+if [[ -d "$DA3_ROOT" ]]; then
+  mapfile -t DA3_RESULTS < <(find "$DA3_ROOT" -name results.jsonl | sort)
+  if [[ ${#DA3_RESULTS[@]} -gt 0 ]]; then
+    EXTRA+=(--da3-results "${DA3_RESULTS[@]}")
+    echo "  plus ${#DA3_RESULTS[@]} DA3 results file(s) from $DA3_ROOT"
+  fi
+fi
+if [[ -d "$PRIOR_DIAG" ]]; then
+  EXTRA+=(--prior-diagnostic-dir "$PRIOR_DIAG")
+  echo "  plus prior diagnostics from $PRIOR_DIAG"
+fi
+
 "$PYTHON" "$REPO_ROOT/scripts/report/make_figures.py" "${RESULTS[@]}" \
-  --out-dir "$FIG_ROOT/plots" --fig-root "$FIG_ROOT"
+  --out-dir "$FIG_ROOT/plots" --fig-root "$FIG_ROOT" "${EXTRA[@]+"${EXTRA[@]}"}"
 
 mkdir -p "$BUILD_DIR"
 cp "$REPO_ROOT/scripts/report/geometry_report.tex" "$BUILD_DIR/"

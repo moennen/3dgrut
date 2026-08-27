@@ -16,17 +16,23 @@ Two things it is careful about, because both are silent failure modes:
   predict z-depth. The two differ by ``||d|| / d_z``, up to 20% at the corners of a 640x360
   sponza frame -- a *radial* error that no global affine can absorb, so it is applied per pixel.
 
-Two families of number come out. The ``abs_rel`` table is the prior's accuracy once aligned, at
-several patch sizes, which says how much of its value is local rather than global. The **ordinal
+Two families of number come out. The ``abs_rel`` table walks the prior up a ladder of alignment
+freedom -- no fit at all, one scale per frame, then an affine per frame and per patch -- which
+separates what the model predicts from what the fit supplies, and says how much of the prior's
+value is local rather than global. The **ordinal
 agreement** is the fraction of pixel pairs whose near/far ordering matches ground truth, sampled
 exactly as `compute_pseudo_depth_order_loss` samples them, which is literally all the ordinal
 loss reads.
 
 It is tempting to conclude that the agreement is therefore the number to judge a prior swap on.
-Measured, it is not: across sponza, lone-monk and emerald-square the DAv2-to-DA3 change in
-agreement runs *opposite* to the change in trained depth accuracy, while the change in
-globally-aligned ``abs_rel`` tracks it. Both are reported, and neither is treated as a proxy for
-the trained outcome; the ablation is what settles that. See `docs/normal-supervision.md`.
+Measured, it is not. Swapping DAv2 for DA3 raised the agreement and improved trained depth on all
+three of sponza, lone-monk and emerald-square, so the *sign* agreed -- but it ranked the scenes
+backwards: emerald-square gained the least agreement (+0.6pp) and by far the most depth (-11pp).
+The change in globally-aligned ``abs_rel``, which the loss never sees, ranked all three
+correctly. Both are reported, and neither is a proxy for the trained outcome; the ablation
+settles that. Where the agreement *is* decisive is as a veto -- a prior scoring below the trained
+model's own agreement, as ``DA3-SMALL`` does on sponza, should not be used at all. See
+`docs/normal-supervision.md`.
 
 Predictions come from the same backend classes the training cache uses, so what is measured here
 is what training would consume. The alignment fits against ground-truth depth, which makes the
@@ -38,9 +44,11 @@ Nothing here is training code, and no ground truth leaks into the supervision pa
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -57,19 +65,37 @@ from threedgrut.utils.depth_normal_metrics import (  # noqa: E402
 )
 from threedgrut.utils.pseudo_depth_loss import FARTHER_SIGN, sample_pair_offset  # noqa: E402
 
-# Patch sizes to fit the affine over. `None` is a single fit per frame -- the "align the whole
-# map with the sparse points" formulation. The smaller sizes probe how much of the prior's
-# value is local structure that a global fit throws away.
-PATCH_SIZES = (None, 64, 32, 16)
+# How much freedom the prior is given to match ground truth before being scored, in increasing
+# order. The progression is the measurement: each row is a claim about the prior that the next
+# row stops making.
+#
+# `raw` fits nothing and reads the prediction as a distance directly, which is only a fair
+# question of a *metric* model -- for a scale-free one it quantifies how much of the reported
+# accuracy is alignment rather than prediction. `scale` grants the single degree of freedom a
+# scale-free prior is entitled to (no offset, so zero still means zero). The affine rows add an
+# offset, globally -- the "align the whole map against sparse points" formulation -- and then
+# per patch, probing how much of the prior's value is local structure a global fit throws away.
+ALIGNMENTS = (
+    ("raw (no fit)", None, None),
+    ("scale only", "scale", None),
+    ("affine, global", "affine", None),
+    ("affine, 64x64", "affine", 64),
+    ("affine, 32x32", "affine", 32),
+    ("affine, 16x16", "affine", 16),
+)
 
 # Matches `loss.pseudo_depth_shift_fraction`, so the pairs scored here are drawn from the same
 # distribution the trained term draws from. Changing one without the other would make the
 # agreement number stop predicting the term's behaviour.
 SHIFT_FRACTION = 0.05
 
-# The model each backend is compared at. `transformers` matches the training default; the DA3
-# entry is its dedicated monocular model, which is the like-for-like counterpart -- DA3's
-# any-view checkpoints solve a different (multi-view) problem.
+# The model each backend is compared at when `--model` is not given. `transformers` matches the
+# training default; the DA3 entry is its dedicated monocular model, the like-for-like counterpart.
+#
+# DA3's any-view checkpoints (`DA3-SMALL` ... `DA3-GIANT`) can also be passed to `--model`. Handed
+# a single image they degrade to monocular inference, which is a fair comparison to make and the
+# only way to use them through the per-frame cache, but it is not what they are for: their value
+# is cross-view consistency, and one view is the case that cannot exhibit it.
 DEFAULT_MODELS = {
     "transformers": "depth-anything/Depth-Anything-V2-Base-hf",
     "depth_anything_3": "depth-anything/DA3MONO-LARGE",
@@ -109,16 +135,43 @@ def _fit_affine(prior: np.ndarray, target: np.ndarray, trim: float, iters: int) 
     return coef
 
 
+def _fit_scale(prior: np.ndarray, target: np.ndarray, trim: float, iters: int) -> float:
+    """Least squares ``target ~ a * prior``, no intercept, refit after dropping worst residuals.
+
+    Separate from `_fit_affine` rather than a constrained call to it because the question is
+    different: an offset lets a prior fix a wrong *near plane*, and withholding it is what makes
+    the scale-only row a test of whether the prediction is right up to units.
+    """
+    keep = np.ones(len(prior), dtype=bool)
+    scale = 0.0
+    for _ in range(max(iters, 1)):
+        if keep.sum() < 1:
+            break
+        denominator = float(prior[keep] @ prior[keep])
+        if denominator <= 0.0:
+            return 0.0
+        scale = float(prior[keep] @ target[keep]) / denominator
+        if trim <= 0:
+            break
+        residual = np.abs(scale * prior - target)
+        keep = residual <= np.quantile(residual, 1.0 - trim)
+    return scale
+
+
 def _align(
     prior: np.ndarray,
     target_gt: np.ndarray,
     valid: np.ndarray,
+    mode: str | None,
     patch: int | None,
     trim: float,
     iters: int,
     invert: bool,
 ) -> np.ndarray:
-    """Affine-align the prior to `target_gt`, globally or per patch. Returns z (NaN where unfit).
+    """Align the prior to `target_gt`, per `mode`. Returns z (NaN where unfit).
+
+    `mode` is `None` for no fit at all, `"scale"` for one multiplier per frame, or `"affine"` for
+    a scale and offset over each `patch`-sized block (`patch=None` being one block per frame).
 
     `target_gt` is ground truth expressed in the prior's own space -- inverse z for a disparity
     prior, z for a depth prior -- and `invert` says whether the fitted values need inverting to
@@ -127,24 +180,36 @@ def _align(
     """
     height, width = prior.shape
     fitted = np.full_like(prior, np.nan)
-    if patch is None:
-        blocks = [(slice(0, height), slice(0, width))]
+    if mode is None:
+        # No fit: the prediction *is* the answer, in the prior's own space. For a disparity prior
+        # that still means inverting it below, which is a change of variable and not a fit.
+        fitted = prior.astype(np.float64, copy=True)
+    elif mode == "scale":
+        if valid.sum() >= 10:
+            scale = _fit_scale(prior[valid], target_gt[valid], trim, iters)
+            if scale != 0.0:
+                fitted = scale * prior
+    elif mode == "affine":
+        if patch is None:
+            blocks = [(slice(0, height), slice(0, width))]
+        else:
+            blocks = [
+                (slice(i, min(i + patch, height)), slice(j, min(j + patch, width)))
+                for i in range(0, height, patch)
+                for j in range(0, width, patch)
+            ]
+        for rows, cols in blocks:
+            block_valid = valid[rows, cols]
+            # A 2-parameter fit needs a handful of points with some depth spread to be meaningful.
+            if block_valid.sum() < 10:
+                continue
+            block_prior = prior[rows, cols]
+            coef = _fit_affine(block_prior[block_valid], target_gt[rows, cols][block_valid], trim, iters)
+            if coef[0] == 0.0:
+                continue
+            fitted[rows, cols] = coef[0] * block_prior + coef[1]
     else:
-        blocks = [
-            (slice(i, min(i + patch, height)), slice(j, min(j + patch, width)))
-            for i in range(0, height, patch)
-            for j in range(0, width, patch)
-        ]
-    for rows, cols in blocks:
-        block_valid = valid[rows, cols]
-        # A 2-parameter fit needs a handful of points with some depth spread to be meaningful.
-        if block_valid.sum() < 10:
-            continue
-        block_prior = prior[rows, cols]
-        coef = _fit_affine(block_prior[block_valid], target_gt[rows, cols][block_valid], trim, iters)
-        if coef[0] == 0.0:
-            continue
-        fitted[rows, cols] = coef[0] * block_prior + coef[1]
+        raise ValueError(f"unknown alignment mode {mode!r}")
     if not invert:
         return fitted
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -221,7 +286,7 @@ def collect(
     quantity = BACKENDS[backend].QUANTITY
     farther_sign = FARTHER_SIGN[quantity]
 
-    err_model, err_prior = [], {p: [] for p in PATCH_SIZES}
+    err_model, err_prior = [], {label: [] for label, _, _ in ALIGNMENTS}
     ordinal = [0, 0, 0, 0, 0]  # see _ordinal_agreement for the five counts
     # Seeded so that two backends are scored on exactly the same pixel pairs; otherwise a
     # difference of a few tenths of a percent would be sampling noise rather than a result.
@@ -266,11 +331,12 @@ def collect(
 
             rel_model = np.abs(model_t_np - gt_t_np) / np.maximum(gt_t_np, 1e-8)
             err_model.append(rel_model[valid_np])
-            for patch in PATCH_SIZES:
-                z_prior = _align(prior_np, target_gt, valid_np & np.isfinite(target_gt), patch, trim, iters, invert)
+            for label, mode, patch in ALIGNMENTS:
+                fit_valid = valid_np & np.isfinite(target_gt)
+                z_prior = _align(prior_np, target_gt, fit_valid, mode, patch, trim, iters, invert)
                 prior_t = z_prior / to_z_np  # z -> Euclidean ray distance, per pixel
                 rel = np.abs(prior_t - gt_t_np) / np.maximum(gt_t_np, 1e-8)
-                err_prior[patch].append(np.where(np.isfinite(rel[valid_np]), rel[valid_np], np.nan))
+                err_prior[label].append(np.where(np.isfinite(rel[valid_np]), rel[valid_np], np.nan))
 
             # Offsets are redrawn per frame from a seeded generator, matching how the loss draws
             # one per iteration, so the agreement is averaged over the same distribution.
@@ -290,41 +356,86 @@ def collect(
     }
 
 
-def report(stats: dict) -> None:
+def summarise(stats: dict) -> dict:
+    """Reduce the per-pixel arrays to the numbers reported, as plain JSON-serialisable types.
+
+    The deck's figures read this rather than transcribed constants, so a plot cannot drift from
+    the run that produced it. `report` prints from the same dict, so the two cannot disagree.
+    """
     rel_model = stats["model"]
     # "Wrong" in the same sense the depth metrics use: outside the delta1 ratio band. These are
     # the pixels supervision is supposed to rescue, so they are where the prior has to win.
     wrong = rel_model >= (DELTA_THRESHOLDS[0] - 1.0)
-    print(f"\nprior: {stats['backend']} / {stats['model_id']}  ({stats['quantity']})")
+    rows = []
+    for label, rel_prior in stats["prior"].items():
+        both = np.isfinite(rel_prior) & np.isfinite(rel_model)
+        w = both & wrong
+        rows.append(
+            {
+                "alignment": label,
+                "abs_rel": float(np.nanmean(rel_prior)),
+                "abs_rel_median": float(np.nanmedian(rel_prior)),
+                "abs_rel_where_model_wrong": float(np.nanmean(rel_prior[w])),
+                "p_closer": float((rel_prior[both] < rel_model[both]).mean()),
+                "p_closer_where_wrong": float((rel_prior[w] < rel_model[w]).mean()),
+                "fitted_frac": float(both.mean()),
+            }
+        )
+
+    pairs, agree_prior, agree_model, model_wrong, agree_wrong = stats["ordinal"]
+    ordinal = {"pairs": int(pairs)}
+    if pairs:
+        ordinal.update(
+            prior_agreement=agree_prior / pairs,
+            model_agreement=agree_model / pairs,
+            model_wrong_frac=model_wrong / pairs,
+            prior_agreement_where_model_wrong=(agree_wrong / model_wrong) if model_wrong else float("nan"),
+        )
+    return {
+        "backend": stats["backend"],
+        "model_id": stats["model_id"],
+        "quantity": stats["quantity"],
+        "frames": int(stats["frames"]),
+        "valid_px": int(rel_model.size),
+        "model_abs_rel": float(rel_model.mean()),
+        "model_abs_rel_median": float(np.median(rel_model)),
+        "model_wrong_frac": float(wrong.mean()),
+        "alignments": rows,
+        "ordinal": ordinal,
+    }
+
+
+def report(summary: dict) -> None:
+    print(f"\nprior: {summary['backend']} / {summary['model_id']}  ({summary['quantity']})")
     print(
-        f"frames: {stats['frames']}   valid px: {rel_model.size}   "
-        f"model wrong (outside delta1): {100 * wrong.mean():.1f}%"
+        f"frames: {summary['frames']}   valid px: {summary['valid_px']}   "
+        f"model wrong (outside delta1): {100 * summary['model_wrong_frac']:.1f}%"
     )
-    print(f"\nmodel abs_rel: all {rel_model.mean():.4f}   median {np.median(rel_model):.4f}")
+    print(f"\nmodel abs_rel: all {summary['model_abs_rel']:.4f}   median {summary['model_abs_rel_median']:.4f}")
     print("\n                       ---------- abs_rel ----------    P(prior closer than model)")
     print("  alignment            all      median   where-model-wrong    all    where-wrong")
-    for patch, rel_prior in stats["prior"].items():
-        ok = np.isfinite(rel_prior)
-        label = "global (1 fit/frame)" if patch is None else f"{patch}x{patch} patch"
-        both = ok & np.isfinite(rel_model)
-        closer = rel_prior[both] < rel_model[both]
-        w = both & wrong
-        closer_wrong = rel_prior[w] < rel_model[w]
+    for row in summary["alignments"]:
         print(
-            f"  {label:<20} {np.nanmean(rel_prior):.4f}   {np.nanmedian(rel_prior):.4f}   "
-            f"{np.nanmean(rel_prior[w]):.4f}            {closer.mean():.3f}   {closer_wrong.mean():.3f}"
+            f"  {row['alignment']:<20} {row['abs_rel']:.4f}   {row['abs_rel_median']:.4f}   "
+            f"{row['abs_rel_where_model_wrong']:.4f}            "
+            f"{row['p_closer']:.3f}   {row['p_closer_where_wrong']:.3f}"
         )
     print("\nA prior only helps where P(prior closer) > 0.5; supervising below that pulls the")
     print("model away from the truth on those pixels.")
+    print("\nThe `raw` row measures the *units*, not the prior: COLMAP's scale is arbitrary, so a")
+    print("scale-free prior scores ~1.0 there however good it is. It is here to show how much of")
+    print("the rows below it is supplied by the fit. `scale only` is the rung a sparse-point")
+    print("alignment runs at, and is where a disparity prior pays for having no shift term.")
 
-    pairs, agree_prior, agree_model, model_wrong, agree_wrong = stats["ordinal"]
-    if pairs:
-        print(f"\nordinal agreement with ground truth over {pairs} pairs (no alignment):")
-        print(f"  prior {100 * agree_prior / pairs:.2f}%    model {100 * agree_model / pairs:.2f}%")
-        if model_wrong:
+    ordinal = summary["ordinal"]
+    if ordinal["pairs"]:
+        print(f"\nordinal agreement with ground truth over {ordinal['pairs']} pairs (no alignment):")
+        print(f"  prior {100 * ordinal['prior_agreement']:.2f}%    " f"model {100 * ordinal['model_agreement']:.2f}%")
+        if ordinal["model_wrong_frac"]:
             print(
-                f"  on the {100 * model_wrong / pairs:.2f}% of pairs the model orders wrongly, "
-                f"the prior is right {100 * agree_wrong / model_wrong:.2f}% of the time"
+                f"  on the {100 * ordinal['model_wrong_frac']:.2f}% of pairs the model orders "
+                f"wrongly, the prior is right "
+                f"{100 * ordinal['prior_agreement_where_model_wrong']:.2f}% of the time"
             )
         print("This is what the ordinal loss consumes. Measured across three OB3D scenes it did")
         print("*not* predict which prior trains better -- see docs/normal-supervision.md -- so")
@@ -345,10 +456,12 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=3)
     parser.add_argument("--max-frames", type=int, default=10)
     parser.add_argument("--pair-samples", type=int, default=32, help="pair offsets scored per frame")
+    parser.add_argument("--json", default=None, help="also write the summary here, for the report figures")
+    parser.add_argument("--scene", default=None, help="scene name recorded in the JSON summary")
     args = parser.parse_args()
 
     model_id = args.model or DEFAULT_MODELS[args.backend]
-    report(
+    summary = summarise(
         collect(
             args.checkpoint,
             args.scene_path,
@@ -360,6 +473,13 @@ def main() -> None:
             args.pair_samples,
         )
     )
+    report(summary)
+    if args.json:
+        summary["checkpoint"] = args.checkpoint
+        summary["scene"] = args.scene
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"\nwrote {args.json}")
 
 
 if __name__ == "__main__":
