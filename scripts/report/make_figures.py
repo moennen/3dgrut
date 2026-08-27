@@ -60,6 +60,11 @@ PRIOR_MODEL_REFERENCE = 0.0580
 UNGATED = "pd01_gaussian_nogate"
 GATED = "pd01_gaussian"
 
+# The two reference runs. Both primitives at default settings, no geometry term. Every treatment
+# is a modification of `gaussian`, but `trisurfel` is the stronger geometry baseline, so a
+# treatment that does not beat it has not earned anything.
+REFERENCES = ("gaussian", "trisurfel")
+
 
 def load(paths: list[Path]) -> dict[tuple[str, str], list[dict]]:
     """All successful records, grouped by (variant, scene). Repeats are separate seeds."""
@@ -113,14 +118,30 @@ def fig_prior_alignment(out: Path) -> None:
     _finish(fig, ax, out)
 
 
+def _reference(grouped, scene: str, key: str, lower_better: bool) -> float | None:
+    """The better of the two reference runs on this scene and metric.
+
+    Every reported change is against this rather than against `gaussian` alone. It matters:
+    `trisurfel` has the better `abs_rel` on emerald-square and the better normals on all three,
+    so a gaussian-relative number overstates a treatment wherever trisurfel was already ahead --
+    `pd 0.1`'s emerald depth gain is 10.3% against `gaussian` and 7.4% against the best
+    reference.
+    """
+    values = [_stat(grouped, variant, scene, key) for variant in REFERENCES]
+    finite = [stat[0] for stat in values if stat]
+    if not finite:
+        return None
+    return (min if lower_better else max)(finite)
+
+
 def fig_lambda_sweep(grouped, out: Path) -> None:
     """The usable band. Plotted on both axes the term trades between."""
     weights = [(0.1, UNGATED), (1.0, "pd1_gaussian"), (10.0, "pd10_gaussian_nogate")]
     fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.2))
     for scene in SCENES:
-        base_depth = _stat(grouped, "gaussian", scene, "depth_abs_rel")
-        base_psnr = _stat(grouped, "gaussian", scene, "mean_psnr")
-        if not base_depth or not base_psnr:
+        base_depth = _reference(grouped, scene, "depth_abs_rel", lower_better=True)
+        base_psnr = _reference(grouped, scene, "mean_psnr", lower_better=False)
+        if base_depth is None or base_psnr is None:
             continue
         xs, depth, psnr = [], [], []
         for weight, variant in weights:
@@ -129,14 +150,14 @@ def fig_lambda_sweep(grouped, out: Path) -> None:
             if not depth_stat or not psnr_stat:
                 continue
             xs.append(weight)
-            depth.append(100.0 * (depth_stat[0] - base_depth[0]) / base_depth[0])
-            psnr.append(psnr_stat[0] - base_psnr[0])
+            depth.append(100.0 * (depth_stat[0] - base_depth) / base_depth)
+            psnr.append(psnr_stat[0] - base_psnr)
         axes[0].plot(xs, depth, "o-", color=SCENE_COLOUR[scene], label=scene)
         axes[1].plot(xs, psnr, "o-", color=SCENE_COLOUR[scene], label=scene)
 
     for ax, ylabel, title in (
-        (axes[0], "depth abs_rel change (%)", "Depth: better is down"),
-        (axes[1], "PSNR change (dB)", "Appearance: better is up"),
+        (axes[0], "depth abs_rel vs best reference (%)", "Depth: better is down"),
+        (axes[1], "PSNR vs best reference (dB)", "Appearance: better is up"),
     ):
         ax.set_xscale("log")
         ax.axhline(0, color="k", lw=0.8)
@@ -156,9 +177,9 @@ def fig_gate(grouped, out: Path) -> None:
     ):
         means, errs, points = [], [], []
         for scene in SCENES:
-            base = _stat(grouped, "gaussian", scene, "depth_abs_rel")
+            base = _reference(grouped, scene, "depth_abs_rel", lower_better=True)
             runs = [r["depth_abs_rel"] for r in grouped.get((variant, scene), [])]
-            deltas = [100.0 * (v - base[0]) / base[0] for v in runs]
+            deltas = [100.0 * (v - base) / base for v in runs]
             means.append(np.mean(deltas))
             errs.append(np.std(deltas))
             points.append(deltas)
@@ -170,7 +191,7 @@ def fig_gate(grouped, out: Path) -> None:
     ax.axhline(0, color="k", lw=0.8)
     ax.set_xticks(offsets)
     ax.set_xticklabels(SCENES)
-    ax.set_ylabel("depth abs_rel change (%)")
+    ax.set_ylabel("depth abs_rel vs best reference (%)")
     ax.set_title("The gate: neutral twice, and it costs emerald its entire gain\n(3 seeds, dots)", fontsize=10)
     ax.legend(fontsize=8)
     _finish(fig, ax, out)
@@ -189,11 +210,13 @@ def _combination_rows(grouped, key: str, relative: bool):
         values = []
         for scene in SCENES:
             stat = _stat(grouped, variant, scene, key)
-            base = _stat(grouped, "gaussian", scene, key)
-            if not stat or not base:
+            # Only the relative panel needs a denominator, and the one metric plotted relative
+            # here (`abs_rel`) is lower-is-better.
+            base = _reference(grouped, scene, key, lower_better=True) if relative else None
+            if not stat or (relative and base is None):
                 values.append(np.nan)
             elif relative:
-                values.append(100.0 * (stat[0] - base[0]) / base[0])
+                values.append(100.0 * (stat[0] - base) / base)
             else:
                 values.append(stat[0])
         rows.append((label, values))
@@ -207,7 +230,7 @@ def fig_compounding(grouped, out: Path) -> None:
     normal_rows = _combination_rows(grouped, "normal_gain_vs_viewdir_deg", relative=False)
 
     for ax, rows, ylabel, title in (
-        (axes[0], depth_rows, "depth abs_rel change (%)", "Depth: combination $\\approx$ max, not sum"),
+        (axes[0], depth_rows, "depth abs_rel vs best reference (%)", "Depth: combination $\\approx$ max, not sum"),
         (axes[1], normal_rows, "n_gain vs viewdir control (deg)", "Normals: only the pairing clears the control"),
     ):
         positions = np.arange(len(rows))
@@ -228,7 +251,10 @@ def fig_compounding(grouped, out: Path) -> None:
         fontsize=7,
         style="italic",
     )
-    axes[0].legend(fontsize=8)
+    # Every depth bar is negative and starts at zero, so an in-axes legend sits on top of one.
+    # Open headroom above the axis and put it there.
+    axes[0].set_ylim(top=abs(axes[0].get_ylim()[0]) * 0.42)
+    axes[0].legend(fontsize=8, ncol=3, loc="upper center", frameon=False)
     _finish(fig, axes, out)
 
 
@@ -245,8 +271,8 @@ def fig_scene_split(grouped, out: Path) -> None:
         values = []
         for _, variant in rows:
             stat = _stat(grouped, variant, scene, "depth_abs_rel")
-            base = _stat(grouped, "gaussian", scene, "depth_abs_rel")
-            values.append(100.0 * (stat[0] - base[0]) / base[0] if stat and base else np.nan)
+            base = _reference(grouped, scene, "depth_abs_rel", lower_better=True)
+            values.append(100.0 * (stat[0] - base) / base if stat and base is not None else np.nan)
         bars = ax.bar(positions + (index - 1) * width, values, width, label=scene, color=SCENE_COLOUR[scene])
         for bar, value in zip(bars, values):
             ax.text(bar.get_x() + bar.get_width() / 2, value + 0.4, f"{value:+.1f}", ha="center", fontsize=7)
@@ -255,10 +281,125 @@ def fig_scene_split(grouped, out: Path) -> None:
     ax.set_ylim(min(-19.0, ax.get_ylim()[0]), 3.0)
     ax.set_xticks(positions)
     ax.set_xticklabels([label for label, _ in rows], fontsize=9)
-    ax.set_ylabel("depth abs_rel change (%)")
+    ax.set_ylabel("depth abs_rel vs best reference (%)")
     ax.set_title("Complementary by scene, not additive\nlone-monk is unreachable without the prior", fontsize=10)
     ax.legend(fontsize=8, loc="lower right")
     _finish(fig, ax, out)
+
+
+# Metric key -> (column header, format, lower-is-better).
+METRICS = (
+    ("depth_abs_rel", r"\code{abs\_rel}", "{:.4f}", True),
+    ("normal_mean_deg", r"normal$^\circ$", "{:.1f}", True),
+    # Math mode so the sign is a real minus rather than a hyphen.
+    ("normal_gain_vs_viewdir_deg", r"\code{n\_gain}", "${:+.1f}$", False),
+    ("mean_psnr", "PSNR", "{:.2f}", False),
+)
+
+# Display names, so the deck never has to explain a run-directory name.
+LABELS = {
+    "gaussian": r"\code{gaussian} (ref)",
+    "trisurfel": r"\code{trisurfel} (ref)",
+    UNGATED: r"\code{pd 0.1}",
+    GATED: r"\code{pd 0.1} gated",
+    "pd1_gaussian": r"\code{pd 1}",
+    "pd10_gaussian_nogate": r"\code{pd 10}",
+    "dn05_gaussian": r"\code{dn 0.05}",
+    "dvrel001_gaussian": r"\code{dvrel 0.01}",
+    "dvrel1_gaussian": r"\code{dvrel 1}",
+    "pd01_gaussian_dn": r"\code{pd 0.1 + dn 0.05}",
+    "pd01_dvrel001_gaussian": r"\code{pd 0.1 + dvrel 0.01}",
+    "pd1_dvrel1_gaussian": r"\code{pd 1 + dvrel 1}",
+}
+
+
+def _best_cells(grouped, rows, scene, metrics) -> dict[str, list[str]]:
+    """Formatted cells for one scene, with the best value in each metric bolded.
+
+    "Best" counts the reference rows, so a treatment that does not beat `trisurfel` is visibly
+    not the best cell rather than just a number in a list.
+    """
+    cells: dict[str, list[str]] = {variant: [] for variant in rows}
+    for key, _, fmt, lower_better in metrics:
+        values = [(_stat(grouped, variant, scene, key) or (float("nan"),))[0] for variant in rows]
+        finite = [v for v in values if not np.isnan(v)]
+        best = (min if lower_better else max)(finite) if finite else float("nan")
+        for variant, value in zip(rows, values):
+            text = "---" if np.isnan(value) else fmt.format(value)
+            if not np.isnan(value) and value == best:
+                text = rf"\textbf{{{text}}}"
+            cells[variant].append(text)
+    return cells
+
+
+def write_experiment_table(grouped, path: Path, variants: tuple[str, ...], metrics=METRICS) -> None:
+    """Runs as rows, scenes as column groups. Both reference runs are always the first rows.
+
+    Generated rather than typed. Transcribing these by hand into the deck produced two wrong
+    numbers and one wrong claim on the first pass, so the deck `\\input`s this instead.
+
+    Scenes go across rather than down because a slide is wider than it is tall: stacking three
+    scene blocks vertically overflowed the frame as soon as a table had more than two treatments.
+    """
+    rows = REFERENCES + variants
+    group = "r" * len(metrics)
+    scene_heads = " & ".join(rf"\multicolumn{{{len(metrics)}}}{{c}}{{\itshape {scene}}}" for scene in SCENES)
+    metric_heads = " & ".join(" & ".join(head for _, head, _, _ in metrics) for _ in SCENES)
+    rules = " ".join(
+        rf"\cmidrule(lr){{{2 + i * len(metrics)}-{1 + (i + 1) * len(metrics)}}}" for i in range(len(SCENES))
+    )
+    lines = [
+        r"\setlength{\tabcolsep}{3.2pt}",
+        r"\begin{tabular}{l" + group * len(SCENES) + "}",
+        r"\toprule",
+        rf"Run & {scene_heads} \\",
+        rules,
+        rf" & {metric_heads} \\",
+        r"\midrule",
+    ]
+    per_scene = [_best_cells(grouped, rows, scene, metrics) for scene in SCENES]
+    for variant in rows:
+        cells = [text for scene_cells in per_scene for text in scene_cells[variant]]
+        lines.append(LABELS.get(variant, variant) + " & " + " & ".join(cells) + r" \\")
+        if variant == REFERENCES[-1] and variants:
+            # Rule between the reference block and the treatments, so the comparison the table
+            # exists to make is visible without reading the row labels.
+            lines.append(r"\midrule")
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    path.write_text("\n".join(lines) + "\n")
+    print(f"wrote {path}")
+
+
+def write_scene_table(grouped, path: Path, variants: tuple[str, ...], key: str, fmt: str, lower_better: bool) -> None:
+    """One metric, variants as rows and scenes as columns, with the delta against that scene's
+    best reference. Compact enough to sit beside a figure."""
+    lines = [
+        r"\begin{tabular}{l" + "rr" * len(SCENES) + "}",
+        r"\toprule",
+        r"Run & " + " & ".join(rf"\multicolumn{{2}}{{c}}{{{scene}}}" for scene in SCENES) + r" \\",
+        r"\midrule",
+    ]
+    reference_best = {}
+    for scene in SCENES:
+        values = [(_stat(grouped, variant, scene, key) or (float("nan"),))[0] for variant in REFERENCES]
+        reference_best[scene] = (min if lower_better else max)(v for v in values if not np.isnan(v))
+
+    for variant in REFERENCES + variants:
+        cells = []
+        for scene in SCENES:
+            stat = _stat(grouped, variant, scene, key)
+            if not stat:
+                cells += ["---", ""]
+                continue
+            delta = 100.0 * (stat[0] - reference_best[scene]) / abs(reference_best[scene])
+            improved = (delta < 0) if lower_better else (delta > 0)
+            colour = "good" if improved else "bad"
+            marker = "" if variant in REFERENCES else rf"\textcolor{{{colour}}}{{${delta:+.1f}$\%}}"
+            cells += [fmt.format(stat[0]), marker]
+        lines.append(LABELS.get(variant, variant) + " & " + " & ".join(cells) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    path.write_text("\n".join(lines) + "\n")
+    print(f"wrote {path}")
 
 
 def report_rgb_cost(fig_root: Path, scene: str, variant: str, frame: int) -> None:
@@ -305,6 +446,43 @@ def main() -> None:
     fig_gate(grouped, out_dir / "gate.pdf")
     fig_compounding(grouped, out_dir / "compounding.pdf")
     fig_scene_split(grouped, out_dir / "scene_split.pdf")
+
+    # One table per experiment, each carrying both reference rows so the comparison is built in.
+    write_experiment_table(grouped, out_dir / "tab_reference.tex", ())
+    write_experiment_table(grouped, out_dir / "tab_dn.tex", ("dn05_gaussian",))
+    write_experiment_table(grouped, out_dir / "tab_dv.tex", ("dvrel1_gaussian", "dvrel001_gaussian"))
+    write_experiment_table(grouped, out_dir / "tab_pd.tex", (UNGATED, "pd1_gaussian", "pd10_gaussian_nogate"))
+    write_experiment_table(grouped, out_dir / "tab_gate.tex", (UNGATED, GATED))
+    write_experiment_table(
+        grouped,
+        out_dir / "tab_combined.tex",
+        (UNGATED, "dn05_gaussian", "pd01_gaussian_dn", "dvrel001_gaussian", "pd01_dvrel001_gaussian"),
+    )
+    # The weighting trap: the same pair at its measured optima and at the first pass's lambda=1.
+    write_scene_table(
+        grouped,
+        out_dir / "tab_trap.tex",
+        (UNGATED, "dvrel001_gaussian", "pd01_dvrel001_gaussian", "pd1_dvrel1_gaussian"),
+        "depth_abs_rel",
+        "{:.4f}",
+        lower_better=True,
+    )
+    write_scene_table(
+        grouped,
+        out_dir / "tab_depth_summary.tex",
+        (UNGATED, "dn05_gaussian", "dvrel001_gaussian", "pd01_gaussian_dn", "pd01_dvrel001_gaussian"),
+        "depth_abs_rel",
+        "{:.4f}",
+        lower_better=True,
+    )
+    write_scene_table(
+        grouped,
+        out_dir / "tab_normal_summary.tex",
+        (UNGATED, "dn05_gaussian", "dvrel001_gaussian", "pd01_gaussian_dn", "pd01_dvrel001_gaussian"),
+        "normal_mean_deg",
+        "{:.1f}",
+        lower_better=True,
+    )
 
     if args.fig_root:
         report_rgb_cost(args.fig_root, "emerald-square", "pd01_dn", frame=4)

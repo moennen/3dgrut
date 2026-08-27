@@ -46,6 +46,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # that produced the numbers.
 VARIANTS = (
     ("gaussian", "baseline"),
+    # The second reference run. Not a treatment: it is the other primitive, and it is a much
+    # stronger geometry baseline than `gaussian`, so every treatment has to be read against it.
+    ("trisurfel", "trisurfel"),
     ("pd01_gaussian_nogate", "pd01"),
     ("dn05_gaussian", "dn05"),
     ("pd01_gaussian_dn", "pd01_dn"),

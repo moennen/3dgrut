@@ -39,6 +39,9 @@ import torch
 # capped at the delta1 boundary, so anything saturated is a pixel the metrics count as wrong.
 DEPTH_ERR_CAP = 0.25
 NORMAL_ERR_CAP = 90.0
+# 10% of full range. Mean absolute RGB error on these runs is 1.5-2%, so this cap keeps the
+# map from saturating while still showing where a PSNR difference of a few tenths of a dB is.
+RGB_ERR_CAP = 0.1
 
 # Percentiles of valid reference depth used to derive a scene's depth colour range, when one is
 # not supplied. Clipping the tails keeps the sky sentinel and a few near-camera pixels from
@@ -144,6 +147,16 @@ def render(args) -> dict:
                 "abs_rel": float(rel[valid].mean()),
                 "valid_px": int(valid.sum()),
             }
+
+            # RGB error against the reference image. PSNR is one number over the frame and says
+            # nothing about *where* a difference sits, which is the whole question when a
+            # geometry term costs a few tenths of a dB; this localises it.
+            if gpu_batch.rgb_gt is not None:
+                rgb_gt = gpu_batch.rgb_gt.squeeze(0).clamp(0, 1).float().cpu().numpy()
+                rgb_err = np.abs(rgb - rgb_gt).mean(-1)
+                _save(out_dir / f"{prefix}_rgb_err.png", _turbo(rgb_err / RGB_ERR_CAP))
+                frame["rgb_mae"] = float(rgb_err.mean())
+                frame["psnr"] = float(-10.0 * np.log10(max(np.mean((rgb - rgb_gt) ** 2), 1e-12)))
 
             normal_gt = getattr(gpu_batch, "normal_gt", None)
             if "pred_normals" in outputs and normal_gt is not None and normal_gt.numel():
