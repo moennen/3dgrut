@@ -181,7 +181,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | Plan item | Status | What is missing |
 |---|---|---|
 | 5. Depth-normal consistency | Landed, measured at 7k | 30k confirmation; `referenceSlang` throughput on 3DGRT |
-| 6. Pseudo-depth supervision | Not started | Monocular depth predictor integration, scale-invariant loss |
+| 6. Pseudo-depth supervision | Landed as an *ordinal* loss, measured over 3 seeds | 30k confirmation. Use `use_pseudo_depth_order` at lambda 0.1: −10 to −11% depth `abs_rel` on all three scenes, the only term here to help all of them, for 0.2–0.6 dB PSNR on two. The scale-invariant *regression* loss the plan called for is superseded — a globally aligned prior is worse than the model it would teach |
 | 7. Depth variance along the ray | Landed, measured over 4 seeds | 30k confirmation. Use `depth_variance_relative` at lambda 0.01; the absolute form is superseded and harms both scenes |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
 | 9. Scale-z regularisation | Landed, measured over 4 seeds | 30k confirmation. Best normals so far combined with item 5, at a 0.2 dB PSNR cost |
@@ -720,15 +720,159 @@ pseudo-depth supervision (plan item 6, section 4 below) is still the thing that 
 
 ### 4. Pseudo-depth supervision
 
-Nothing landed. Needs a monocular depth predictor and a cache — the dependency is heavier
-than the loss, and whether it can be a hard dependency of this repo is an open question, so
-the predictor should be run offline and its output loaded like any other reference channel.
-`threedgrut/datasets/gt_geometry.py` already loads reference depth, so the loading path
-exists; what it needs is a source that is not COLMAP ground truth.
+Landed as `loss.use_pseudo_depth_order`, but not in the form predicted, and the prediction is
+worth keeping because measuring it is what redirected the work.
 
-Must be scale-invariant (fit per-image scale and shift before comparing, or supervise a
-scale-free quantity). A naive L1 against a monocular prediction supervises the predictor's
-arbitrary affine gauge and will fight the photometric term.
+#### The original prediction, and why it was wrong
+
+> Must be scale-invariant (fit per-image scale and shift before comparing, or supervise a
+> scale-free quantity). A naive L1 against a monocular prediction supervises the predictor's
+> arbitrary affine gauge and will fight the photometric term.
+
+The diagnosis was right and the remedy was wrong. Fitting the per-image scale and shift *does*
+remove the gauge, and the result is still not worth supervising. `DepthAnythingV2-Base` on
+sponza, affine-fitted per frame against ground truth — the most favourable alignment possible,
+since it uses the ground truth the loss would not have:
+
+| Alignment | `abs_rel` |
+| --- | --- |
+| Global affine, one per frame | 0.0677 |
+| Per-64×64-patch affine | 0.0158 |
+| Per-16×16-patch affine | 0.0116 |
+| *The 7k model being trained, for reference* | *0.0580* |
+
+A globally aligned prior is **worse than the model it would be teaching** (0.068 vs 0.058), so
+an aligned L1 would have spent a foundation-model dependency to make depth worse, and the
+scale-invariance the plan called for would not have saved it. The patch numbers say why: the
+prior's *local* structure is excellent and its *global* structure drifts, so the useful signal
+is not in any single affine gauge and no amount of fitting one recovers it. This is the same
+lesson as the PGSR min-scale port — the reference quantity has to mean here what it means
+there, and "monocular depth" does not mean "depth up to one affine".
+
+Two further properties, both cheap to get wrong:
+
+- **The model emits disparity, not depth.** Correlation with `1/z` is +0.978; an affine fit in
+  disparity reaches R² 0.956 against 0.821 in depth. Reading it as a distance is not merely
+  mis-scaled, it is monotonically inverted.
+- **It emits z-depth, while this renderer's convention is Euclidean ray distance.** The radial
+  factor reaches 20% at the image corners, so the two are not interchangeable.
+
+#### What landed instead: ordinal supervision
+
+Since only the ordering survives, the loss reads only the ordering. For a pixel pair it asks
+whether the render agrees with the prior about which is nearer, and penalises the rendered gap
+only where they disagree. That is invariant to *any* increasing transform of the prior, not just
+an affine one, which disposes of the alignment problem, the disparity/depth inversion (one sign
+flip) and the z-vs-ray-distance question (irrelevant to ordering along a ray) at once. It is
+also one-sided: a pair the render already orders correctly contributes exactly zero and no
+gradient, so the term cannot fight geometry it agrees with.
+
+`threedgrut/utils/pseudo_depth_loss.py`, with the prior cached per scene by
+`threedgrut/datasets/pseudo_depth.py`.
+
+The population this targets is real: on the pixels where the trained model fails `delta1`, the
+prior is closer to ground truth **91%** of the time.
+
+#### Measured (7k, 3 seeds, `pd*` variants, gaussian primitive)
+
+`abs_rel`, mean ± stdev over `seed_initialization` 1–3, with the change against the `gaussian`
+baseline:
+
+| Variant | sponza | lone-monk | emerald-square |
+| --- | --- | --- | --- |
+| `gaussian` | 0.0571 ± 0.0009 | 0.0982 ± 0.0019 | 0.1368 ± 0.0010 |
+| `pd01_gaussian` (λ=0.1) | **0.0506 ± 0.0008** (−11.4%) | **0.0876 ± 0.0010** (−10.8%) | **0.1228 ± 0.0033** (−10.3%) |
+| `pd01_gaussian_gated` | 0.0508 ± 0.0010 (−11.2%) | 0.0873 ± 0.0012 (−11.0%) | 0.1378 ± 0.0045 (+0.7%) |
+
+PSNR, same runs:
+
+| Variant | sponza | lone-monk | emerald-square |
+| --- | --- | --- | --- |
+| `gaussian` | 36.29 ± 0.10 | 36.72 ± 0.04 | 32.90 ± 0.21 |
+| `pd01_gaussian` | 36.41 ± 0.02 (+0.12) | 36.52 ± 0.15 (−0.20) | 32.29 ± 0.20 (−0.61) |
+
+This is **the first geometry term in this document to improve depth on all three scenes**, by a
+consistent 10–11% at 4–8σ. Section 3's terms had to be argued scene by scene; this one does not.
+The cost is 0.2–0.6 dB PSNR on lone-monk and emerald-square, free on sponza — the same shape of
+trade as depth-normal consistency, at roughly twice the depth gain.
+
+The weight sweep at one seed, for where it breaks: λ=1 reaches −18% on lone-monk but costs
+emerald 2.4 dB; λ=10 gives up most of the depth gain; λ=100 is catastrophic (emerald `abs_rel`
+0.52, PSNR 16.4). The term is well-behaved only in a band, and 0.1 sits in it on all three
+scenes.
+
+Lone-monk deserves specific note. Section 3 recorded its depth as wrong "in an opaque,
+confidently-placed way that no ray-concentration term can reach" — 17.7% `delta1` failures with
+0.01% floaters. `dvrel1_gaussian` manages −1% there; the ordinal prior manages −11%. The
+prediction that an external prior would reach the failure an internal consistency condition
+cannot held.
+
+#### The gate: predicted from an offline metric, refuted by training
+
+This was the one substantive departure from the reference implementation in
+`/mnt/oss/blob-to-spoke`, which normalises the prior's difference to ±1 regardless of magnitude
+so that a near-tie counts as much as a confident ordering. Dropping near-ties looked clearly
+right offline — measured on sponza against ground truth at 0.05 pair separation:
+
+| Gate (fraction of disparity IQR) | Ordinal agreement with GT | Pairs kept |
+| --- | --- | --- |
+| 0 (the reference's behaviour) | 84% | 100% |
+| 0.05 | 97% | 55% |
+| 0.10 | 99% | 38% |
+
+13 points of agreement for 45% of the pairs, and ungated "one pair in six pushes the wrong way".
+Trained, it is neutral on sponza and lone-monk (within 0.0003 `abs_rel`, well inside seed noise)
+and it costs emerald-square **its entire gain**: +0.7% gated against −10.3% ungated, consistent
+across all three seeds (gated 0.1404/0.1404/0.1327, ungated 0.1264/0.1221/0.1199). The default is
+now 0.
+
+Two reasons, and both were visible in numbers already in this section:
+
+- A large `|Δdisp|` is a *long-range* comparison, and long range is exactly where this prior
+  drifts — one global affine scores 0.068 where per-16×16-patch scores 0.011. The gate therefore
+  selects for the prior's weakest structure and discards the local structure that is its
+  strongest. Emerald-square is the largest-extent scene of the three, which is why it is the one
+  that exposes this.
+- 97% agreement is not a benefit, it is a warning. The loss is one-sided, so a pair both sources
+  already order the same way contributes nothing; raising agreement to 97% means only 3% of the
+  surviving pairs can produce a gradient at all. The gate was selecting the pairs with the least
+  to teach.
+
+The methodological error is that the offline metric **counted pairs instead of asking what they
+teach**, and pair-count agreement is not the quantity the loss integrates. This is the same
+family of mistake as the `.detach()` in the depth-variance term: every check that was run passed,
+and the check that mattered was a different one. Where that one needed the gradient rather than
+the value, this one needed the trained result rather than the correlation.
+
+Pairs are also formed by cropping rather than by `torch.roll`; that departure stands. Wrapping
+pairs opposite image edges, which are unrelated in 3D, manufacturing disagreements the prior
+never claimed.
+
+#### The anchor hypothesis: confirmed in direction, still not enough
+
+Every other term here is an internal consistency condition; this one brings external
+information. Section 3 predicted that this is what the depth-variance family was missing: per-ray
+variance is zero for a Dirac at *any* distance, so it can only ask a ray to commit, not say
+where, and committing at the wrong distance is absorbing — the 170× rise in `wrong | tight`.
+
+Measured (one seed, sponza), the ordinal term does act as that anchor:
+
+| Variant | sponza `abs_rel` | sponza floater fraction |
+| --- | --- | --- |
+| `gaussian` | 0.0561 | 0.30% |
+| `dvrel1_gaussian` | 0.0593 (+6%) | 1.62% |
+| `pd1_dvrel1_gaussian` | 0.0528 (−6%) | 1.14% |
+| `pd1_gaussian` | 0.0504 (−10%) | 0.38% |
+
+Anchoring turns the variance term's +6% into −6% and takes back a third of the floaters it
+created, so the mechanism is real. But the pairing is still worse than the ordinal term *alone*
+on both metrics, on sponza and on emerald-square (+10% vs −2%). The honest reading is that the
+anchor hypothesis was right about the mechanism and wrong about the conclusion: what the variance
+term needed was indeed a reference for *where*, and once it has one the variance term is
+redundant rather than complementary. Nothing here rehabilitates it.
+
+`pd1_gaussian_dn`, stacking on depth-normal consistency, gives sponza's best depth (−11% at one
+seed) but costs 0.8 dB there, and does not beat `pd01_gaussian` on the other two scenes.
 
 ### 5. Multi-view consistency
 
@@ -909,7 +1053,7 @@ compiles Slang in a subprocess that resolves `slangc` from `PATH`, and without i
 fails with a `FileNotFoundError` unrelated to anything it is testing.
 
 ```bash
-# Full suite (~8 min): 302 passed, 1 skipped
+# Full suite (~9 min): 387 passed, 1 skipped
 python -m pytest threedgrut threedgut_tracer threedgrt_tracer scripts -q
 
 # The normal-specific tests
@@ -918,6 +1062,10 @@ python -m pytest threedgut_tracer/tests/test_normal_gradient.py \
                  threedgrt_tracer/tests/test_normal_pipeline_consistency.py \
                  threedgrut/utils/tests/test_depth_normal_loss.py \
                  threedgrut/utils/tests/test_geometry_supervision.py -q
+
+# The pseudo-depth tests: the ordinal loss and the prior's on-disk cache
+python -m pytest threedgrut/utils/tests/test_pseudo_depth_loss.py \
+                 threedgrut/datasets/tests/test_pseudo_depth.py -q
 
 black --check . && isort --check-only .   # line-length 120, configured in pyproject.toml
 ```

@@ -65,6 +65,24 @@ def _load_colmap_exif_exposures(
     return load_exif_exposures(image_paths)
 
 
+def _pseudo_depth_config(config) -> dict:
+    """Pseudo-depth settings for the training split, enabled by whichever loss consumes them.
+
+    The dataset-side `enabled` flag is derived rather than set by hand so that turning the loss
+    on cannot leave the prior unloaded (a silently zero loss), and turning it off cannot leave
+    the run paying to build a cache nothing reads.
+    """
+    settings = config.dataset.get("pseudo_depth", None)
+    if settings is None:
+        return {}
+    wanted = bool(config.loss.get("use_pseudo_depth_order", False))
+    return {
+        "enabled": bool(settings.get("enabled", False)) or wanted,
+        "model": settings.get("model", None),
+        "cache_dir": settings.get("cache_dir", None),
+    }
+
+
 def make(name: str, config, ray_jitter):
     match name:
         case "nerf":
@@ -107,6 +125,11 @@ def make(name: str, config, ray_jitter):
                 # training-side consumer (e.g. depth supervision) must opt in explicitly.
                 load_depth_gt=False,
                 load_normal_gt=False,
+                # The pseudo-depth prior is the opposite case: predicted from the images, it is
+                # a training signal, so it is loaded for the training split only. Keeping it
+                # distinct from load_depth_gt above is what keeps the ground truth honest as an
+                # evaluation reference.
+                pseudo_depth=_pseudo_depth_config(config),
             )
             val_dataset = ColmapDataset(
                 config.path,

@@ -213,11 +213,100 @@ DEPTH_VARIANCE_RELATIVE_VARIANTS: tuple[Variant, ...] = tuple(
     )
 )
 
+# Ordinal supervision from a monocular pseudo-depth prior (DepthAnythingV2). Unlike every term
+# above, this one brings *external information* rather than an internal consistency condition,
+# which is what makes it the interesting comparison: the depth-variance family can only ask a ray
+# to commit to some surface, while this says which of two pixels is nearer.
+#
+# The prior earns its place on measurement, not on being a foundation model. Aligned globally by
+# one affine per frame it reaches abs_rel 0.068 against ground truth, *worse* than the model being
+# trained (0.058), which is why nothing here fits a scale; per-16x16-patch it reaches 0.011, so the
+# ordering is what is worth reading. On the pixels where the trained model fails delta1 the prior
+# is better 91% of the time, so there is real signal in exactly the population this targets.
+#
+# Three things this sweep must separate.
+#
+#   - The weight. Measured: 0.1 is the setting, improving depth 10-11% on all three scenes over
+#     3 seeds; 1.0 trades 2.4 dB of emerald PSNR for a little more lone-monk depth, and 10 and
+#     above degrade both. 100 is retained to show where it breaks, not to use.
+#   - Whether the *gate* matters, which was the one substantive departure from the reference
+#     implementation in /mnt/oss/blob-to-spoke. It does, in the direction opposite to the one
+#     predicted: `pd01_gaussian_gated` is neutral against `pd01_gaussian` on sponza and
+#     lone-monk and gives up emerald-square's entire gain (+0.7% vs -10.3%). The offline
+#     argument for it -- ordinal agreement with ground truth rising from 84% to 97% -- counted
+#     pairs rather than asking what they teach, and a large disparity gap turns out to select
+#     for long-range comparisons, the regime where this prior drifts. The gate is off by default
+#     and these variants keep the comparison runnable.
+#   - Whether it supplies the anchor the depth-variance family lacks. `pd1_dvrel1_gaussian` is
+#     the test of that: variance alone locks floaters at whatever wrong distance they already
+#     occupy (`wrong | tight` rising 170x), because nothing tells it *where*. Measured, the
+#     ordinal term does repair it -- sponza goes from +6% depth for `dvrel1_gaussian` alone to
+#     -6% paired, and sponza floaters from 1.62% to 1.14% against a 0.30% baseline -- but the
+#     pair is still worse than the ordinal term alone (-10%), so the variance term does not earn
+#     its place even once anchored.
+#
+# Read this one on lone-monk especially. Its depth is wrong in an opaque, confidently-placed way
+# that no ray-concentration term can reach -- 17.7% delta1 failures with 0.01% floaters -- so it
+# is the scene where an external prior should win and the variance family cannot. It does: -11%
+# depth where `dvrel1_gaussian` manages -1%.
+PSEUDO_DEPTH_OVERRIDES = (
+    "loss.use_pseudo_depth_order=true",
+    "loss.lambda_pseudo_depth_order=1.0",
+)
+
+PSEUDO_DEPTH_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"pd{weight_name}_{primitive_name}" + suffix,
+        (
+            f"render.primitive_type={primitive}",
+            "loss.use_pseudo_depth_order=true",
+            f"loss.lambda_pseudo_depth_order={weight}",
+            f"loss.pseudo_depth_gate={gate}",
+        )
+        + extra,
+        f"Ordinal pseudo-depth at lambda={weight} on {primitive_name}, gate={gate}{note}",
+    )
+    for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
+    for weight_name, weight, gate, suffix, note, extra in (
+        ("01", 0.1, 0.0, "", ".", ()),
+        ("1", 1.0, 0.0, "", ".", ()),
+        ("10", 10.0, 0.0, "", ".", ()),
+        ("100", 100.0, 0.0, "", ".", ()),
+        # The gate, swept over the same lambdas rather than compared at one, because it is not
+        # weight-neutral: it keeps only the large-gap pairs, which raises the mean the loss
+        # reports and so raises the effective weight. Comparing gated against ungated at a
+        # single lambda would measure that shift as much as the gate itself.
+        ("01", 0.1, 0.05, "_gated", ", gated (refuted; see above).", ()),
+        ("1", 1.0, 0.05, "_gated", ", gated (refuted; see above).", ()),
+        ("10", 10.0, 0.05, "_gated", ", gated (refuted; see above).", ()),
+        ("1", 1.0, 0.0, "_dn", " with depth-normal.", DEPTH_NORMAL_OVERRIDES),
+    )
+)
+
+# The pairing the ordinal term exists to test: an anchor for the relative depth-variance term.
+PSEUDO_DEPTH_VARIANCE_VARIANTS: tuple[Variant, ...] = (
+    Variant(
+        "pd1_dvrel1_gaussian",
+        (
+            "render.primitive_type=instances",
+            "render.enable_depth_variance=true",
+            "loss.use_depth_variance=true",
+            "loss.depth_variance_relative=true",
+            "loss.lambda_depth_variance=1.0",
+            "loss.depth_variance_from_iter=3000",
+        )
+        + PSEUDO_DEPTH_OVERRIDES,
+        "Relative depth variance at lambda=1 anchored by ordinal pseudo-depth at lambda=1.",
+    ),
+)
+
 ALL_VARIANTS: tuple[Variant, ...] = (
     BASELINE_VARIANTS
     + DEPTH_NORMAL_VARIANTS
     + FLATNESS_VARIANTS
     + DEPTH_VARIANCE_VARIANTS
+    + PSEUDO_DEPTH_VARIANTS
+    + PSEUDO_DEPTH_VARIANCE_VARIANTS
     + DEPTH_VARIANCE_RELATIVE_VARIANTS
 )
 

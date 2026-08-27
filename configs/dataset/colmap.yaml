@@ -12,3 +12,17 @@ load_exif: true  # Load EXIF exposure data from JPEG images for post-processing
 # Off by default: most COLMAP scenes have none, and reading it costs time per frame.
 load_depth_gt: false
 load_normal_gt: false
+
+# Monocular pseudo-depth prior, for loss.use_pseudo_depth_order. Predicted from the images
+# alone by a foundation model, so it is independent of load_depth_gt above -- that ground truth
+# stays reserved for evaluation and the training split never reads it.
+pseudo_depth:
+  # Enabled by the loss, not here: this only says where the prior comes from. Set by the
+  # trainer, which turns it on for the training split when the loss needs it.
+  enabled: false
+  # HuggingFace id of the depth model. The cache directory embeds this, so changing it cannot
+  # silently reuse the previous model's predictions. Note the output is *disparity*.
+  model: depth-anything/Depth-Anything-V2-Base-hf
+  # Where to keep predictions. null puts them under <path>/pseudo_depth_cache, which needs the
+  # scene directory to be writable; point this elsewhere for a read-only dataset.
+  cache_dir: null

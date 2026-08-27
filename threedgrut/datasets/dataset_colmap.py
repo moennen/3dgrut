@@ -38,6 +38,7 @@ from .gt_geometry import (
     validate_scene_conventions,
 )
 from .protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
+from .pseudo_depth import PseudoDepthCache
 from .utils import (
     compute_max_radius,
     create_camera_visualization,
@@ -132,6 +133,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         gsplat_image_downscale: bool = False,
         load_depth_gt: bool = False,
         load_normal_gt: bool = False,
+        pseudo_depth: Optional[dict] = None,
     ):
         self.path = path
         self.device = device
@@ -146,6 +148,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.gsplat_image_downscale = gsplat_image_downscale
         self.load_depth_gt = bool(load_depth_gt)
         self.load_normal_gt = bool(load_normal_gt)
+        self.pseudo_depth_config = dict(pseudo_depth) if pseudo_depth else {}
         self.world_normalization_transform = np.eye(4, dtype=np.float32)
 
         # Worker-based GPU cache for multiprocessing compatibility
@@ -205,6 +208,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.n_frames = self.poses.shape[0]
 
         self._resolve_gt_geometry_paths()
+        self._prepare_pseudo_depth()
 
         # Clear existing worker caches to force recreation with new intrinsics
         self._worker_gpu_cache.clear()
@@ -241,6 +245,28 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 )
             setattr(self, attribute, paths)
             setattr(self, f"{suffix}_gt_available", True)
+
+    def _prepare_pseudo_depth(self) -> None:
+        """Build (or attach to) the monocular pseudo-depth cache for this split.
+
+        Populating the whole split up front rather than on first access keeps the model off the
+        critical path: the dataloader workers only ever read `.npy` files, so no worker needs
+        `transformers` or a share of the GPU.
+        """
+        self.pseudo_depth_cache = None
+        self.pseudo_depth_available = False
+        if not self.pseudo_depth_config.get("enabled", False):
+            return
+
+        cache = PseudoDepthCache(
+            scene_path=self.path,
+            model_id=self.pseudo_depth_config["model"],
+            cache_dir=self.pseudo_depth_config.get("cache_dir"),
+            device=self.device,
+        )
+        cache.ensure(self.image_paths)
+        self.pseudo_depth_cache = cache
+        self.pseudo_depth_available = True
 
     def _load_points_for_world_normalization(self) -> np.ndarray:
         points_candidates = [
@@ -776,6 +802,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         if self.normal_gt_available:
             output_dict["normal_gt"] = torch.from_numpy(self._load_normal_gt(idx, actual_h, actual_w)).unsqueeze(0)
 
+        if self.pseudo_depth_available:
+            disparity = self.pseudo_depth_cache.load(self.image_paths[idx], actual_h, actual_w)
+            output_dict["pseudo_disparity"] = torch.from_numpy(disparity)[None, ..., None]
+
         # Add EXIF exposure if available for this frame
         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
             output_dict["exposure"] = torch.tensor(self.exif_exposures[idx], dtype=torch.float32)
@@ -829,7 +859,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = (mask > 0.5).to(torch.float32)
             sample["mask"] = mask
 
-        for key in ("depth_gt", "normal_gt"):
+        for key in ("depth_gt", "normal_gt", "pseudo_disparity"):
             if key in batch:
                 sample[key] = batch[key][0].to(self.device, non_blocking=True)
 

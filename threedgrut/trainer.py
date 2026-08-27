@@ -15,6 +15,7 @@
 
 import json
 import os
+import random
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -42,6 +43,7 @@ from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.depth_variance_loss import depth_variance_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
+from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_order_loss
 from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 from threedgrut.utils.timer import CudaTimer
 
@@ -129,6 +131,14 @@ class Trainer3DGRUT:
         """ Step at which NHT color refinement starts """
         self._in_color_refine = False
         """ Whether NHT color refinement is active """
+        self._pseudo_depth_rng = random.Random(conf.seed_initialization)
+        """ Host RNG for the pseudo-depth pair offsets.
+
+        Kept on the host and separate from the torch RNG on purpose: the offset is a control
+        decision, so drawing it on the device would force a synchronisation every iteration
+        just to read it back, and taking it from the global torch RNG would make the sampled
+        pairs depend on how many other terms happened to draw before it.
+        """
 
         # Setup the trainer and components
         logger.log_rule("Load Datasets")
@@ -793,6 +803,37 @@ class Trainer3DGRUT:
                 )
                 lambda_depth_variance = self.conf.loss.lambda_depth_variance
 
+        # Ordinal pseudo-depth supervision. Not gated on settled geometry like the two terms
+        # above: it constrains *where* surfaces are rather than how sharp they are, which is
+        # most useful before the geometry commits.
+        loss_pseudo_depth = torch.zeros(1, device=self.device)
+        lambda_pseudo_depth = 0.0
+        if (
+            self.conf.loss.use_pseudo_depth_order
+            and not self._in_color_refine
+            and self.global_step >= self.conf.loss.pseudo_depth_from_iter
+        ):
+            prior = getattr(gpu_batch, "pseudo_disparity", None)
+            if prior is None or prior.numel() == 0:
+                # The prior is absent whenever the dataset did not build a cache, which would
+                # otherwise leave this term silently at zero for the whole run.
+                raise ValueError(
+                    "loss.use_pseudo_depth_order is set but the batch carries no pseudo-depth "
+                    "prior. The training split must be built with dataset.pseudo_depth.enabled, "
+                    "which only the colmap dataset supports."
+                )
+            with torch.cuda.nvtx.range(f"loss-pseudo-depth-order"):
+                loss_pseudo_depth = compute_pseudo_depth_order_loss(
+                    outputs["pred_dist"],
+                    outputs["pred_opacity"],
+                    prior,
+                    self.model.scene_extent,
+                    shift_fraction=self.conf.loss.pseudo_depth_shift_fraction,
+                    gate=self.conf.loss.pseudo_depth_gate,
+                    rng=self._pseudo_depth_rng,
+                )
+                lambda_pseudo_depth = self.conf.loss.lambda_pseudo_depth_order
+
         # Total loss
         loss = (
             lambda_l1 * loss_l1
@@ -802,6 +843,7 @@ class Trainer3DGRUT:
             + lambda_scale_flatten * loss_scale_flatten
             + lambda_depth_normal * loss_depth_normal
             + lambda_depth_variance * loss_depth_variance
+            + lambda_pseudo_depth * loss_pseudo_depth
         )
         return dict(
             total_loss=loss,
@@ -813,6 +855,7 @@ class Trainer3DGRUT:
             scale_flatten_loss=lambda_scale_flatten * loss_scale_flatten,
             depth_normal_loss=lambda_depth_normal * loss_depth_normal,
             depth_variance_loss=lambda_depth_variance * loss_depth_variance,
+            pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -961,6 +1004,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_depth_variance:
                 depth_variance = np.mean(batch_metrics["losses"]["depth_variance_loss"])
                 writer.add_scalar("loss/depth_variance/train", depth_variance, global_step)
+            if self.conf.loss.use_pseudo_depth_order:
+                pseudo_depth = np.mean(batch_metrics["losses"]["pseudo_depth_order_loss"])
+                writer.add_scalar("loss/pseudo_depth_order/train", pseudo_depth, global_step)
             if self.post_processing is not None and "post_processing_reg_loss" in batch_metrics["losses"]:
                 post_processing_reg_loss = np.mean(batch_metrics["losses"]["post_processing_reg_loss"])
                 writer.add_scalar(

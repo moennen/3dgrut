@@ -237,6 +237,35 @@ loss:
   # every ray is diffuse and the term would fight the reconstruction rather than sharpen it.
   depth_variance_from_iter: 7000
 
+  # Ordinal supervision from a monocular pseudo-depth prior: penalises pixel pairs the render
+  # orders opposite to the prior, and nothing else. Reads only the sign of the prior's
+  # differences, so it is invariant to any increasing transform of it and needs no alignment.
+  # Turns on dataset.pseudo_depth for the training split, which builds a cache on first use.
+  #
+  # The only geometry term here measured to improve depth on all of sponza, lone-monk and
+  # emerald-square. It was built as the *anchor* the depth-variance term lacks -- variance says
+  # "commit to a surface" without saying where -- and it does repair that term, but it is better
+  # alone than paired with it, so prefer it on its own. See docs/normal-supervision.md.
+  use_pseudo_depth_order: false
+  # 0.1 measured on OB3D at 7k over 3 seeds: depth abs_rel improves 10-11% on sponza,
+  # lone-monk *and* emerald-square, the first geometry term here to help all three. Costs
+  # 0.2-0.6 dB PSNR on lone-monk and emerald and is free on sponza. 1.0 buys a little more
+  # depth on lone-monk for 2.4 dB on emerald; 10 and above degrade both.
+  lambda_pseudo_depth_order: 0.0
+  # Pairs are drawn at a random offset of up to this fraction of the longer image side.
+  pseudo_depth_shift_fraction: 0.05
+  # Drop pairs whose prior disparity differs by less than this fraction of the map's
+  # inter-quartile range. Off, because measurement contradicted the idea: gating is neutral on
+  # sponza and lone-monk and costs emerald-square its entire gain (+0.7% vs -10.3% depth). A
+  # large disparity gap is a long-range comparison, which is exactly where this prior drifts,
+  # so the gate keeps its weakest structure and drops the local structure that is its best.
+  # Retained only so the comparison stays runnable -- see docs/normal-supervision.md.
+  pseudo_depth_gate: 0.0
+  # Iteration the term switches on. Unlike the depth-normal and variance terms this one does
+  # not need settled geometry -- it supplies coarse ordering, which is most useful early -- so
+  # it defaults to being on from the start.
+  pseudo_depth_from_iter: 0
+
 # Post-processing configuration
 post_processing:
   # null | "ppisp" | "linear-to-srgb"

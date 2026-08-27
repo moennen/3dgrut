@@ -40,6 +40,7 @@ def build_dataset(tmp_path, monkeypatch, *, frames=4, split="val", **kwargs) -> 
     dataset.test_split_interval = 0
     dataset.load_depth_gt = False
     dataset.load_normal_gt = False
+    dataset.pseudo_depth_config = {}
     for key, value in kwargs.items():
         setattr(dataset, key, value)
 

@@ -10,7 +10,7 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~9 min, currently 354 passed, 1 skipped
+# ~9 min, currently 387 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
@@ -124,6 +124,21 @@ buffer that loses to that control.
   mip-NeRF/2DGS `|t_i - t_j|` kernel it replaced would have needed a new accumulator on three
   backward paths to reach a strictly worse place. Check what the existing buffers can already
   express before extending the renderer.
+- An offline agreement metric is not a proxy for a trained result, and counting *pairs* is not
+  measuring what they teach. Gating the ordinal pseudo-depth loss to drop near-tied pairs lifts
+  the prior's ordinal agreement with ground truth from 84% to 97%, which looked decisive; trained
+  over 3 seeds it is neutral on two scenes and costs emerald-square its entire 10% depth gain.
+  A large prior gap selects *long-range* pairs, the regime where a monocular prior drifts (one
+  global affine scores `abs_rel` 0.068 against 0.011 per 16x16 patch), so the gate kept the
+  prior's weakest structure. High agreement is also a warning for a one-sided loss: at 97% only
+  3% of surviving pairs can produce any gradient. Sweep the knob rather than trusting the
+  diagnostic that motivated it.
+- A monocular depth prior is not usable as depth, only as *ordering*. `DepthAnythingV2` fitted
+  per frame by the best possible affine still scores `abs_rel` 0.068 on sponza, worse than the
+  7k model it would be teaching (0.058); per 16x16 patch it scores 0.011. It also emits
+  *disparity* (correlation +0.978 with `1/z`, so reading it as distance is monotonically
+  inverted) and *z-depth*, while this renderer's convention is Euclidean ray distance, which
+  differ by 20% at the image corners. An ordinal loss is invariant to all three problems.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.
