@@ -124,6 +124,38 @@ DA3's any-view checkpoints also make *worse* monocular priors than `DA3MONO-LARG
 and rung -- one image is the case they cannot exploit -- so do not reach for a bigger any-view
 model expecting a better single-image prior.
 
+**"The prior is worse than the model" is a per-scene fact, and I generalised it from one scene.**
+It was measured on sponza, where the aligned prior is 0.057 against the model's 0.037, and used to
+abandon regression outright. On lone-monk and emerald-square the same prior is 2.2-2.4x *better*
+than the model (0.042 vs 0.091, 0.079 vs 0.188). The pattern is that a prior beats the model
+exactly where the model is bad, so a prior-based term is a floor rather than a teacher of detail,
+and whether it can teach anything has to be checked on each scene before the term is written off
+or switched on globally.
+
+**Fit the alignment on the sparse points, not on ground truth, before calling the number an upper
+bound.** `scripts/ablation/sparse_align_diagnostic.py` fits each alignment both ways. A per-frame
+affine estimated from the 1000-5200 COLMAP points visible in a frame costs +11 to +14% against a
+ground-truth fit on two scenes and is 4-7% *better* on the third -- better because the
+ground-truth fit is least squares over all pixels while `abs_rel` weights near pixels more, and
+sparse points sit on the textured near geometry the metric cares about. So a ground-truth
+least-squares fit is not even an upper bound for the metric being reported, and alignment
+estimability was not the obstacle it was assumed to be.
+
+**A "metric" checkpoint is not automatically globally consistent; measure the global rung.**
+`DA3METRIC-LARGE` is metric and its whole appeal is needing one COLMAP-units-to-metres alignment
+for the scene, which would make its supervision multi-view consistent for free. One global
+alignment is 1.2-3.5x worse than per-frame on all three scenes, and under a global fit it loses to
+the *relative* `DA3MONO-LARGE` on two of them. Once a per-frame affine is needed anyway the metric
+property buys nothing, and DA3MONO matches or beats it. Its sky segmentation remains a real
+advantage for a per-pixel depth term, which is a different reason to pick it.
+
+When projecting COLMAP points into a frame for this kind of comparison, validate the chain rather
+than trusting it: `image.xys` are at COLMAP's *full* resolution and need the downscale factor the
+dataset computes as a local and discards; `depth_gt` is ray distance so the point's `norm` is
+wanted, not its `z`; `normalize_world_space` scales poses and `depth_gt` and the points must
+follow. Comparing each point's own depth against `depth_gt` at its pixel catches all three (0.4-
+0.7% median when right), and every one of them yields plausible-looking `abs_rel` when wrong.
+
 ## Conventions
 
 - Rendered depth is Euclidean ray distance, not z-depth, so a plane is not constant depth.

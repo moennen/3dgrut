@@ -181,7 +181,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | Plan item | Status | What is missing |
 |---|---|---|
 | 5. Depth-normal consistency | Landed, measured at 7k | 30k confirmation; `referenceSlang` throughput on 3DGRT |
-| 6. Pseudo-depth supervision | Landed as an *ordinal* loss, measured over 3 seeds | 30k confirmation. Use `use_pseudo_depth_order` at lambda 0.1: −10 to −11% depth `abs_rel` on all three scenes, the only term here to help all of them, for 0.2–0.6 dB PSNR on two. The scale-invariant *regression* loss the plan called for is superseded — a globally aligned prior is worse than the model it would teach |
+| 6. Pseudo-depth supervision | Landed as an *ordinal* loss, measured over 3 seeds | 30k confirmation. Use `use_pseudo_depth_order` at lambda 0.1: −10 to −11% depth `abs_rel` on all three scenes, the only term here to help all of them, for 0.2–0.6 dB PSNR on two. The scale-invariant *regression* loss the plan called for is **reopened**: it was set aside because a globally aligned prior is worse than the model it would teach, which holds on sponza but not on lone-monk or emerald-square, where a sparse-point-aligned DA3MONO is 2.2–2.4x better than the model |
 | 7. Depth variance along the ray | Landed, measured over 4 seeds | 30k confirmation. Use `depth_variance_relative` at lambda 0.01; the absolute form is superseded and harms both scenes |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
 | 9. Scale-z regularisation | Landed, measured over 4 seeds | 30k confirmation. Best normals so far combined with item 5, at a 0.2 dB PSNR cost |
@@ -1030,7 +1030,8 @@ of the difference. This matters beyond bookkeeping because a sparse-point alignm
 where a *regression* loss would live, and section 3's decision to abandon regression was taken on
 affine numbers alone. It does not overturn that decision — 0.05 is still worse than the 0.037
 model being taught — but the margin is not what it appeared to be, and a metric prior changes the
-shape of the problem.
+shape of the problem. Measured properly below, that decision does not survive on two of the
+three scenes: it was sponza-only.
 
 *Any-view checkpoints are worse monocular priors than the monocular one.* `DA3-LARGE` loses to
 `DA3MONO-LARGE` on every scene and every rung, and on sponza loses to DAv2 as well (0.0967 vs
@@ -1056,6 +1057,65 @@ source checkout. The two conventions are handled explicitly: DAv2 emits disparit
 emits z-depth (larger = farther), so `compute_pseudo_depth_order_loss` takes a required
 `quantity` argument with no default, each backend declares its own, and the quantity is part of
 the on-disk cache identity so the two can never be confused for one another.
+
+#### Reopening regression: what a sparse-point alignment actually costs
+
+Section 3 abandoned regression because the prior was worse than the model it would teach. That
+was measured **on sponza only**, and it does not generalise. Against the trained trisurfel
+baseline over the same 10 frames:
+
+| scene | model `abs_rel` | best prior, per-frame affine on sparse points | ratio | `p_closer` |
+| --- | --- | --- | --- | --- |
+| sponza | 0.0365 | 0.0574 (DA3MONO) | **0.64x — prior worse** | 0.327 |
+| lone-monk | 0.0911 | 0.0418 (DA3MONO) | **2.18x better** | 0.648 |
+| emerald-square | 0.1882 | 0.0776 (DA3METRIC) | **2.43x better** | 0.768 |
+
+The prior wins exactly where the model is bad and loses where it is good, which is unsurprising
+but decides the shape of any regression term: it is a floor, not a teacher of detail, and it
+cannot be switched on everywhere. Note especially **lone-monk** — the scene with no floaters and
+17.7% `delta1` failures that no ray-concentration term can reach. A prior 2.2x better than the
+model is the first signal measured that has anything to offer it, and the ordinal term is
+demonstrably not extracting it: ordinal supervision took lone-monk to 0.0866 while the aligned
+prior sits at 0.0418.
+
+`scripts/ablation/sparse_align_diagnostic.py` measures this. It fits every alignment twice, once
+on ground truth and once on the COLMAP sparse points visible in that frame, and validates its own
+transform chain by checking the points' Euclidean depth against `depth_gt` at the same pixel
+(0.4–0.7% median across the three scenes, so the projection, units and downscale factor are
+right).
+
+**The alignment is estimable, which I had assumed was the weak link.** Per-frame affine fitted on
+sparse points costs +11% to +14% against the ground-truth fit on sponza and lone-monk, and on
+emerald-square it is 4–7% *better*. Better, because the ground-truth fit is least squares over
+every pixel while `abs_rel` weights near pixels more, and the sparse points happen to be
+concentrated on exactly the textured near geometry the metric cares about — so the "upper bound"
+framing was wrong twice over: a ground-truth least-squares fit is not an upper bound for this
+metric. With 1000–5200 points per frame there is no coverage problem to solve.
+
+**But the metric route fails, and that is the reason to want DA3METRIC.** A *metric* prior should
+need one alignment for the whole scene — COLMAP units to metres — and then its depth is
+multi-view consistent for free, which is what section 5 wants. Measured, one global alignment is
+1.2x to 3.5x worse than per-frame:
+
+| scene | DA3METRIC: global scale / global affine / per-frame affine | DA3MONO |
+| --- | --- | --- |
+| sponza | 0.1141 / 0.1028 / 0.0727 | 0.2042 / 0.2031 / 0.0574 |
+| lone-monk | 0.1034 / 0.1025 / 0.0437 | 0.0800 / 0.0741 / 0.0418 |
+| emerald-square | 0.1205 / 0.1057 / 0.0776 | 0.1426 / 0.0980 / 0.0794 |
+
+DA3METRIC's predictions are not consistent frame-to-frame beyond a single scale, and under a
+global fit it is *worse* than the relative DA3MONO on lone-monk (0.1025 vs 0.0741) and
+emerald-square (0.1057 vs 0.0980). Its metric output does not buy global consistency on these
+scenes. Once a per-frame affine is required anyway, DA3METRIC has no remaining advantage:
+DA3MONO matches or beats it on two scenes of three. The one thing DA3METRIC still offers a
+regression loss is its **sky segmentation**, which a per-pixel depth term genuinely needs and
+neither DAv2 nor DA3MONO emits.
+
+So regression is worth reopening on lone-monk and emerald-square, with DA3MONO, a per-frame
+affine fitted offline to sparse points, and no expectation that a global fit will do. Two cautions
+carried forward: `p_closer` of 0.65–0.77 means a quarter to a third of pixels get pulled the wrong
+way by an L1 term, and the confidence gate of section 3 is the standing warning against assuming
+a mask fixes that.
 
 ### 5. Multi-view consistency
 

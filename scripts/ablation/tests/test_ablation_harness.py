@@ -232,3 +232,91 @@ class TestPriorAlignment:
         assert labels[:3] == ["raw (no fit)", "scale only", "affine, global"]
         patches = [patch for _, mode, patch in ALIGNMENTS if mode == "affine" and patch]
         assert patches == sorted(patches, reverse=True)
+
+
+class TestSparseObservations:
+    """COLMAP sparse points projected into a frame, in `sparse_align_diagnostic`.
+
+    This is the part of the regression-prior measurement with no natural sanity check inside the
+    numbers it produces: a wrong downscale factor, a transposed pixel or z-instead-of-distance
+    all yield plausible-looking `abs_rel`. The script validates itself at runtime by comparing
+    the points against reference depth, and these pin the arithmetic that check relies on.
+    """
+
+    @staticmethod
+    def _identity_image(xys, ids):
+        from threedgrut.datasets.utils import Image
+
+        return Image(
+            id=1,
+            qvec=np.array([1.0, 0.0, 0.0, 0.0]),  # identity rotation
+            tvec=np.zeros(3),
+            camera_id=1,
+            name="frame.png",
+            xys=np.asarray(xys, dtype=np.float64),
+            point3D_ids=np.asarray(ids),
+        )
+
+    def test_a_point_on_the_axis_gives_its_own_depth(self) -> None:
+        from sparse_align_diagnostic import sparse_observations
+
+        image = self._identity_image([[8.0, 6.0]], [7])
+        rows = sparse_observations(image, {7: np.array([0.0, 0.0, 5.0])}, 1.0, 1.0, (12, 16))
+        assert rows.shape == (1, 4)
+        col, row, z, dist = rows[0]
+        assert (col, row) == (8.0, 6.0)
+        # On the optical axis z and Euclidean distance coincide; off it they must not.
+        assert z == pytest.approx(5.0) and dist == pytest.approx(5.0)
+
+    def test_distance_exceeds_z_off_axis(self) -> None:
+        """`depth_gt` is ray distance, so returning z would understate depth everywhere but the centre."""
+        from sparse_align_diagnostic import sparse_observations
+
+        image = self._identity_image([[0.0, 0.0]], [1])
+        rows = sparse_observations(image, {1: np.array([3.0, 4.0, 12.0])}, 1.0, 1.0, (12, 16))
+        assert rows[0, 2] == pytest.approx(12.0)
+        assert rows[0, 3] == pytest.approx(13.0)  # sqrt(9 + 16 + 144)
+
+    def test_the_downscale_factor_divides_the_pixel_but_not_the_depth(self) -> None:
+        from sparse_align_diagnostic import sparse_observations
+
+        image = self._identity_image([[8.0, 6.0]], [1])
+        rows = sparse_observations(image, {1: np.array([0.0, 0.0, 5.0])}, 2.0, 1.0, (12, 16))
+        assert (rows[0, 0], rows[0, 1]) == (4.0, 3.0)
+        assert rows[0, 3] == pytest.approx(5.0)
+
+    def test_world_scale_multiplies_the_depth_but_not_the_pixel(self) -> None:
+        """`normalize_world_space` rescales poses and `depth_gt`; the points must follow."""
+        from sparse_align_diagnostic import sparse_observations
+
+        image = self._identity_image([[8.0, 6.0]], [1])
+        rows = sparse_observations(image, {1: np.array([0.0, 0.0, 5.0])}, 1.0, 0.5, (12, 16))
+        assert (rows[0, 0], rows[0, 1]) == (8.0, 6.0)
+        assert rows[0, 3] == pytest.approx(2.5)
+
+    @pytest.mark.parametrize(
+        "xy,xyz,ids,why",
+        [
+            ([[8.0, 6.0]], {1: np.array([0.0, 0.0, -5.0])}, [1], "behind the camera"),
+            ([[8.0, 6.0]], {}, [1], "point id absent from points3D"),
+            ([[8.0, 6.0]], {1: np.array([0.0, 0.0, 5.0])}, [-1], "keypoint never triangulated"),
+            ([[99.0, 6.0]], {1: np.array([0.0, 0.0, 5.0])}, [1], "outside the frame"),
+        ],
+    )
+    def test_unusable_observations_are_dropped(self, xy, xyz, ids, why) -> None:
+        from sparse_align_diagnostic import sparse_observations
+
+        rows = sparse_observations(self._identity_image(xy, ids), xyz, 1.0, 1.0, (12, 16))
+        assert rows.shape == (0, 4), why
+
+    def test_points3d_text_reader_keeps_the_ids(self, tmp_path: Path) -> None:
+        """The repo's own readers drop them, which is why this one exists."""
+        from sparse_align_diagnostic import read_points3d_with_ids
+
+        (tmp_path / "points3D.txt").write_text(
+            "# comment\n" "5 1.0 2.0 3.0 255 0 0 0.5 1 0 2 1\n" "9 -1.0 0.0 4.0 0 255 0 0.25 1 3\n"
+        )
+        points = read_points3d_with_ids(tmp_path)
+        assert sorted(points) == [5, 9]
+        assert points[5] == pytest.approx(np.array([1.0, 2.0, 3.0]))
+        assert points[9] == pytest.approx(np.array([-1.0, 0.0, 4.0]))
