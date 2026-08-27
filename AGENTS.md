@@ -37,6 +37,35 @@ Judge geometry changes on `n_gain` (the rendered normal against a view-direction
 uses no geometry) rather than the raw angle: the baseline showed a plausible-looking normal
 buffer that loses to that control.
 
+## Reporting
+
+`scripts/report/build_report.sh` rebuilds `geometry-supervision-report.pdf` (a beamer deck
+covering the geometry-supervision arc) from the run records. Pass `--render` to also re-render
+the qualitative panels from checkpoints, which needs a GPU and the run directories.
+
+```bash
+./scripts/report/build_report.sh            # figures + PDF from existing panels
+./scripts/report/build_report.sh --render   # also re-render panels from checkpoints
+```
+
+- Every plot is generated from `results.jsonl`, so it cannot drift from the measurements. Pass
+  *all* the results files: repeats of a `(variant, scene)` cell across files are the separate
+  seeds, and picking one file silently reduces a 3-seed mean to a single run -- which is how the
+  first draft under-reported the ordinal term as -8% instead of -11%.
+- `render_views.py` renders one variant per process, because `enable_normals`,
+  `primitive_type` and `enable_depth_variance` are compiled into the binary a process holds.
+  `render_all.py` drives it and passes the *baseline's* depth range to every other variant; each
+  panel fitted to its own range makes any two variants look unlike each other regardless of
+  accuracy.
+- The radiance output key is `pred_features`, not `pred_rgb`, and `normal_metrics` wants the
+  validity mask as `[B, H, W]` while the depth path carries `[B, H, W, 1]`.
+- Verify hand-typed numbers in the deck against the records before claiming anything. Doing this
+  caught a wrong claim ("the pair gives the best sponza depth anywhere") and a qualitative
+  reading that inverted on measurement: `pd + dn` removes the baseline's starburst artifacts on
+  emerald-square, but its mean RGB error against the reference is *worse* (4.28 -> 4.80, closer
+  on only 41% of pixels), so the PSNR cost is a real regression rather than a metric artefact.
+  `make_figures.py --fig-root` prints that breakdown.
+
 ## Conventions
 
 - Rendered depth is Euclidean ray distance, not z-depth, so a plane is not constant depth.
