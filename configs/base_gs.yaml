@@ -266,6 +266,25 @@ loss:
   # it defaults to being on from the start.
   pseudo_depth_from_iter: 0
 
+  # Regression supervision from the same prior: L1 between the rendered ray distance and the
+  # prior put into scene units by a per-frame affine fitted to the COLMAP sparse points. Needs
+  # a *depth* prior (dataset.pseudo_depth.backend: depth_anything_3), because the alignment is
+  # an affine in z and a disparity prior is affine to inverse z; it refuses rather than guess.
+  # Turns on dataset.pseudo_depth.align_to_sparse_points as well as the cache.
+  #
+  # The largest depth effect measured in this repo: at lambda 0.1 over 3 seeds, depth `abs_rel`
+  # falls 60% on lone-monk, 46% on emerald-square and 11% on sponza, and lone-monk's `delta1`
+  # failure rate goes from 18.7% to 1.8%. PSNR costs -0.33 to +0.34 dB. lambda 1.0 costs
+  # 1.1-2.4 dB and is worse on depth than 0.1 everywhere; 0.01 is better on emerald-square alone.
+  #
+  # It supersedes the ordinal term rather than complementing it -- running both adds nothing --
+  # and it is off by default only because it needs the `depth_anything_3` package on PYTHONPATH.
+  use_pseudo_depth_l1: false
+  lambda_pseudo_depth_l1: 0.0
+  # Iteration the term switches on. Like the ordinal term this supplies coarse placement rather
+  # than sharpness, so it does not wait for settled geometry.
+  pseudo_depth_l1_from_iter: 0
+
 # Post-processing configuration
 post_processing:
   # null | "ppisp" | "linear-to-srgb"

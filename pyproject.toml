@@ -124,10 +124,12 @@ url = "https://pypi.org/simple"
 [tool.black]
 target-version = ["py311"]
 line-length = 120
+# Matched against the path from the project root, which always starts with a slash. The `^/...`
+# anchor must therefore be at the top level: wrapped in the `/(...)/ ` group this file used to
+# carry, it could never match, and `black .` silently reformatted the vendored submodule on every
+# run -- 11 files of tiny-cuda-nn, which then showed up as permanent submodule drift.
 extend-exclude = '''
-/(
-  ^/thirdparty/tiny-cuda-nn
-)/
+^/thirdparty/
 '''
 
 [tool.isort]

@@ -78,6 +78,14 @@ is 264 passed / 1 skipped.
 `threedgrut/utils/depth_normal_metrics.py` scores them. `scripts/ablation/run_ob3d.py`
 sweeps variants over OB3D scenes and `report.py` renders the tables.
 
+`scripts/report/build_report.sh` regenerates the slide deck
+(`geometry-supervision-report.pdf`) from those run records, so no figure or table in it is
+transcribed by hand. It reads three sweep roots, kept separate because each re-ran the baseline
+with its own seeds and pooling them would silently move already-published numbers: `ABL_ROOT`
+(`/tmp/abl_pd`, experiments 1--6), `DA3_ROOT` (`/mnt/oss/da3cmp`, the prior swap) and `L1_ROOT`
+(`/mnt/oss/pdl1cmp`, the regression term), plus `PRIOR_DIAG` (`/mnt/oss/da3diag/json`) for the
+offline prior diagnostics.
+
 Two reporting decisions matter for reading any of the numbers:
 
 - **A no-geometry control.** `n_control` is the error of pointing every normal straight back
@@ -181,7 +189,7 @@ Map to the plan: prerequisites 1-4 are done; 5-10 are pending. Current state of 
 | Plan item | Status | What is missing |
 |---|---|---|
 | 5. Depth-normal consistency | Landed, measured at 7k | 30k confirmation; `referenceSlang` throughput on 3DGRT |
-| 6. Pseudo-depth supervision | Landed as an *ordinal* loss, measured over 3 seeds | 30k confirmation. Use `use_pseudo_depth_order` at lambda 0.1: −10 to −11% depth `abs_rel` on all three scenes, the only term here to help all of them, for 0.2–0.6 dB PSNR on two. The scale-invariant *regression* loss the plan called for is **reopened**: it was set aside because a globally aligned prior is worse than the model it would teach, which holds on sponza but not on lone-monk or emerald-square, where a sparse-point-aligned DA3MONO is 2.2–2.4x better than the model |
+| 6. Pseudo-depth supervision | Landed as both an *ordinal* and a *regression* loss, each over 3 seeds | 30k confirmation, and whether it composes with item 5. Use **`use_pseudo_depth_l1` at lambda 0.1** with a DA3MONO prior aligned per frame to the COLMAP sparse points: −60% / −46% / −11% depth `abs_rel` on lone-monk / emerald-square / sponza, `delta1` 0.813 → 0.982 on lone-monk, for −0.33 to +0.34 dB PSNR. That is 4–5x any other term here, and it is the only one to reach lone-monk. It supersedes the ordinal form (−13%), which adds nothing on top of it. The regression loss had been abandoned on a prior-vs-model screen run at the wrong mask |
 | 7. Depth variance along the ray | Landed, measured over 4 seeds | 30k confirmation. Use `depth_variance_relative` at lambda 0.01; the absolute form is superseded and harms both scenes |
 | 8. Multi-view consistency | Not started | Patch warp, neighbour selection, occlusion handling, second render |
 | 9. Scale-z regularisation | Landed, measured over 4 seeds | 30k confirmation. Best normals so far combined with item 5, at a 0.2 dB PSNR cost |
@@ -1116,6 +1124,60 @@ affine fitted offline to sparse points, and no expectation that a global fit wil
 carried forward: `p_closer` of 0.65–0.77 means a quarter to a third of pixels get pulled the wrong
 way by an L1 term, and the confidence gate of section 3 is the standing warning against assuming
 a mask fixes that.
+
+#### Regression, trained: the largest depth effect measured here
+
+Built as `loss.use_pseudo_depth_l1`, with the alignment fitted once per frame at dataset-load time
+(`threedgrut/datasets/sparse_depth_alignment.py`) and converted from z to ray distance in the loss
+(`aligned_prior_distance`). Three seeds against the trisurfel baseline at 7k:
+
+| scene | baseline `abs_rel` | λ=0.01 | λ=0.1 | λ=1.0 | ordinal λ=0.1, for reference |
+| --- | --- | --- | --- | --- | --- |
+| lone-monk | 0.0991 ±0.0013 | 0.0476 (−52%) | **0.0396 (−60%)** | 0.0425 (−57%) | 0.0867 (−13%) |
+| emerald-square | 0.1282 ±0.0009 | 0.0713 (−44%) | **0.0695 (−46%)** | 0.0712 (−45%) | 0.1136 (−11%) |
+| sponza | 0.0610 ±0.0008 | 0.0564 (−8%) | **0.0544 (−11%)** | 0.0658 (+8%) | 0.0523 (−14%) |
+
+Every cell above is three seeds. The λ=1.0, ordinal and combined rows were single-seed in an
+earlier revision of this table; filling them moved the ordinal lone-monk figure from −14% to
+−13% and λ=1.0 on sponza from +10% to +8%, so the single-seed numbers were reported to more
+precision than they carried.
+
+`delta1` moves further than `abs_rel` does: lone-monk 0.813 → 0.982 and emerald-square 0.825 →
+0.941, against 0.823 and 0.867 for the ordinal term. PSNR at λ=0.1 is −0.23 dB on lone-monk,
+−0.33 dB on emerald-square and **+0.34 dB** on sponza; λ=1.0 costs 1.1–2.4 dB, is worse on depth
+than λ=0.1 everywhere, and on sponza is worse than the baseline outright — it is out.
+λ=0.01 is the better trade on emerald-square specifically (−44% depth for **+0.37 dB**).
+
+This is 4–5x the depth improvement of any other term in this document, and on **lone-monk** —
+the scene with no floaters, whose depth is wrong in an opaque, confidently-placed way that every
+ray-concentration term is structurally unable to reach. That scene's `delta1` failure rate goes
+from 18.7% to 1.8%.
+
+Three things measurement contradicted:
+
+* **"sponza is the control that should regress."** Predicted, on the finding above that the prior
+  is worse than the model there (0.057 vs 0.037). It improves by 11%. The prediction was wrong
+  because those two numbers were computed on the diagnostic's mask (`confident & depth > 0 &
+  valid`), and the metric the ablation reports uses a looser one, on which the same baseline
+  scores 0.0610 rather than 0.0365 — and the prior, at 0.058, is *better* than the model there
+  too. The screening verdict flipped on the mask, not on the data. A prior-vs-model screen has to
+  be evaluated on the same pixel population as the metric it is being used to predict.
+* **"a floor, not a teacher of detail."** The trained model ends up *better than its own teacher*
+  on all three scenes: 0.0396 against the prior's 0.0422 on lone-monk, 0.0695 against 0.0722 on
+  emerald-square, 0.0544 against 0.0582 on sponza. Per-frame prior error is not shared between
+  frames, so fitting a single geometry to all of them averages it out. This is also why
+  `p_closer` of 0.65 was not the ceiling it looked like: pixels pulled the wrong way in one view
+  are outvoted in the others.
+* **"the ordinal term is leaving signal on the table."** True, and the two do not compose. Ordinal
+  and L1 together (both λ=0.1) give −60.2% on lone-monk, −48.0% on emerald-square and −10.1% on
+  sponza, against −60.1% / −45.8% / −10.8% for L1 alone: within the ±0.002–0.004 seed noise on
+  every scene, and 0.1–0.2 dB worse on PSNR. Once absolute placement is supervised, ordering adds
+  nothing, which says the L1 gain is not merely better ordering.
+
+Recommended: `use_pseudo_depth_l1` at λ=0.1 with `backend: depth_anything_3` and
+`DA3MONO-LARGE`, which helps all three scenes. Still to do: 30k confirmation, and whether it
+composes with the depth-normal term (item 5), which is where the normals would come from — L1 at
+λ=0.1 improves normals by only 0.8–4.3° on its own.
 
 ### 5. Multi-view consistency
 

@@ -50,6 +50,11 @@ class Batch:
     # than assuming. Unlike depth_gt this is predicted from the image, carries no scale, and is a
     # training signal rather than a reference.
     pseudo_depth_prior: Optional[torch.Tensor] = None  # [B, H, W, 1]
+    # Per-frame (scale, offset) taking that prior into scene **z**, fitted against the COLMAP
+    # sparse points; present only when the dataset was asked to align. Not ray distance: the
+    # prior's ambiguity is affine in z, and converting needs the rays, so the loss does it.
+    # NaN for a frame with too few points to fit, which callers must treat as "no alignment".
+    pseudo_depth_affine: Optional[torch.Tensor] = None  # [B, 2]
 
     def __post_init__(self):
         batch_size = self.T_to_world.shape[0]

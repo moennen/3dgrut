@@ -10,12 +10,19 @@ under test.
 ```bash
 cd /mnt/oss/3dgrut-bernardin
 PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
-# ~10 min, currently 407 passed, 1 skipped
+# ~10 min, currently 446 passed, 1 skipped
 
 .venv/bin/python -m black --line-length 120 . && .venv/bin/python -m isort --profile black --line-length 120 .
 ```
 
 `black`/`isort` are not on `PATH` either; invoke them as `.venv/bin/python -m`.
+
+After formatting, check `git status` for `thirdparty/tiny-cuda-nn`. Its `[tool.black]`
+`extend-exclude` was written as `/(^/thirdparty/tiny-cuda-nn)/`, which can never match -- the
+`^/` anchor has to be at the top level -- so `black .` silently reformatted 11 vendored files
+plus files in the *nested* `cutlass` and `fmt` submodules on every run, and the drift then looked
+like a pre-existing dirty submodule. Fixed, but verify rather than assume: a formatter exclusion
+that does not match fails silently.
 
 ## Ablation
 
@@ -28,6 +35,12 @@ so a sweep can be split across GPUs 0 and 1 by scene.
   --out-dir /tmp/abl --scenes sponza --variants gaussian trisurfel dn05_trisurfel
 .venv/bin/python scripts/ablation/report.py /tmp/abl/results.jsonl
 ```
+
+Sweep results are read by `scripts/report/make_figures.py`, which drops any row whose
+`n_iterations` is not 7000. Keep smoke runs (`--override n_iterations=200`) out of a sweep's
+`--out-dir` anyway: such a row used to record the *requested* 7000, merged into a seed average,
+and turned a +-0.0016 spread into +-0.2311 -- a convincing fake divergence. The harness now
+records the effective value, so the guard works, but only for records written after that fix.
 
 Variants are defined in `scripts/ablation/run_ob3d.py`. Anything gated on an iteration count
 needs its gate lowered for a 7k sweep -- `depth_normal_from_iter` defaults to 7000, sized for a
@@ -124,13 +137,24 @@ DA3's any-view checkpoints also make *worse* monocular priors than `DA3MONO-LARG
 and rung -- one image is the case they cannot exploit -- so do not reach for a bigger any-view
 model expecting a better single-image prior.
 
-**"The prior is worse than the model" is a per-scene fact, and I generalised it from one scene.**
-It was measured on sponza, where the aligned prior is 0.057 against the model's 0.037, and used to
-abandon regression outright. On lone-monk and emerald-square the same prior is 2.2-2.4x *better*
-than the model (0.042 vs 0.091, 0.079 vs 0.188). The pattern is that a prior beats the model
-exactly where the model is bad, so a prior-based term is a floor rather than a teacher of detail,
-and whether it can teach anything has to be checked on each scene before the term is written off
-or switched on globally.
+**A prior-vs-model screen decides nothing unless it is run on the same pixel mask as the metric
+it is predicting.** The regression loss was abandoned twice on this screen and both readings were
+wrong. It was run on sponza only, where the aligned prior scored 0.057 against the model's 0.037,
+and generalised -- but on lone-monk and emerald-square the same prior is 2.2-2.4x *better* than
+the model. Worse, the sponza verdict itself was an artifact: those numbers come from the
+diagnostic's mask (`confident & depth > 0 & valid`), while the metric the ablation reports uses a
+looser one, under which the same baseline scores 0.061 and the prior 0.058 -- the prior wins there
+too. Trained, the loss improves all three scenes by 60% / 46% / 11% `abs_rel` and is the largest
+depth effect in this repo. Quote the screen and the target metric over the same population, or do
+not use the screen to kill a term.
+
+**A prior can teach a model that then beats the prior, so `p_closer` is not a ceiling.** The
+per-pixel argument said otherwise: the aligned prior is closer to ground truth on only 65-77% of
+pixels, so a quarter to a third get pulled the wrong way, and the term should be a floor rather
+than a teacher of detail. Measured, the trained model ends up better than its own teacher on every
+scene (0.0396 vs 0.0422, 0.0695 vs 0.0722, 0.0544 vs 0.0582). Per-frame prior error is not shared
+between frames, so fitting one geometry to all of them averages it out and the wrongly-pulled
+pixels are outvoted. Do not reason about a multi-view training signal one frame at a time.
 
 **Fit the alignment on the sparse points, not on ground truth, before calling the number an upper
 bound.** `scripts/ablation/sparse_align_diagnostic.py` fits each alignment both ways. A per-frame
@@ -283,6 +307,12 @@ follow. Comparing each point's own depth against `depth_gt` at its pixel catches
   *disparity* (correlation +0.978 with `1/z`, so reading it as distance is monotonically
   inverted) and *z-depth*, while this renderer's convention is Euclidean ray distance, which
   differ by 20% at the image corners. An ordinal loss is invariant to all three problems.
+- A smoke run's row in `results.jsonl` is indistinguishable from a real one unless the harness
+  records the *effective* config. `--override n_iterations=200` used to leave a row still
+  claiming 7000, and that row merged into a seed average and turned +-0.0016 into +-0.2311 --
+  a spurious catastrophic-divergence reading. Fixed in `Cell.effective_n_iterations`; keep any
+  new row field derived from what `train.py` will actually receive, and prefer a throwaway
+  `--out-dir` for smoke runs regardless.
 - Losses running every iteration should stay on device: no `.item()`/`int()`/`bool()` on
   intermediate tensors, and handle empty masks with a clamped division rather than a Python
   branch, so the training loop never stalls on a host sync.

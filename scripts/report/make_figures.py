@@ -96,6 +96,24 @@ _RUNG_HEADER = {
 DA3_REFERENCES = ("trisurfel",)
 DA3_VARIANTS = ("pd01_trisurfel", "pd01da3_trisurfel")
 
+# Experiment 8: the sparse-point-aligned regression term, all trisurfel with a DA3MONO prior.
+# Its own root again, for the same reason as the DA3 sweep -- it re-ran the trisurfel baseline
+# with its own three seeds, and the ordinal row is re-run here rather than borrowed from
+# DA3_ROOT so that every row in the table shares one baseline.
+L1_REFERENCES = ("trisurfel",)
+L1_VARIANTS = ("pd01da3_trisurfel", "pdl1001_trisurfel", "pdl101_trisurfel", "pdl11_trisurfel")
+L1_COMBINED = "pd01_pdl101_trisurfel"
+
+# `delta1` is the headline for this term rather than `abs_rel`: it moves twice as far, and the
+# fraction of pixels within 25% of truth is the quantity a mesh would care about. Reported as the
+# failure rate `1 - delta1`, because 0.982 vs 0.813 reads as a small change and 1.8% vs 18.7%
+# does not.
+L1_METRICS = (
+    ("depth_abs_rel", r"\code{abs\_rel}", "{:.4f}", True),
+    ("depth_delta1_fail_pct", r"$\delta_1$ fail", "{:.1f}\\%", True),
+    ("mean_psnr", "PSNR", "{:.2f}", False),
+)
+
 # The first sweep named the gated variant `pd01_gaussian` and the ungated one `*_nogate`; the
 # default flipped afterwards. Records keep the original names, so resolve them here.
 UNGATED = "pd01_gaussian_nogate"
@@ -128,10 +146,20 @@ def load(paths: list[Path]) -> dict[tuple[str, str], list[dict]]:
                 print(f"WARNING: {path}:{number} is not valid JSON, skipping ({error})")
                 skipped += 1
                 continue
-            if record.get("status") == "ok":
-                grouped[(record["variant"], record["scene"])].append(record)
+            if record.get("status") != "ok":
+                continue
+            # A row whose iteration count was overridden is not comparable to a 7k one, and a
+            # 200-iteration smoke run merged into a seed average once already. The harness now
+            # records the effective count, so drop anything that is not the sweep's length.
+            if record.get("n_iterations") not in (None, 7000):
+                skipped += 1
+                print(f"WARNING: {path}:{number} ran {record['n_iterations']} iterations, not 7000; skipping")
+                continue
+            if "depth_delta1" in record:
+                record["depth_delta1_fail_pct"] = 100.0 * (1.0 - record["depth_delta1"])
+            grouped[(record["variant"], record["scene"])].append(record)
     if skipped:
-        print(f"WARNING: skipped {skipped} unparseable record(s); check seed counts below")
+        print(f"WARNING: skipped {skipped} record(s); check seed counts below")
     return grouped
 
 
@@ -361,6 +389,63 @@ def write_prior_family_table(diag, path: Path, rungs: tuple[str, ...]) -> None:
     print(f"wrote {path}")
 
 
+def fig_l1_vs_teacher(grouped, out: Path) -> None:
+    """The trained model against the prior it was trained on, per scene.
+
+    The argument that killed this term was per-pixel: the prior is closer to truth on only
+    65-77% of pixels, so it should act as a floor. Putting the teacher's own accuracy on the same
+    axis as the student's is the whole refutation -- the student is below the teacher everywhere,
+    because per-frame prior error does not survive being fitted by one shared geometry.
+    """
+    fig, ax = plt.subplots(figsize=(7.6, 2.5))
+    rows = ("trisurfel", "pd01da3_trisurfel", "pdl101_trisurfel")
+    row_labels = ("baseline", "ordinal $\\lambda$0.1", "L1 $\\lambda$0.1")
+    hatches = ("", "//", "")
+    width, offsets = 0.26, np.arange(len(rows)) * 0.27 - 0.27
+
+    for index, (variant, label, hatch) in enumerate(zip(rows, row_labels, hatches)):
+        values, errors = [], []
+        for scene in SCENES:
+            stat = _stat(grouped, variant, scene, "depth_abs_rel")
+            values.append(stat[0] if stat else np.nan)
+            errors.append(stat[1] if stat else 0.0)
+        ax.bar(
+            np.arange(len(SCENES)) + offsets[index],
+            values,
+            width,
+            yerr=errors,
+            capsize=3,
+            label=label,
+            color=["#B0B0B0", "#8172B2", "#C44E52"][index],
+            hatch=hatch,
+            edgecolor="white",
+        )
+    # No bar-top labels: on sponza all three runs and the prior sit within 0.009 of each other,
+    # so four numbers overlap into noise. The exact values are in `tab_l1.tex` on the previous
+    # slide; what this figure has to show is the red bar falling below the dashed line, and only
+    # the dashed line's value is not tabulated anywhere.
+    #
+    # One tick per scene rather than a line across the plot: the teacher's accuracy is a
+    # different number per scene and a single axhline would imply otherwise. The label sits just
+    # above the line's left end, where no bar reaches.
+    for x, scene in enumerate(SCENES):
+        prior = ALIGNED_PRIOR_ABS_REL[scene]
+        ax.plot([x - 0.44, x + 0.44], [prior, prior], color="k", ls="--", lw=1.3, zorder=5)
+        ax.text(x - 0.42, prior + 0.002, f"{prior:.3f}", va="bottom", ha="left", fontsize=7.5)
+
+    ax.plot([], [], color="k", ls="--", lw=1.3, label="the aligned prior itself")
+    ax.set_xticks(range(len(SCENES)))
+    ax.set_xticklabels(SCENES)
+    ax.set_ylabel("depth abs_rel vs GT")
+    ax.set_title(
+        "The L1 term takes the model below the prior that taught it (3 seeds; lower is better)",
+        fontsize=10,
+    )
+    ax.set_ylim(0, 0.138)
+    ax.legend(fontsize=8, frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.14))
+    _finish(fig, ax, out)
+
+
 def _reference(grouped, scene: str, key: str, lower_better: bool) -> float | None:
     """The better of the two reference runs on this scene and metric.
 
@@ -557,7 +642,19 @@ LABELS = {
     # label names the prior rather than the term: the prior is the only thing that differs.
     "pd01_trisurfel": r"\code{pd 0.1}, DAv2-Base",
     "pd01da3_trisurfel": r"\code{pd 0.1}, DA3MONO-L",
+    # Experiment 8. `pd` is the ordinal term, `pdl1` the regression one; both read the same
+    # DA3MONO prior, so the label names the loss and the weight.
+    "pdl1001_trisurfel": r"\code{pdl1 0.01}",
+    "pdl101_trisurfel": r"\code{pdl1 0.1}",
+    "pdl11_trisurfel": r"\code{pdl1 1}",
+    L1_COMBINED: r"\code{pd 0.1 + pdl1 0.1}",
 }
+
+# The aligned prior's own `abs_rel`, measured on the val split through the *training* path --
+# dataset alignment plus the loss's z-to-distance conversion -- by
+# `threedgrut/datasets/tests/test_sparse_depth_alignment_ob3d.py`. Plotted as the teacher's
+# accuracy, because the trained model ends up below it on every scene and that is the point.
+ALIGNED_PRIOR_ABS_REL = {"sponza": 0.0582, "lone-monk": 0.0422, "emerald-square": 0.0722}
 
 
 def _best_cells(grouped, rows, scene, metrics) -> dict[str, list[str]]:
@@ -610,7 +707,7 @@ def write_experiment_table(
     for variant in rows:
         cells = [text for scene_cells in per_scene for text in scene_cells[variant]]
         lines.append(LABELS.get(variant, variant) + " & " + " & ".join(cells) + r" \\")
-        if variant == REFERENCES[-1] and variants:
+        if variant == references[-1] and variants:
             # Rule between the reference block and the treatments, so the comparison the table
             # exists to make is visible without reading the row labels.
             lines.append(r"\midrule")
@@ -694,6 +791,14 @@ def main() -> None:
         "that its extra baseline seeds cannot change any number already published in the deck",
     )
     parser.add_argument(
+        "--l1-results",
+        nargs="*",
+        type=Path,
+        default=(),
+        help="results.jsonl for the sparse-aligned regression sweep (Experiment 8); separate "
+        "from `results` for the same reason as --da3-results",
+    )
+    parser.add_argument(
         "--prior-diagnostic-dir",
         type=Path,
         default=None,
@@ -772,6 +877,22 @@ def main() -> None:
         write_experiment_table(grouped_da3, out_dir / "tab_da3.tex", DA3_VARIANTS, references=DA3_REFERENCES)
         if args.prior_diagnostic_dir:
             fig_prior_offline_vs_trained(diag, grouped_da3, out_dir / "prior_offline_vs_trained.pdf")
+    if args.l1_results:
+        grouped_l1 = load(args.l1_results)
+        report_seed_counts(grouped_l1, L1_REFERENCES + L1_VARIANTS + (L1_COMBINED,), "L1 sweep")
+        fig_l1_vs_teacher(grouped_l1, out_dir / "l1_vs_teacher.pdf")
+        write_experiment_table(
+            grouped_l1, out_dir / "tab_l1.tex", L1_VARIANTS, metrics=L1_METRICS, references=L1_REFERENCES
+        )
+        # The composition test gets its own table: it answers a different question from the
+        # weight sweep, and putting five rows on one slide made neither readable.
+        write_experiment_table(
+            grouped_l1,
+            out_dir / "tab_l1_combined.tex",
+            ("pd01da3_trisurfel", "pdl101_trisurfel", L1_COMBINED),
+            metrics=L1_METRICS,
+            references=L1_REFERENCES,
+        )
 
     if args.fig_root:
         report_rgb_cost(args.fig_root, "emerald-square", "pd01_dn", frame=4)

@@ -36,3 +36,9 @@ pseudo_depth:
   # Where to keep predictions. null puts them under <path>/pseudo_depth_cache, which needs the
   # scene directory to be writable; point this elsewhere for a read-only dataset.
   cache_dir: null
+  # Fit one affine per frame taking the prior into scene z, against the COLMAP sparse points the
+  # scene was initialised from. Only a *regression* loss needs this; the ordinal loss reads the
+  # prior's ordering and is invariant to the transform. Enabled by the loss, like `enabled`.
+  # Requires a depth backend -- a disparity prior is affine to inverse z, so this would fit the
+  # wrong thing, and the dataset raises rather than allow it.
+  align_to_sparse_points: false

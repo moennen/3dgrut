@@ -43,7 +43,7 @@ from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.depth_variance_loss import depth_variance_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
-from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_order_loss
+from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_l1_loss, compute_pseudo_depth_order_loss
 from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 from threedgrut.utils.timer import CudaTimer
 
@@ -844,6 +844,58 @@ class Trainer3DGRUT:
                 )
                 lambda_pseudo_depth = self.conf.loss.lambda_pseudo_depth_order
 
+        # Regression pseudo-depth supervision: L1 against the prior put into scene units by a
+        # per-frame affine fitted to the COLMAP sparse points. Reads the prior's values, not just
+        # its ordering, so it is only as good as that alignment -- which is why the dataset
+        # refuses to hand over an unfittable frame rather than pass a guessed transform through.
+        loss_pseudo_depth_l1 = torch.zeros(1, device=self.device)
+        lambda_pseudo_depth_l1 = 0.0
+        if (
+            self.conf.loss.use_pseudo_depth_l1
+            and not self._in_color_refine
+            and self.global_step >= self.conf.loss.pseudo_depth_l1_from_iter
+        ):
+            prior = getattr(gpu_batch, "pseudo_depth_prior", None)
+            affine = getattr(gpu_batch, "pseudo_depth_affine", None)
+            if prior is None or prior.numel() == 0:
+                raise ValueError(
+                    "loss.use_pseudo_depth_l1 is set but the batch carries no pseudo-depth prior. "
+                    "The training split must be built with dataset.pseudo_depth.enabled, which "
+                    "only the colmap dataset supports."
+                )
+            if affine is None or affine.numel() == 0:
+                # Without the alignment this term has no target at all; falling back to the raw
+                # prior would regress against arbitrary units.
+                raise ValueError(
+                    "loss.use_pseudo_depth_l1 is set but the batch carries no prior alignment. It "
+                    "needs dataset.pseudo_depth.align_to_sparse_points, which fits one affine per "
+                    "frame against the COLMAP sparse points."
+                )
+            if gpu_batch.rays_in_world_space:
+                # The z-to-distance conversion reads the ray's z component as its angle to the
+                # optical axis, which is only true in camera space.
+                raise ValueError(
+                    "loss.use_pseudo_depth_l1 needs camera-space rays to convert the prior's z "
+                    "into ray distance, but this batch carries rays already in world space."
+                )
+            cache = getattr(self.train_dataset, "pseudo_depth_cache", None)
+            if cache is None:
+                raise ValueError(
+                    "loss.use_pseudo_depth_l1 is set but the training dataset exposes no "
+                    "pseudo-depth cache, so the prior's quantity (disparity or depth) is unknown."
+                )
+            with torch.cuda.nvtx.range("loss-pseudo-depth-l1"):
+                loss_pseudo_depth_l1 = compute_pseudo_depth_l1_loss(
+                    outputs["pred_dist"],
+                    outputs["pred_opacity"],
+                    prior,
+                    affine,
+                    gpu_batch.rays_dir,
+                    self.model.scene_extent,
+                    quantity=cache.quantity,
+                )
+                lambda_pseudo_depth_l1 = self.conf.loss.lambda_pseudo_depth_l1
+
         # Total loss
         loss = (
             lambda_l1 * loss_l1
@@ -854,6 +906,7 @@ class Trainer3DGRUT:
             + lambda_depth_normal * loss_depth_normal
             + lambda_depth_variance * loss_depth_variance
             + lambda_pseudo_depth * loss_pseudo_depth
+            + lambda_pseudo_depth_l1 * loss_pseudo_depth_l1
         )
         return dict(
             total_loss=loss,
@@ -866,6 +919,7 @@ class Trainer3DGRUT:
             depth_normal_loss=lambda_depth_normal * loss_depth_normal,
             depth_variance_loss=lambda_depth_variance * loss_depth_variance,
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
+            pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -1017,6 +1071,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_pseudo_depth_order:
                 pseudo_depth = np.mean(batch_metrics["losses"]["pseudo_depth_order_loss"])
                 writer.add_scalar("loss/pseudo_depth_order/train", pseudo_depth, global_step)
+            if self.conf.loss.use_pseudo_depth_l1:
+                pseudo_depth_l1 = np.mean(batch_metrics["losses"]["pseudo_depth_l1_loss"])
+                writer.add_scalar("loss/pseudo_depth_l1/train", pseudo_depth_l1, global_step)
             if self.post_processing is not None and "post_processing_reg_loss" in batch_metrics["losses"]:
                 post_processing_reg_loss = np.mean(batch_metrics["losses"]["post_processing_reg_loss"])
                 writer.add_scalar(

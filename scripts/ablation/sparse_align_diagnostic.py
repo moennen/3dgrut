@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import struct
 import sys
 from pathlib import Path
 
@@ -46,7 +45,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pseudo_depth_diagnostic import _fit_affine, _fit_scale, _predict  # noqa: E402
 
 from threedgrut.datasets.pseudo_depth import BACKENDS  # noqa: E402
-from threedgrut.datasets.utils import qvec_to_so3  # noqa: E402
+from threedgrut.datasets.sparse_depth_alignment import (  # noqa: E402
+    MIN_OBSERVATIONS,
+    observation_consistency,
+    read_points3d_with_ids,
+    sparse_observations,
+)
 from threedgrut.model.model import MixtureOfGaussians  # noqa: E402
 from threedgrut.utils.depth_normal_metrics import (  # noqa: E402
     MIN_ACCUMULATED_OPACITY,
@@ -66,61 +70,9 @@ VARIANTS = (
 
 # Fitting `target ~ a * prior (+ b)` needs enough points that the fit is not interpolating noise.
 # COLMAP frames vary by an order of magnitude in how many points they see, so a frame below this
-# is reported as unfittable rather than silently given a garbage alignment.
-MIN_SPARSE_POINTS = {"scale": 8, "affine": 16}
-
-
-def read_points3d_with_ids(sparse_dir: Path) -> dict[int, np.ndarray]:
-    """``{point_id: xyz}`` from COLMAP's points3D file.
-
-    The repo's own readers in `threedgrut/datasets/utils.py` drop the ids -- they only ever need
-    the cloud for initialisation -- and the id is precisely what links a point to the keypoint
-    that observed it, so this reads the file again rather than extending them.
-    """
-    binary, text = sparse_dir / "points3D.bin", sparse_dir / "points3D.txt"
-    points: dict[int, np.ndarray] = {}
-    if binary.exists():
-        with open(binary, "rb") as handle:
-            (count,) = struct.unpack("<Q", handle.read(8))
-            for _ in range(count):
-                point_id, x, y, z = struct.unpack("<QdddBBBd", handle.read(43))[:4]
-                (track_length,) = struct.unpack("<Q", handle.read(8))
-                handle.read(8 * track_length)
-                points[int(point_id)] = np.array([x, y, z], dtype=np.float64)
-        return points
-    if not text.exists():
-        raise SystemExit(f"no points3D.bin or points3D.txt under {sparse_dir}")
-    for line in text.read_text().splitlines():
-        if line.startswith("#") or not line.strip():
-            continue
-        fields = line.split()
-        points[int(fields[0])] = np.array([float(v) for v in fields[1:4]], dtype=np.float64)
-    return points
-
-
-def sparse_observations(image, points3d, scaling_factor: float, world_scale: float, shape) -> np.ndarray:
-    """The frame's sparse points as rows of ``(col, row, z_cam, dist_cam)``.
-
-    `image.xys` are pixels at COLMAP's *full* resolution while everything else here is at the
-    loaded resolution, so they are divided by the dataset's downscale factor. `z_cam` is what the
-    prior is fitted against (the prior predicts z); `dist_cam` is Euclidean and is what `depth_gt`
-    can be checked against.
-    """
-    height, width = shape
-    rotation, translation = qvec_to_so3(image.qvec), np.asarray(image.tvec, dtype=np.float64)
-    rows = []
-    for (x_full, y_full), point_id in zip(image.xys, image.point3D_ids):
-        xyz = points3d.get(int(point_id))
-        if point_id == -1 or xyz is None:
-            continue
-        camera = (rotation @ xyz + translation) * world_scale
-        if camera[2] <= 0.0:  # behind the camera; COLMAP tracks can include these
-            continue
-        col, row = x_full / scaling_factor, y_full / scaling_factor
-        if not (0 <= col < width and 0 <= row < height):
-            continue
-        rows.append((col, row, camera[2], float(np.linalg.norm(camera))))
-    return np.asarray(rows, dtype=np.float64).reshape(-1, 4)
+# is reported as unfittable rather than silently given a garbage alignment. The affine entry is
+# the threshold the training-time alignment uses, so the two agree about which frames it can align.
+MIN_SPARSE_POINTS = {"scale": 8, "affine": MIN_OBSERVATIONS}
 
 
 def _apply(prior_z: np.ndarray, mode: str, coef) -> np.ndarray:
@@ -256,16 +208,12 @@ def summarise(frames, trim: float, iters: int, gt_samples: int, model_id: str, b
     # own Euclidean depth, and it must agree with `depth_gt` sampled at the same pixel.
     check, counts = [], []
     for frame in frames:
-        observations = frame["sparse"]
-        counts.append(int(len(observations)))
-        if not len(observations):
-            continue
-        cols = np.clip(np.round(observations[:, 0]).astype(int), 0, frame["prior"].shape[1] - 1)
-        rows = np.clip(np.round(observations[:, 1]).astype(int), 0, frame["prior"].shape[0] - 1)
-        keep = frame["valid"][rows, cols]
-        if keep.any():
-            check.append(_abs_rel(observations[keep, 3], frame["gt_dist"][rows[keep], cols[keep]]))
-    check_all = np.concatenate(check) if check else np.zeros(1)
+        counts.append(int(len(frame["sparse"])))
+        reference = np.where(frame["valid"], frame["gt_dist"], np.nan)
+        consistency = observation_consistency(frame["sparse"], reference)
+        if consistency is not None:
+            check.append(consistency)
+    check_all = np.asarray(check) if check else np.zeros(1)
 
     # Pixels the global fits are estimated from, subsampled per frame so one large frame cannot
     # dominate the single alignment shared by all of them.
@@ -335,9 +283,10 @@ def summarise(frames, trim: float, iters: int, gt_samples: int, model_id: str, b
             "median": float(np.median(counts)),
             "max": int(np.max(counts)),
         },
+        # One median per frame, so `max` names the worst-aligned frame rather than a stray pixel.
         "sparse_vs_gt_abs_rel": {
-            "mean": float(np.mean(check_all)),
             "median": float(np.median(check_all)),
+            "max": float(np.max(check_all)),
         },
         "alignments": rows,
     }
@@ -350,8 +299,8 @@ def report(summary: dict) -> None:
 
     check = summary["sparse_vs_gt_abs_rel"]
     print(
-        f"\nTRANSFORM CHECK -- sparse-point depth vs depth_gt at the same pixel: "
-        f"mean {check['mean']:.4f}, median {check['median']:.4f}"
+        f"\nTRANSFORM CHECK -- sparse-point depth vs depth_gt at the same pixel, per-frame median: "
+        f"median {check['median']:.4f}, worst frame {check['max']:.4f}"
     )
     if check["median"] > 0.05:
         print("  WARNING: the sparse points disagree with reference depth. Either the transform")

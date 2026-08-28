@@ -19,6 +19,8 @@ ABL_ROOT="${ABL_ROOT:-/tmp/abl_pd}"
 # re-ran the trisurfel baseline with three seeds, and pooling those into the earlier experiments
 # would quietly move numbers the deck has already published.
 DA3_ROOT="${DA3_ROOT:-/mnt/oss/da3cmp}"
+# Experiment 8's sweep, separate for the same reason: its own three baseline seeds.
+L1_ROOT="${L1_ROOT:-/mnt/oss/pdl1cmp}"
 PRIOR_DIAG="${PRIOR_DIAG:-/mnt/oss/da3diag/json}"
 FIG_ROOT="${FIG_ROOT:-/tmp/report_fig}"
 BUILD_DIR="${BUILD_DIR:-/tmp/report_build}"
@@ -51,6 +53,13 @@ if [[ -d "$DA3_ROOT" ]]; then
   if [[ ${#DA3_RESULTS[@]} -gt 0 ]]; then
     EXTRA+=(--da3-results "${DA3_RESULTS[@]}")
     echo "  plus ${#DA3_RESULTS[@]} DA3 results file(s) from $DA3_ROOT"
+  fi
+fi
+if [[ -d "$L1_ROOT" ]]; then
+  mapfile -t L1_RESULTS < <(find "$L1_ROOT" -name results.jsonl | sort)
+  if [[ ${#L1_RESULTS[@]} -gt 0 ]]; then
+    EXTRA+=(--l1-results "${L1_RESULTS[@]}")
+    echo "  plus ${#L1_RESULTS[@]} regression-sweep results file(s) from $L1_ROOT"
   fi
 fi
 if [[ -d "$PRIOR_DIAG" ]]; then

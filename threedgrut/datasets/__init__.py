@@ -75,12 +75,16 @@ def _pseudo_depth_config(config) -> dict:
     settings = config.dataset.get("pseudo_depth", None)
     if settings is None:
         return {}
-    wanted = bool(config.loss.get("use_pseudo_depth_order", False))
+    ordinal = bool(config.loss.get("use_pseudo_depth_order", False))
+    # Only the regression term needs the prior in scene units, and fitting the alignment costs a
+    # pass over the split, so it is derived from that loss alone rather than from the cache.
+    regression = bool(config.loss.get("use_pseudo_depth_l1", False))
     return {
-        "enabled": bool(settings.get("enabled", False)) or wanted,
+        "enabled": bool(settings.get("enabled", False)) or ordinal or regression,
         "backend": settings.get("backend", "transformers"),
         "model": settings.get("model", None),
         "cache_dir": settings.get("cache_dir", None),
+        "align_to_sparse_points": bool(settings.get("align_to_sparse_points", False)) or regression,
     }
 
 

@@ -77,7 +77,7 @@
   \titlepage
   \vspace{-2.2em}
   \begin{center}\footnotesize
-  Six candidate supervision terms, each reported as\\
+  Eight experiments across five candidate supervision terms, each reported as\\
   \lbl{PREMISE} \lbl{EXPERIMENT} \lbl{RESULT} \lbl{QUALITATIVE} \lbl{CONCLUSION}
   \end{center}
 \end{frame}
@@ -103,7 +103,11 @@
       \lbl{METRICS}
       \begin{itemize}
         \item \code{abs\_rel} --- mean $|d - d^{*}|/d^{*}$ over pixels where the reference has
-              depth and the ray is opaque enough to have one.
+              depth and the ray is opaque enough to have one. \textbf{Offline diagnostics use a
+              stricter mask than this}, so their numbers are not comparable to these --- which
+              cost two experiments (Experiment 8).
+        \item $\delta_1$ --- fraction of those pixels within 25\% of the reference; reported as
+              the \emph{failure} rate $1-\delta_1$.
         \item normal$^\circ$ --- mean angle to the reference normal, signed (a flipped normal
               scores 180$^\circ$, not 0$^\circ$).
         \item \code{n\_gain} --- \textbf{control}: normal$^\circ$ of the view-direction control
@@ -350,9 +354,8 @@
       \end{itemize}
     \end{column}
   \end{columns}
-  \conc \dn{Abandoned before training.} A globally aligned prior is worse than the model it
-  would teach, and the local numbers say why: the useful structure is not in any single affine
-  gauge, so scale-invariance --- the exact remedy planned --- does not recover it.
+  \conc \dn{Abandoned before training} --- and \textbf{wrongly}. Experiment~8 overturns this:
+  both the scene and the pixel mask behind ``0.0677 against 0.0580'' were the problem.
 \end{frame}
 
 \section{Experiment 4: ordinal pseudo-depth}
@@ -642,6 +645,87 @@
   \code{DA3-SMALL} --- and let the ablation decide.
 \end{frame}
 
+\section{Experiment 8: regression, reopened}
+
+\begin{frame}{Experiment 8: what killed regression was the mask, not the idea}
+  \pre Experiment~3 abandoned regression on one number: the aligned prior at \code{abs\_rel}
+  0.0677 against the model's 0.0580. Experiment~7 showed the prior was not the one to measure.
+  Two further problems with that screen:
+  \begin{itemize}\small
+    \item \textbf{One scene.} On \code{lone-monk} and \code{emerald-square} a sparse-point-aligned
+          \code{DA3MONO-LARGE} is \up{2.2--2.4$\times$ \emph{better}} than the 7k model
+          (0.042 vs 0.091, 0.079 vs 0.188). Only \code{sponza} goes the other way.
+    \item \textbf{One mask.} The screen scored both prior and model on
+          \code{confident \& depth>0 \& valid}. The metric the ablation reports uses a looser
+          one, on which the same \code{sponza} baseline is \textbf{0.061, not 0.037} --- and the
+          prior, at 0.058, is better there too. \dn{The verdict flipped on the mask.}
+  \end{itemize}
+
+  \expt Fit one affine per frame against the COLMAP sparse points --- no ground truth --- then
+  L1 in ray-distance space, masked on accumulated opacity. 3 seeds, \code{trisurfel},
+  \code{DA3MONO-LARGE}. Alignment quality is verified \emph{through the training path}, pinned by
+  a test: a wrong downscale factor gives a smooth, plausible, uniformly wrong depth map.
+  \vspace{-0.2em}
+  \res
+  \begin{center}\scriptsize
+    \input{plots/tab_l1.tex}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Experiment 8: result}
+  \begin{itemize}\small
+    \item \up{$-60\%$ / $-46\%$ / $-11\%$} \code{abs\_rel} at $\lambda=0.1$ on \code{lone-monk} /
+          \code{emerald-square} / \code{sponza}. \textbf{4--5$\times$ any other term in this
+          report}, and every scene improves --- including the one predicted to regress.
+    \item $\delta_1$ moves further than \code{abs\_rel}: \code{lone-monk}'s failure rate goes
+          \up{$18.7\% \to 1.8\%$}, \code{emerald-square}'s $17.5\% \to 5.9\%$.
+    \item \textbf{It reaches \code{lone-monk}}, the scene with no floaters whose depth is wrong in
+          an opaque, confidently-placed way. Every ray-concentration term in this report is
+          structurally unable to touch it; the ordinal form managed only $-12.5\%$.
+    \item PSNR: $-0.23$ / $-0.33$ / \up{$+0.34$}\,dB. $\lambda=1$ costs 1.1--2.4\,dB, is worse
+          on depth than $\lambda=0.1$ on all three scenes, and on \code{sponza} is worse than the
+          baseline outright --- \dn{out}. $\lambda=0.01$ is the better trade on
+          \code{emerald-square} alone ($-44\%$ for \up{$+0.37$\,dB}).
+    \item Normals move only 0.8--4.3$^\circ$. This is a depth term.
+  \end{itemize}
+  \conc \up{Landed.} $\lambda=0.1$, and it supersedes the ordinal term rather than joining it.
+\end{frame}
+
+\begin{frame}{Experiment 8: the student beats the teacher}
+  \pre The aligned prior is closer to truth on only 65--77\% of pixels ($p_{\text{closer}}$), so a
+  quarter to a third are pulled the \emph{wrong} way: the term should be a floor, not a teacher,
+  and could not beat its own prior.
+  \begin{center}
+    \includegraphics[width=0.95\textwidth]{plots/l1_vs_teacher.pdf}
+  \end{center}
+  \vspace{-0.6em}
+  \res \dn{Refuted on all three scenes.} \conc Per-frame prior error is not shared between
+  frames, so fitting one geometry to all of them averages it out and the wrongly-pulled pixels
+  are outvoted. \textbf{$p_{\text{closer}}$ is not a ceiling}, and a multi-view training signal
+  cannot be reasoned about one frame at a time.
+\end{frame}
+
+\begin{frame}{Experiment 8: do the two forms of the prior compose?}
+  \pre The ordinal term reads only the prior's ordering and is invariant to the alignment; the L1
+  term reads its values and depends on the alignment entirely. If L1's gain were really just
+  better ordering, adding the ordinal term should be free or better.
+  \begin{center}\scriptsize
+    \input{plots/tab_l1_combined.tex}
+  \end{center}
+  \vspace{0.3em}
+  \begin{itemize}\small
+    \item Together they are indistinguishable from L1 alone: $-0.0028$ on
+          \code{emerald-square}, $-0.0002$ on \code{lone-monk}, $+0.0004$ on \code{sponza}. Seed
+          noise is $\pm$0.002--0.004, so all three are inside it, and PSNR is $0.1$--$0.2$\,dB
+          worse.
+    \item So the L1 gain is \textbf{not} better ordering: once absolute placement is supervised,
+          ordering adds nothing. The two terms are not complementary, they are alternatives, and
+          the cheap one to keep is the one that measured better.
+  \end{itemize}
+  \conc Ship L1 alone. The ordinal term stays as the fallback for a \emph{disparity} prior, which
+  cannot be aligned in $z$ at all and which the regression path refuses rather than guess.
+\end{frame}
+
 \section{The photometric cost}
 
 \begin{frame}{The photometric cost, localised}
@@ -706,8 +790,13 @@
           and \code{emerald-square}.
     \item These all use the \code{DepthAnythingV2-Base} prior. Swapping it for
           \code{DA3MONO-LARGE} (Experiment 7) takes \code{emerald-square} from $-5.3\%$ to
-          $-16.0\%$ at less photometric cost, so the best depth number in this report comes
-          from changing the \emph{prior}, not the loss.
+          $-16.0\%$ at less photometric cost.
+    \item \textbf{None of these is the best result in the report.} The sparse-aligned
+          \emph{regression} term of Experiment~8 --- the loss this table's family was chosen over
+          --- reaches \up{$-60\%$ / $-46\%$ / $-11\%$}, 4--5$\times$ everything above, and is the
+          only entry that reaches \code{lone-monk}. The best depth numbers here came from
+          changing the \emph{prior} and then the \emph{form of the loss}; the weight sweeps in
+          Experiments 4--6 moved far less than either.
   \end{itemize}
 \end{frame}
 
@@ -735,19 +824,22 @@
     Depth variance, absolute & \dn{refuted} & Confidence without accuracy; \code{wrong\,|\,tight} $\times$170 \\
     Depth variance, relative & \up{landed}, off & Depth on \code{sponza} only; null elsewhere, no cost \\
     Scale-$z$ (PGSR port) & \up{landed}, small & Only after fixing the normal-axis assumption \\
-    Pseudo-depth regression & \dn{abandoned} & Prior worse than the model it would teach \\
-    Pseudo-depth ordinal & \up{landed}, off & Only single term improving depth on all 3 scenes \\
+    Pseudo-depth ordinal & \up{landed}, off & Superseded by regression below; keep for disparity priors \\
     \quad + confidence gate & \dn{refuted} & Keeps the prior's worst structure \\
     \quad DA3 prior swap & \up{landed}, off & 3$\times$ the depth gain on \code{emerald-square}, 2 nulls \\
+    Pseudo-depth regression & \up{landed}, off & \textbf{Best depth here: $-60/-46/-11\%$. Abandoned twice, wrongly} \\
     Multi-view consistency, mesh & not started & \\
     \bottomrule
   \end{tabular}
   \end{center}
   \vspace{0.6em}
   \begin{itemize}\small
-    \item Depth, one term: \code{pd 0.1}. $-7$ to $-11\%$ against the best reference on all
-          three scenes, $+0.12$ to $-0.63$\,dB.
+    \item Depth, one term: \code{pdl1 0.1} with a \code{DA3MONO-LARGE} prior. $-60$ / $-46$ /
+          $-11\%$ against the best reference, $-0.33$ to $+0.34$\,dB. Needs
+          \code{align\_to\_sparse\_points}, which is enabled by the loss.
     \item Depth and normals: \code{pd 0.1 + dn 0.05}. Best normals everywhere, $-0.22$ to $-0.95$\,dB.
+          Whether \code{pdl1} substitutes for \code{pd} in that pair is \textbf{untested} --- the
+          regression term barely moves normals alone, so the combination is the open question.
     \item Best prior: \code{DA3MONO-LARGE}. Not the default only because it needs the
           \code{depth\_anything\_3} package on \code{PYTHONPATH}, where \code{transformers}
           installs with the venv. Both are Apache-2.0.
@@ -775,8 +867,26 @@
           it cannot rank relative priors and is reported only to show what alignment supplies.
     \item \textbf{Any-view checkpoints were run on single images}, which is not what they are
           for. Their pose-conditioned path is untested here.
-    \item \textbf{Prior alignment is fitted against ground truth}, so every prior
-          \code{abs\_rel} is an upper bound, not what a COLMAP-sparse-point fit would achieve.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Limitations (cont.)}
+  \begin{itemize}
+    \item \textbf{Experiment 7's prior alignment is fitted against ground truth}, so every prior
+          \code{abs\_rel} there is an upper bound. Experiment 8's is not: it fits the COLMAP
+          sparse points, which costs $+11$ to $+14\%$ on two scenes and is $4$--$7\%$
+          \emph{better} on the third, so ``upper bound'' was itself wrong --- a least-squares fit
+          over all pixels does not bound a metric that weights near pixels more.
+    \item \textbf{Experiment 8 needs a depth prior and a COLMAP reconstruction.} The alignment is
+          an affine in $z$; a disparity prior is affine to \emph{inverse} $z$, and the dataset
+          raises rather than fit the wrong thing. Datasets other than \code{colmap} have no
+          sparse points and cannot use the term at all.
+    \item \textbf{Sky is unhandled.} A per-pixel depth term wants a sky mask; \code{DA3METRIC}
+          emits one and \code{DA3MONO} does not. None of these scenes is sky-dominated, so this
+          is untested rather than solved.
+    \item \textbf{Experiment 8 is not combined with anything.} It is measured alone and against
+          the ordinal term; its interaction with \code{dn} --- the term that supplies the normals
+          --- is the largest untested combination in this report.
   \end{itemize}
 \end{frame}
 
@@ -819,6 +929,26 @@
           could not ship; it is Apache-2.0, like DAv2. Only DA3's \emph{any-view} checkpoints
           are non-commercial. The constraint was carried across from a sibling model, and it
           suppressed the better prior for a reason that did not exist.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Method notes that changed a conclusion (cont.)}
+  \begin{enumerate}
+    \setcounter{enumi}{9}
+    \item \textbf{A screen that kills a term must use the metric's own pixel mask.} Regression
+          was cancelled on ``prior 0.058 vs model 0.037''. Both numbers were right; the model's
+          was on a mask the reported metric does not use, and on that metric the baseline is
+          0.061 and the prior wins. \dn{The single largest result in this report was suppressed
+          for two experiments by a mask mismatch.} Quote screen and target over the same
+          population, or do not screen.
+    \item \textbf{Do not reason about a multi-view signal one frame at a time.}
+          $p_{\text{closer}} = 0.65$ says a third of pixels are pulled the wrong way, and was
+          read as a ceiling. Averaged over views it is not: the student beat the teacher on every
+          scene.
+    \item \textbf{Record the effective config, not the requested one.} A 200-iteration smoke run
+          left a row in \code{results.jsonl} still claiming 7000. It merged into a seed average
+          and turned $\pm$0.0016 into $\pm$0.2311 --- a convincing fake divergence. Now derived
+          from what \code{train.py} actually receives, and non-7k rows are dropped at plot time.
   \end{enumerate}
 \end{frame}
 

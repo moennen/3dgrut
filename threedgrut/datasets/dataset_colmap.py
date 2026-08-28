@@ -33,12 +33,14 @@ from .gt_geometry import (
     normalize_gt_normal,
     read_gt_map,
     resize_gt_map,
+    similarity_scale,
     transform_gt_depth,
     transform_gt_normal,
     validate_scene_conventions,
 )
 from .protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
 from .pseudo_depth import PseudoDepthCache
+from .sparse_depth_alignment import fit_frame_alignment, read_points3d_with_ids, sparse_observations
 from .utils import (
     compute_max_radius,
     create_camera_visualization,
@@ -255,6 +257,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         """
         self.pseudo_depth_cache = None
         self.pseudo_depth_available = False
+        self.pseudo_depth_alignment = None
         if not self.pseudo_depth_config.get("enabled", False):
             return
 
@@ -268,6 +271,63 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         cache.ensure(self.image_paths)
         self.pseudo_depth_cache = cache
         self.pseudo_depth_available = True
+        if self.pseudo_depth_config.get("align_to_sparse_points", False):
+            self._prepare_pseudo_depth_alignment(cache)
+
+    def _prepare_pseudo_depth_alignment(self, cache: PseudoDepthCache) -> None:
+        """Fit one affine per frame taking the prior into scene z, using COLMAP's sparse points.
+
+        Done once here rather than per `__getitem__` so that the coefficients are deterministic,
+        logged, and not refitted every epoch. The result is two floats per frame, carried in the
+        batch; the per-pixel conversion from z to ray distance needs the rays and so happens in
+        the loss.
+        """
+        if cache.quantity != "depth":
+            raise ValueError(
+                f"Aligning a pseudo-depth prior against sparse points fits an affine in z, but "
+                f"{cache.model_id} emits {cache.quantity!r}. A disparity prior is affine to "
+                "*inverse* z, so this alignment would be solving the wrong problem; use a depth "
+                "backend (e.g. depth_anything_3 / DA3MONO-LARGE) or the ordinal loss, which needs "
+                "no alignment."
+            )
+
+        sparse_dir = os.path.join(self.path, "sparse", "0")
+        if not os.path.isdir(sparse_dir):
+            sparse_dir = os.path.join(self.path, "colmap")
+        points3d = read_points3d_with_ids(sparse_dir)
+
+        # The points are in raw COLMAP units; `normalize_world_space` rescales poses and depth, so
+        # they have to be rescaled by the same factor or every alignment is off by it.
+        world_scale = 1.0
+        if self.normalize_world_space:
+            world_scale = float(similarity_scale(self.world_normalization_transform))
+
+        alignment: list[Optional[tuple[float, float]]] = []
+        for idx, image_path in enumerate(self.image_paths):
+            with Image.open(image_path) as handle:
+                width, height = handle.size
+            prior = cache.load(image_path, height, width)
+            extrinsic = self.cam_extrinsics[idx]
+            # `xys` are pixels at COLMAP's full resolution; the training frames may be
+            # downsampled. This is the factor the intrinsics are divided by, recomputed here
+            # because it is a local in `load_camera_data` rather than something stored.
+            scaling_factor = self.cam_intrinsics[extrinsic.camera_id].height / height
+            observations = sparse_observations(extrinsic, points3d, scaling_factor, world_scale, (height, width))
+            alignment.append(fit_frame_alignment(prior, observations))
+
+        unfittable = [i for i, coefficients in enumerate(alignment) if coefficients is None]
+        if len(unfittable) == len(alignment):
+            raise RuntimeError(
+                f"No frame in {self.path} could have its pseudo-depth prior aligned to the COLMAP "
+                f"sparse points ({len(alignment)} frames). The reconstruction has too few points, "
+                "or this is not the scene the points belong to."
+            )
+        if unfittable:
+            logger.warning(
+                f"{len(unfittable)}/{len(alignment)} frames have too few COLMAP points to align "
+                "their pseudo-depth prior; those frames will not contribute to the regression loss."
+            )
+        self.pseudo_depth_alignment = alignment
 
     def _load_points_for_world_normalization(self) -> np.ndarray:
         points_candidates = [
@@ -806,6 +866,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         if self.pseudo_depth_available:
             prior = self.pseudo_depth_cache.load(self.image_paths[idx], actual_h, actual_w)
             output_dict["pseudo_depth_prior"] = torch.from_numpy(prior)[None, ..., None]
+            if self.pseudo_depth_alignment is not None:
+                # NaN rather than an identity or a zero for a frame that could not be aligned:
+                # both of those are values a loss would happily consume, and this one cannot be
+                # mistaken for an alignment that was actually fitted.
+                coefficients = self.pseudo_depth_alignment[idx] or (float("nan"), float("nan"))
+                output_dict["pseudo_depth_affine"] = torch.tensor(coefficients, dtype=torch.float32).unsqueeze(0)
 
         # Add EXIF exposure if available for this frame
         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
@@ -860,7 +926,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = (mask > 0.5).to(torch.float32)
             sample["mask"] = mask
 
-        for key in ("depth_gt", "normal_gt", "pseudo_depth_prior"):
+        for key in ("depth_gt", "normal_gt", "pseudo_depth_prior", "pseudo_depth_affine"):
             if key in batch:
                 sample[key] = batch[key][0].to(self.device, non_blocking=True)
 

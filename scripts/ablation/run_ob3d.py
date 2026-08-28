@@ -326,6 +326,60 @@ PSEUDO_DEPTH_DA3_VARIANTS: tuple[Variant, ...] = tuple(
     for primitive_name, primitive in (("gaussian", "instances"), ("trisurfel", "trisurfel"))
 )
 
+# Regression against the same DA3 prior, aligned per frame to the COLMAP sparse points.
+#
+# This is the loss the plan originally called for and that was abandoned, on the finding that an
+# aligned prior is worse than the model it would teach. That finding was sponza's, and does not
+# generalise: against the trisurfel baseline at 7k, the sparse-aligned DA3MONO prior scores
+# `abs_rel` 0.042 vs the model's 0.091 on lone-monk and 0.079 vs 0.188 on emerald-square -- 2.2x
+# and 2.4x better -- while on sponza it is 0.057 against 0.037. So sponza is expected to regress
+# and is kept in the sweep as the control that says whether the term is doing what is claimed.
+#
+# lone-monk is the reason to run this at all. It has no floaters and 17.7% `delta1` failures, so
+# no ray-concentration term can reach it, and the ordinal loss only gets it to 0.087 -- the
+# aligned prior is at 0.042, which is signal the ordinal form is leaving on the table.
+#
+# DA3MONO rather than DA3METRIC: the metric checkpoint's appeal is needing one alignment for the
+# whole scene, but one global alignment measures 1.2-3.5x worse than per-frame on every scene,
+# and under a global fit it loses to DA3MONO on two of three. Once a per-frame affine is needed
+# anyway the metric property buys nothing.
+#
+# Swept over three orders of magnitude with no prior to lean on: the ordinal term's optimum
+# cannot transfer, since that loss is scaled by a rendered depth gap and this one by an absolute
+# residual over `scene_extent`, which are different units.
+PSEUDO_DEPTH_L1_VARIANTS: tuple[Variant, ...] = tuple(
+    Variant(
+        f"pdl1{name}_trisurfel",
+        (
+            "render.primitive_type=trisurfel",
+            "loss.use_pseudo_depth_l1=true",
+            f"loss.lambda_pseudo_depth_l1={weight}",
+        )
+        + PSEUDO_DEPTH_DA3_OVERRIDES,
+        f"Sparse-aligned pseudo-depth L1 at lambda={weight} on trisurfel, from a DA3MONO prior.",
+    )
+    for name, weight in (("001", 0.01), ("01", 0.1), ("1", 1.0))
+)
+
+# Whether the two forms of the same prior compose. The ordinal term supplies ordering everywhere
+# and is invariant to the alignment; the L1 term supplies absolute placement and depends on it
+# entirely. If the L1 gain is really just better ordering, this pair should not beat the L1 term
+# alone -- which is the cheapest available test of *why* the regression term works, if it does.
+PSEUDO_DEPTH_BOTH_VARIANTS: tuple[Variant, ...] = (
+    Variant(
+        "pd01_pdl101_trisurfel",
+        (
+            "render.primitive_type=trisurfel",
+            "loss.use_pseudo_depth_order=true",
+            "loss.lambda_pseudo_depth_order=0.1",
+            "loss.use_pseudo_depth_l1=true",
+            "loss.lambda_pseudo_depth_l1=0.1",
+        )
+        + PSEUDO_DEPTH_DA3_OVERRIDES,
+        "Ordinal and sparse-aligned L1 pseudo-depth together, both at lambda=0.1, on trisurfel.",
+    ),
+)
+
 # The pairing the ordinal term exists to test: an anchor for the relative depth-variance term.
 #
 # Swept at both terms' own optima and at the over-weighted pair, because the first attempt at
@@ -362,6 +416,8 @@ ALL_VARIANTS: tuple[Variant, ...] = (
     + DEPTH_VARIANCE_VARIANTS
     + PSEUDO_DEPTH_VARIANTS
     + PSEUDO_DEPTH_DA3_VARIANTS
+    + PSEUDO_DEPTH_L1_VARIANTS
+    + PSEUDO_DEPTH_BOTH_VARIANTS
     + PSEUDO_DEPTH_VARIANCE_VARIANTS
     + DEPTH_VARIANCE_RELATIVE_VARIANTS
 )
@@ -410,6 +466,19 @@ class Cell:
     def experiment(self) -> str:
         return f"abl_{self.variant.name}_{self.scene.name}"
 
+    @property
+    def effective_n_iterations(self) -> int:
+        """The iteration count `train.py` will actually use.
+
+        `--override` is appended after `n_iterations=...`, so hydra lets it win. Recording the
+        requested value instead makes a shortened run indistinguishable from a full one in
+        `results.jsonl`, which is how a 200-iteration smoke run got averaged into a seed study.
+        """
+        for override in reversed(self.extra_overrides):
+            if override.startswith("n_iterations="):
+                return int(override.split("=", 1)[1])
+        return self.n_iterations
+
     def command(self) -> list[str]:
         return [
             sys.executable,
@@ -438,7 +507,10 @@ def run_cell(cell: Cell, log_dir: Path, timeout_s: int) -> dict:
     row = {
         "variant": cell.variant.name,
         "scene": cell.scene.name,
-        "n_iterations": cell.n_iterations,
+        # The *effective* count, not the requested one: `--override n_iterations=200` for a smoke
+        # run used to leave a row claiming 7000, which then reads as a real 7k result and merges
+        # into a seed average. It did, and it turned a clean +-0.0016 into +-0.2311.
+        "n_iterations": cell.effective_n_iterations,
         "overrides": list(cell.variant.overrides + cell.extra_overrides),
         "log": str(log_path),
     }

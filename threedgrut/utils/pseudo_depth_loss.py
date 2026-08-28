@@ -192,3 +192,98 @@ def compute_pseudo_depth_order_loss(
     # Clamped division rather than a Python branch on the mask: this runs every iteration, and
     # reading the count on the host would stall the training loop.
     return masked.sum() / keep.sum().clamp_min(1) / scene_extent
+
+
+def aligned_prior_distance(prior: torch.Tensor, affine: torch.Tensor, rays_dir: torch.Tensor) -> torch.Tensor:
+    """The prior as Euclidean ray distance, given its per-frame affine into scene z.
+
+    `prior` is [B, H, W, 1] in the model's own units, `affine` is [B, 2] of (scale, offset) as
+    fitted by `threedgrut.datasets.sparse_depth_alignment`, and `rays_dir` is [B, H, W, 3] in
+    camera space (normalised or not -- only its direction is used).
+
+    The two steps are not interchangeable and the order matters. The affine belongs in z, because
+    that is the space the prior is ambiguous in; ray distance is z divided by the per-pixel cosine
+    between the ray and the optical axis, which is a different quantity for every pixel. Applying
+    the affine to a distance map, or comparing z against the renderer, would both look entirely
+    reasonable and be wrong by up to the cosine at the frame corner.
+
+    Non-finite where the frame has no alignment, or where the aligned z is not positive -- the
+    offset can push the prior's nearest values behind the camera, and those pixels describe no
+    surface. Callers must mask on `torch.isfinite`.
+    """
+    if prior.shape[-1] != 1:
+        raise ValueError(f"prior must be [B, H, W, 1], got {tuple(prior.shape)}")
+    if affine.dim() != 2 or affine.shape[-1] != 2:
+        raise ValueError(f"affine must be [B, 2] of (scale, offset), got {tuple(affine.shape)}")
+    if affine.shape[0] != prior.shape[0]:
+        raise ValueError(f"affine batch {affine.shape[0]} does not match prior batch {prior.shape[0]}")
+
+    scale = affine[:, 0].view(-1, 1, 1, 1)
+    offset = affine[:, 1].view(-1, 1, 1, 1)
+    prior_z = scale * prior + offset
+
+    # cos(theta) between the ray and the camera's forward axis. Guarding the denominator rather
+    # than the numerator: a ray exactly perpendicular to the axis has no z to speak of, and the
+    # clamp keeps it finite so the mask below can reject it on the depth instead.
+    to_z = (rays_dir[..., 2:3] / rays_dir.norm(dim=-1, keepdim=True).clamp_min(1e-8)).abs().clamp_min(1e-6)
+    distance = prior_z / to_z
+    return torch.where(distance > 0, distance, torch.full_like(distance, float("nan")))
+
+
+def compute_pseudo_depth_l1_loss(
+    pred_dist: torch.Tensor,
+    pred_opacity: torch.Tensor,
+    prior: torch.Tensor,
+    affine: torch.Tensor,
+    rays_dir: torch.Tensor,
+    scene_extent: float,
+    *,
+    quantity: str,
+    min_opacity: float = MIN_ACCUMULATED_OPACITY,
+) -> torch.Tensor:
+    """L1 between the rendered ray distance and the sparse-aligned prior, in units of `scene_extent`.
+
+    Unlike the ordinal term this reads the prior's *values*, so it can only be as good as the
+    alignment: see `threedgrut.datasets.sparse_depth_alignment` for why a per-frame affine fitted
+    to COLMAP points is the form used, and `docs/normal-supervision.md` for the measurement that
+    reopened this loss after it had been abandoned.
+
+    That measurement also bounds what to expect. The aligned prior beats the 7k model by 2.2x on
+    lone-monk and 2.4x on emerald-square but *loses* to it on sponza (0.057 against 0.037), and
+    even where it wins it is closer to ground truth on only 65-77% of pixels. So a quarter to a
+    third of pixels are pulled the wrong way by construction, and this term is a floor rather
+    than a teacher of detail. It is not expected to help every scene and is off by default.
+
+    `quantity` must be `"depth"`. A disparity prior is affine to *inverse* z, so the alignment
+    this consumes would have had to be fitted differently; rather than silently apply a z-space
+    affine to it, this refuses.
+
+    Returns a 0-dim tensor, zero when no pixel survives the mask.
+    """
+    if quantity != "depth":
+        raise ValueError(
+            f"pseudo-depth L1 needs a depth prior, got {quantity!r}. The alignment it consumes is "
+            "an affine in z, which a disparity prior is not; use the ordinal loss instead, which "
+            "reads only the prior's ordering."
+        )
+    if prior.shape[:-1] != pred_dist.shape[:-1]:
+        raise ValueError(
+            f"pseudo-depth prior {tuple(prior.shape)} does not match the rendered "
+            f"buffers {tuple(pred_dist.shape)}; it must be resampled to the training resolution"
+        )
+    if scene_extent <= 0:
+        raise ValueError(f"scene_extent must be positive, got {scene_extent}")
+
+    depth, confident = expected_depth(pred_dist, pred_opacity, min_opacity)
+    target = aligned_prior_distance(prior, affine, rays_dir)
+
+    # `confident` excludes pixels the render places no surface at; there is nothing there for a
+    # depth target to correct, and pulling on them would fight the opacity that put them there.
+    keep = confident & torch.isfinite(target)
+    # The target is detached only in the sense that it is data, but it can contain NaN, and NaN
+    # survives multiplication by zero -- so the residual has to be built from a sanitised target
+    # rather than masked after the fact, or the gradient is NaN everywhere.
+    safe_target = torch.where(keep, target, depth.detach())
+    residual = (depth - safe_target).abs()
+    masked = torch.where(keep, residual, torch.zeros_like(residual))
+    return masked.sum() / keep.sum().clamp_min(1) / scene_extent
