@@ -50,9 +50,18 @@ def main() -> None:
     args = parser.parse_args()
     taus = np.asarray([float(value) for value in args.taus.split(",")], dtype=np.float64)
     predicted, reference = read_surface(args.pred, args.samples), read_surface(args.gt, args.samples)
+    # Align into the evaluation (normally benchmark scan) frame *before* applying benchmark
+    # masks.  A 3dgrut checkpoint commonly lives in normalized COLMAP coordinates while DTU's
+    # ObsMask and Plane live in scan millimetres; masking it first silently queries the volume
+    # at normalized coordinates and drops nearly every valid mesh sample.
+    if args.pred_alignment:
+        predicted = apply_alignment(predicted, load_alignment(args.pred_alignment))
+    if args.gt_alignment:
+        reference = apply_alignment(reference, load_alignment(args.gt_alignment))
+
     masks = []
-    # Benchmark masks live in scan coordinates, so apply them before optional transforms into
-    # the common evaluation frame.
+    # DTU/TnT masks are authored in the scan frame, which is the documented common evaluation
+    # frame for this command after the optional alignments above.
     if args.dtu_obsmask:
         mask = observed_volume_mask(predicted, args.dtu_obsmask)
         predicted, masks = predicted[mask], ["dtu observation mask"]
@@ -65,10 +74,6 @@ def main() -> None:
             reference[crop_volume_mask(reference, args.crop_json)],
         )
         masks.append("tnt crop volume (both surfaces)")
-    if args.pred_alignment:
-        predicted = apply_alignment(predicted, load_alignment(args.pred_alignment))
-    if args.gt_alignment:
-        reference = apply_alignment(reference, load_alignment(args.gt_alignment))
     result = evaluate_surface(predicted, reference, taus).asdict(taus)
     result.update({"pred_samples": len(predicted), "gt_samples": len(reference), "masks": masks})
     args.out.write_text(json.dumps(result, indent=2))

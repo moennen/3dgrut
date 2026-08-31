@@ -175,6 +175,10 @@ def export(args) -> dict:
                     "depth_path": f"depths/{name}.npy",
                     "depth_convention": "ray",
                     "pinhole_residual_px": residual,
+                    # Preserve the COLMAP source name even though the exported depth maps use
+                    # a simple sequential key. TnT's official .log is indexed by that source
+                    # image, so losing it makes a held-out test split impossible to register.
+                    "source_image": Path(str(dataset.image_paths[index])).name,
                 }
             )
 
