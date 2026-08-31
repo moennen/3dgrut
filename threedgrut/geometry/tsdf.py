@@ -11,7 +11,7 @@ and poses, so a checkpoint from either tracer can be meshed the same way.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 
 import numpy as np
 
@@ -232,7 +232,9 @@ def extract_mesh(volume, config: TSDFConfig):
     return mesh
 
 
-def fuse_depth_frames(frames: Iterable[DepthFrame], config: TSDFConfig):
+def fuse_depth_frames(
+    frames: Iterable[DepthFrame], config: TSDFConfig, on_integrated_frame: Callable[[int], None] | None = None
+):
     """Fuse posed ray- or z-depth frames and return the cleaned, optionally colored TSDF mesh.
 
     This is intentionally the common entry point for checkpoint renders and external depth
@@ -252,6 +254,8 @@ def fuse_depth_frames(frames: Iterable[DepthFrame], config: TSDFConfig):
             rgb=frame.rgb,
         )
         count += 1
+        if on_integrated_frame is not None:
+            on_integrated_frame(count)
     if count == 0:
         raise ValueError("Cannot fuse an empty depth-frame sequence")
     return extract_mesh(volume, config)

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -72,3 +73,11 @@ def test_prepare_aligned_depths_streams_one_frame_at_a_time(tmp_path):
     )
     assert max_depth == np.max(expected_z)
     np.testing.assert_allclose(np.load(views[0].depth_path), benchmark.z_depth_to_ray_distance(expected_z, view.K))
+
+
+def test_memory_snapshot_is_flushed_as_jsonl(tmp_path):
+    path = tmp_path / "memory.jsonl"
+    benchmark.write_memory_snapshot(path, "before_tsdf")
+    record = json.loads(path.read_text())
+    assert record["stage"] == "before_tsdf"
+    assert record["rss_bytes"] is None or record["rss_bytes"] > 0

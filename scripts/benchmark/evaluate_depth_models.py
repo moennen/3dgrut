@@ -303,6 +303,28 @@ def _sample_mesh(mesh, count: int) -> np.ndarray:
     return np.asarray(mesh.sample_points_uniformly(number_of_points=count).points, dtype=np.float64)
 
 
+def memory_snapshot() -> dict[str, int | None]:
+    """Return process RSS and, when available, the enclosing cgroup's current memory in bytes."""
+    rss_bytes = None
+    for line in Path("/proc/self/status").read_text().splitlines() if Path("/proc/self/status").exists() else []:
+        if line.startswith("VmRSS:"):
+            rss_bytes = int(line.split()[1]) * 1024
+            break
+    cgroup_current = Path("/sys/fs/cgroup/memory.current")
+    return {
+        "rss_bytes": rss_bytes,
+        "cgroup_current_bytes": int(cgroup_current.read_text()) if cgroup_current.exists() else None,
+    }
+
+
+def write_memory_snapshot(path: Path, stage: str) -> None:
+    """Append and flush a sample so the last TSDF frame survives an OOM kill."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps({"stage": stage, **memory_snapshot()}) + "\n")
+        handle.flush()
+
+
 def predict_frames(predictor, frames: list[Frame]) -> list[np.ndarray]:
     """Infer model maps in memory; they are small beside TSDF/mesh allocations."""
     predictions = []
@@ -375,12 +397,15 @@ def evaluate_benchmark_scene(
     mesh_samples: int,
     gt_voxel: float | None,
     surface_query_chunk_size: int,
+    memory_profile: bool = False,
 ) -> list[dict]:
     # The oracle alignment is fitted to the same scan z-buffer used for visibility, in the
     # model's native quantity. A zero is an empty pixel and is excluded by ``align_prediction``.
     rows = []
     for alignment in ALIGNMENTS:
         condition = out / alignment
+        memory_path = condition / "memory.jsonl"
+        snapshot = lambda stage: write_memory_snapshot(memory_path, stage) if memory_profile else None
         depth_dir = condition / "depths"
         views, max_depth = prepare_aligned_depths(
             scene.frames, predictions, scene.visibility, quantity, alignment, depth_dir
@@ -393,16 +418,25 @@ def evaluate_benchmark_scene(
             gt_masks=scene.masks,
         ).asdict()
         config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=max_depth * 1.05)
-        mesh = fuse_depth_frames(saved_depth_frames(scene.frames, views), config)
+        snapshot("before_tsdf")
+        mesh = fuse_depth_frames(
+            saved_depth_frames(scene.frames, views),
+            config,
+            on_integrated_frame=lambda count: snapshot(f"tsdf_frame_{count}"),
+        )
+        snapshot("after_tsdf_mesh_extraction")
         import open3d as o3d
 
         mesh_path = condition / "mesh.ply"
         o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_vertex_normals=True, write_vertex_colors=True)
+        snapshot("after_mesh_write")
         predicted = _sample_mesh(mesh, mesh_samples) if len(mesh.triangles) else np.empty((0, 3))
+        snapshot("after_mesh_sample")
         # The sampled points, rather than the potentially much larger Open3D mesh, are all the
         # surface evaluator needs.  Drop the C++ mesh before building either KD-tree.
         del mesh
         gc.collect()
+        snapshot("after_mesh_release")
         if scene.dtu_obsmask is not None and len(predicted):
             predicted = predicted[observed_volume_mask(predicted, scene.dtu_obsmask)]
         if scene.tnt_crop is not None and len(predicted):
@@ -425,6 +459,7 @@ def evaluate_benchmark_scene(
             if len(predicted)
             else _empty_surface_metrics(scene.mesh_taus)
         )
+        snapshot("after_surface_metrics")
         rows.append(
             {
                 "suite": scene.family,
@@ -511,6 +546,11 @@ def main() -> None:
             "Does not change the surface-sample count or metric; lower it to reduce RAM."
         ),
     )
+    parser.add_argument(
+        "--memory-profile",
+        action="store_true",
+        help="Write RSS/cgroup memory samples around TSDF and mesh scoring to each condition's memory.jsonl.",
+    )
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     models = [value.strip() for value in args.models.split(",") if value.strip()]
@@ -542,6 +582,7 @@ def main() -> None:
                 args.mesh_samples,
                 args.gt_voxel,
                 args.surface_query_chunk_size,
+                args.memory_profile,
             ):
                 row["model"] = model
                 records.append(row)
@@ -560,6 +601,7 @@ def main() -> None:
                 args.mesh_samples,
                 args.gt_voxel,
                 args.surface_query_chunk_size,
+                args.memory_profile,
             ):
                 row["model"] = model
                 records.append(row)

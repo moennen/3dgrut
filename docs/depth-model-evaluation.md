@@ -59,6 +59,11 @@ Use one or more comma-separated scenes per suite. Omit `--max-frames` and `--max
   --dtu-scenes scan24 --tnt-scenes Barn
 ```
 
+To diagnose a memory limit without altering the protocol, add `--memory-profile`. Each alignment
+then writes `memory.jsonl`, including process RSS and cgroup memory before TSDF fusion, after each
+integrated frame, after mesh extraction/sampling/release, and after surface scoring. The file is
+flushed per sample, so its final line identifies the last completed stage after an OOM kill.
+
 
 ### 6. Inspect the machine-readable records
 

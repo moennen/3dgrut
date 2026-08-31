@@ -156,6 +156,10 @@ mkdir -p "$OUT"
   2>&1 | tee "$OUT/run.log"
 ```
 
+For a 64 GB OOM investigation, append `--memory-profile` to that command. Inspect the last line
+of `$OUT/dtu/scan24/<model>/raw/memory.jsonl`: it contains process RSS and cgroup memory after
+each TSDF frame and mesh/scoring boundary, including the last completed boundary before a kill.
+
 ## 6. Generate and preserve the report
 
 ```bash
