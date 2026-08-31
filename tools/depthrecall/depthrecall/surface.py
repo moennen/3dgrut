@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+DEFAULT_QUERY_CHUNK_SIZE = 100_000
+
 
 @dataclass(frozen=True)
 class SurfaceMetrics:
@@ -31,26 +33,66 @@ class SurfaceMetrics:
         }
 
 
-def _nearest(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+def _nearest_summary(
+    source: np.ndarray,
+    target: np.ndarray,
+    taus: np.ndarray,
+    *,
+    query_chunk_size: int,
+    workers: int,
+) -> tuple[float, np.ndarray]:
+    """Return exact nearest-distance mean and threshold fractions without retaining all distances.
+
+    Large benchmark meshes contain millions of samples. Querying them all at once with every CPU
+    worker can create enough temporary allocations to OOM a 64 GB host. The KD-tree remains exact;
+    only its queries are processed in bounded batches and immediately reduced to the statistics
+    required by DTU/TnT metrics.
+    """
     if len(source) == 0 or len(target) == 0:
         raise ValueError("Both predicted and reference surface samples must be non-empty")
+    if query_chunk_size < 1:
+        raise ValueError(f"query_chunk_size must be positive, got {query_chunk_size}")
+    if workers < 1:
+        raise ValueError(f"workers must be positive, got {workers}")
     try:
         from scipy.spatial import cKDTree
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("Surface metrics need scipy; install depthrecall[surface]") from exc
-    return cKDTree(np.asarray(target, dtype=np.float64)).query(np.asarray(source, dtype=np.float64), workers=-1)[0]
+    source = np.asarray(source)
+    tree = cKDTree(np.asarray(target, dtype=np.float64))
+    distance_sum = 0.0
+    threshold_counts = np.zeros(len(taus), dtype=np.int64)
+    for start in range(0, len(source), query_chunk_size):
+        distances = tree.query(np.asarray(source[start : start + query_chunk_size], dtype=np.float64), workers=workers)[
+            0
+        ]
+        distance_sum += float(distances.sum())
+        threshold_counts += np.count_nonzero(distances[:, None] <= taus[None, :], axis=0)
+    return distance_sum / len(source), threshold_counts / len(source)
 
 
-def evaluate_surface(predicted: np.ndarray, reference: np.ndarray, taus: np.ndarray) -> SurfaceMetrics:
-    """Compute DTU accuracy/completeness and TnT precision/recall/F-score from surface samples."""
+def evaluate_surface(
+    predicted: np.ndarray,
+    reference: np.ndarray,
+    taus: np.ndarray,
+    *,
+    query_chunk_size: int = DEFAULT_QUERY_CHUNK_SIZE,
+    workers: int = 1,
+) -> SurfaceMetrics:
+    """Compute DTU/TnT surface metrics with bounded-memory exact nearest-neighbour queries.
+
+    ``query_chunk_size`` changes only peak memory and execution scheduling; it does not subsample
+    either surface or approximate nearest-neighbour distances. ``workers=1`` is the safe default
+    for multi-million-sample benchmark scoring; callers can raise it when host memory permits.
+    """
     taus = np.asarray(taus, dtype=np.float64)
     if taus.ndim != 1 or len(taus) == 0 or np.any(taus <= 0):
         raise ValueError("taus must be a non-empty 1-D array of positive thresholds")
-    predicted_to_reference = _nearest(predicted, reference)
-    reference_to_predicted = _nearest(reference, predicted)
-    accuracy = float(predicted_to_reference.mean())
-    completeness = float(reference_to_predicted.mean())
-    precision = np.array([(predicted_to_reference <= tau).mean() for tau in taus])
-    recall = np.array([(reference_to_predicted <= tau).mean() for tau in taus])
+    accuracy, precision = _nearest_summary(
+        predicted, reference, taus, query_chunk_size=query_chunk_size, workers=workers
+    )
+    completeness, recall = _nearest_summary(
+        reference, predicted, taus, query_chunk_size=query_chunk_size, workers=workers
+    )
     fscore = 2 * precision * recall / np.maximum(precision + recall, 1e-12)
     return SurfaceMetrics(accuracy, completeness, (accuracy + completeness) / 2, precision, recall, fscore)

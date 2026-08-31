@@ -139,7 +139,9 @@ test "$(wc -l < "$OUT/results.jsonl")" -eq 27
 
 Only after the smoke succeeds, use the full protocol. Do not set `--max-frames`,
 `--max-image-side`, `--mesh-samples`, or `--gt-voxel`; this preserves full resolution and the
-two-million-sample surface metric default.
+two-million-sample surface metric default. The evaluator processes the exact nearest-neighbour
+queries in 100,000-sample batches, which is suitable for a 64 GB host. Only use
+`--surface-query-chunk-size` to reduce peak RAM further; it does not alter the metric.
 
 ```bash
 export OUT=$WORK/results/full

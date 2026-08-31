@@ -42,7 +42,7 @@ from depthrecall.io_cameras import View, read_colmap_views
 from depthrecall.io_points import apply_alignment, read_ply, voxel_downsample
 from depthrecall.metric import MetricConfig
 from depthrecall.metric import evaluate as evaluate_recall
-from depthrecall.surface import evaluate_surface
+from depthrecall.surface import DEFAULT_QUERY_CHUNK_SIZE, evaluate_surface
 from depthrecall.tnt import OFFICIAL_TAU_METRES, crop_volume_mask, gt_to_render_alignment
 from threedgrut.datasets.gt_geometry import depth_validity, find_gt_paths, read_gt_map, resize_gt_map
 from threedgrut.datasets.pseudo_depth import BACKENDS
@@ -323,6 +323,7 @@ def evaluate_benchmark_scene(
     voxel_size: float,
     mesh_samples: int,
     gt_voxel: float | None,
+    surface_query_chunk_size: int,
 ) -> list[dict]:
     # The oracle alignment is fitted to the same scan z-buffer used for visibility, in the
     # model's native quantity. A zero is an empty pixel and is excluded by ``align_prediction``.
@@ -378,7 +379,12 @@ def evaluate_benchmark_scene(
         if gt_voxel is not None:
             reference = voxel_downsample(reference, gt_voxel)
         surface = (
-            evaluate_surface(predicted, reference, scene.mesh_taus).asdict(scene.mesh_taus)
+            evaluate_surface(
+                predicted,
+                reference,
+                scene.mesh_taus,
+                query_chunk_size=surface_query_chunk_size,
+            ).asdict(scene.mesh_taus)
             if len(predicted)
             else _empty_surface_metrics(scene.mesh_taus)
         )
@@ -459,6 +465,15 @@ def main() -> None:
         help="Uniform mesh samples for DTU/TnT surface metrics (official evaluator-scale default)",
     )
     parser.add_argument("--gt-voxel", type=float, default=None, help="Optional GT downsample in evaluation units")
+    parser.add_argument(
+        "--surface-query-chunk-size",
+        type=int,
+        default=DEFAULT_QUERY_CHUNK_SIZE,
+        help=(
+            "Maximum source samples in one exact cKDTree query during mesh scoring. "
+            "Does not change the surface-sample count or metric; lower it to reduce RAM."
+        ),
+    )
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     models = [value.strip() for value in args.models.split(",") if value.strip()]
@@ -494,6 +509,7 @@ def main() -> None:
                 args.voxel_size_dtu,
                 args.mesh_samples,
                 args.gt_voxel,
+                args.surface_query_chunk_size,
             ):
                 row["model"] = model
                 records.append(row)
@@ -516,6 +532,7 @@ def main() -> None:
                 args.voxel_size_tnt,
                 args.mesh_samples,
                 args.gt_voxel,
+                args.surface_query_chunk_size,
             ):
                 row["model"] = model
                 records.append(row)
@@ -527,6 +544,8 @@ def main() -> None:
                 "models": model_specs,
                 "alignment": list(ALIGNMENTS),
                 "oracle_alignment": "GT scan z-buffer per frame",
+                "mesh_samples": args.mesh_samples,
+                "surface_query_chunk_size": args.surface_query_chunk_size,
             },
             indent=2,
         )

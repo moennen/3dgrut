@@ -131,6 +131,7 @@ def markdown(records: list[dict], note: str) -> str:
         "- DTU recall uses the official ground-plane GT cull and visibility z-buffer; its mesh score is Chamfer `(accuracy + completeness)/2` in millimetres, with the official observation mask on predictions.",
         "- TnT recall and mesh scoring use its official crop; F1 is reported at the scene's official threshold (Barn: 1 cm).",
         "- All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.",
+        "- Mesh scoring retains two million samples by default. Exact cKDTree queries are reduced in 100,000-sample batches to bound host RAM; this does not alter the metric.",
         "",
         "## Evaluate a 3dgrut reconstruction checkpoint",
         "",
