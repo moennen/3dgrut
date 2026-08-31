@@ -159,8 +159,47 @@ class DepthAnything3Predictor:
         return np.asarray(prediction.depth[0], dtype=np.float32)
 
 
+@dataclass
+class MoGe3Predictor:
+    """MoGe-3 metric monocular depth from its upstream local-checkpoint API.
+
+    MoGe-3 publishes metric depth, normals and point maps. Training currently consumes its depth
+    only; it is still cached per image and sparse-aligned like DA3 so a dataset's scale convention
+    never becomes an untested assumption. MoGe-3 checkpoints are local paths in the upstream API.
+    """
+
+    QUANTITY = "depth"
+
+    model_id: str
+    device: str = "cuda"
+    _model: object = field(default=None, init=False, repr=False)
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from moge.model.v3 import MoGeModel
+        except ImportError as exc:  # pragma: no cover - external optional package
+            raise ImportError(
+                "The moge3 backend needs the upstream MoGe package (`pip install git+https://github.com/microsoft/MoGe.git`)."
+            ) from exc
+        logger.info(f"Loading MoGe-3 checkpoint {self.model_id}")
+        self._model = MoGeModel.from_pretrained(self.model_id).to(self.device).eval()
+
+    @torch.no_grad()
+    def predict(self, image: np.ndarray) -> np.ndarray:
+        self._ensure_loaded()
+        tensor = torch.from_numpy(np.ascontiguousarray(image)).to(self.device, dtype=torch.float32)
+        output = self._model.infer((tensor / 255.0).permute(2, 0, 1))
+        return output["depth"].detach().float().cpu().numpy()
+
+
 # Each backend fixes the quantity it emits, so a config cannot pair a model with the wrong one.
-BACKENDS = {"transformers": TransformersPredictor, "depth_anything_3": DepthAnything3Predictor}
+BACKENDS = {
+    "transformers": TransformersPredictor,
+    "depth_anything_3": DepthAnything3Predictor,
+    "moge3": MoGe3Predictor,
+}
 
 
 def _cache_identity(backend: str, model_id: str) -> dict:

@@ -190,6 +190,9 @@ class TestBackends:
         assert BACKENDS["transformers"].QUANTITY == "disparity"
         assert BACKENDS["depth_anything_3"].QUANTITY == "depth"
 
+    def test_moge3_is_a_metric_depth_backend(self):
+        assert BACKENDS["moge3"].QUANTITY == "depth"
+
     def test_every_quantity_is_one_the_loss_understands(self):
         """A backend naming a quantity the loss has no sign for would fail only at train time."""
         assert {b.QUANTITY for b in BACKENDS.values()} <= set(FARTHER_SIGN)

@@ -28,6 +28,9 @@ pseudo_depth:
   #                       convention. DA3MONO-LARGE is Apache-2.0 too; this is not the default
   #                       only because it needs that package, which the venv does not carry.
   # The backend fixes the quantity, so no config can pair a model with the wrong sign.
+  #   moge3             - MoGe-3 via the upstream `moge` package. Emits metric z-depth and
+  #                       currently expects a local checkpoint path as `model`; install with
+  #                       `pip install git+https://github.com/microsoft/MoGe.git`.
   backend: transformers
   # Model id for that backend. The cache directory embeds the backend, this id and the resulting
   # quantity, so changing any of them cannot silently reuse the previous model's predictions.
