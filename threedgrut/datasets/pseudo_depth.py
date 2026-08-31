@@ -55,6 +55,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -253,12 +254,21 @@ class PseudoDepthCache:
             # Write via a temporary file so an interrupted run cannot leave a truncated entry
             # that later looks like a valid cache hit.
             target = self.entry_path(image_path)
-            temporary = target.with_suffix(".npy.tmp")
-            # Written through an open handle rather than by path: `np.save` silently appends
-            # `.npy` to a name that lacks it, which would leave the rename with nothing to move.
-            with open(temporary, "wb") as handle:
+            # More than one training process can prebuild a shared cache. A fixed temporary
+            # name lets one process rename the other process's prediction (or make its rename
+            # fail); a unique file keeps the final replace atomic for each writer.
+            with tempfile.NamedTemporaryFile(
+                dir=target.parent, prefix=f".{target.stem}.", suffix=".tmp", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                # Written through an open handle rather than by path: `np.save` silently
+                # appends `.npy` to a name that lacks it, which would leave the rename with
+                # nothing to move.
                 np.save(handle, prediction.astype(np.float32))
-            os.replace(temporary, target)
+            try:
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     # -- reading ----------------------------------------------------------------------------
 

@@ -135,3 +135,9 @@ extend-exclude = '''
 [tool.isort]
 skip_gitignore = true
 profile = "black"
+line_length = 120
+# `tools/depthrecall` is a standalone package with its own pyproject, so isort classifies
+# `depthrecall` as first-party when run inside it and third-party when run from here. The two
+# then disagree about one blank line and each "fixes" what the other just wrote. Declared in
+# both configs so the repo-wide command and a run inside the package agree.
+known_first_party = ["threedgrut", "depthrecall"]

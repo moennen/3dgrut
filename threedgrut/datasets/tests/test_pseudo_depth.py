@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import threading
 
 import numpy as np
 import pytest
@@ -138,6 +139,31 @@ def test_no_temporary_files_are_left_behind(tmp_path):
     cache = _cache(tmp_path)
     cache.ensure(paths)
     assert list(cache.directory.glob("*.tmp")) == []
+
+
+def test_concurrent_cache_writers_do_not_share_a_temporary_path(tmp_path):
+    """Two sweep processes may populate the same frame; only the final entry may remain."""
+    paths = _scene(tmp_path, count=1)
+    first, second = _cache(tmp_path), _cache(tmp_path)
+    barrier = threading.Barrier(2)
+    failures = []
+
+    def populate(cache):
+        try:
+            barrier.wait()
+            cache.ensure(paths)
+        except Exception as exc:  # pragma: no cover - only reached on a thread failure
+            failures.append(exc)
+
+    threads = [threading.Thread(target=populate, args=(cache,)) for cache in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert first.entry_path(paths[0]).exists()
+    assert list(first.directory.glob("*.tmp")) == []
 
 
 def test_entries_from_different_folders_do_not_collide(tmp_path):
