@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depthrecall"
+version = "0.1.0"
+description = "Recall of ground-truth scan points against rendered depth maps"
+requires-python = ">=3.9"
+# Deliberately minimal: the point of this package is that any method's depth maps can be
+# scored without installing that method's stack. numpy is the only hard requirement;
+# every file format beyond .npy/.npz is an optional import resolved at load time.
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+formats = ["opencv-python", "pillow"]
+dev = ["pytest"]
+surface = ["scipy", "open3d>=0.18.0"]
+
+[project.scripts]
+depthrecall = "depthrecall.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["depthrecall*"]
+
+[tool.black]
+target-version = ["py311"]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120
+# Also declared in the repo root's pyproject: without it, a run from the root classifies
+# `depthrecall` as third-party and undoes what a run from here does.
+known_first_party = ["depthrecall"]
