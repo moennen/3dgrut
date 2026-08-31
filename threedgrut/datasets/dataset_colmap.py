@@ -292,6 +292,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             feature_stride=int(self.image_features_config.get("feature_stride", 14)),
             cache_dir=self.image_features_config.get("cache_dir"),
             device=self.device,
+            projector=self.image_features_config.get("projector", "pca"),
+            autoencoder_hidden_dim=int(self.image_features_config.get("autoencoder_hidden_dim", 128)),
+            autoencoder_steps=int(self.image_features_config.get("autoencoder_steps", 1_000)),
         )
         cache.ensure(
             self.image_paths,

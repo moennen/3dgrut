@@ -57,3 +57,6 @@ image_features:
   feature_stride: 14
   fit_samples: 250000
   seed: 0
+  projector: pca  # pca | autoencoder; both are frozen before reconstruction training.
+  autoencoder_hidden_dim: 128
+  autoencoder_steps: 1000

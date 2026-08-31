@@ -83,10 +83,13 @@ class ImageFeatureCache:
         feature_stride: int = 14,
         cache_dir: str | None = None,
         device: str = "cuda",
+        projector: str = "pca",
+        autoencoder_hidden_dim: int = 128,
+        autoencoder_steps: int = 1_000,
     ):
         if backend not in BACKENDS:
             raise ValueError(f"unknown image-feature backend {backend!r}; expected {sorted(BACKENDS)}")
-        if output_dim < 1 or feature_stride < 1:
+        if output_dim < 1 or feature_stride < 1 or projector not in {"pca", "autoencoder"}:
             raise ValueError("output_dim and feature_stride must be positive")
         self.backend = BACKENDS[backend](model, device=device)
         self.output_dim, self.feature_stride = output_dim, feature_stride
@@ -95,12 +98,16 @@ class ImageFeatureCache:
             **self.backend.identity(),
             "output_dim": output_dim,
             "feature_stride": feature_stride,
-            "projector": "pca",
+            "projector": projector,
+            "autoencoder_hidden_dim": autoencoder_hidden_dim if projector == "autoencoder" else None,
+            "autoencoder_steps": autoencoder_steps if projector == "autoencoder" else None,
         }
         digest = hashlib.sha1(json.dumps(self.identity, sort_keys=True).encode()).hexdigest()[:8]
         root = Path(cache_dir) if cache_dir else Path(scene_path) / "image_feature_cache"
         self.directory = root / f"{_slug(model)}__{digest}"
-        self.projector: PCAProjector | None = None
+        self.projector_type = projector
+        self.autoencoder_hidden_dim, self.autoencoder_steps = autoencoder_hidden_dim, autoencoder_steps
+        self.projector = None
 
     def entry_path(self, image_path: str | Path) -> Path:
         image_path = Path(image_path)
@@ -152,13 +159,30 @@ class ImageFeatureCache:
             reservoir = combined
         if reservoir is None:
             raise ValueError("Cannot build image features for an empty image list")
-        self.projector = PCAProjector.fit(reservoir, self.output_dim)
-        torch.save(self.projector.state_dict(), self.directory / "projector.pt")
+        if self.projector_type == "pca":
+            self.projector = PCAProjector.fit(reservoir, self.output_dim)
+            torch.save(self.projector.state_dict(), self.directory / "projector.pt")
+        else:
+            self.projector = fit_autoencoder(
+                reservoir,
+                self.output_dim,
+                hidden_dim=self.autoencoder_hidden_dim,
+                steps=self.autoencoder_steps,
+                seed=seed,
+            )
+            torch.save(
+                {"type": "autoencoder", "state_dict": self.projector.state_dict()}, self.directory / "projector.pt"
+            )
         for path in image_paths:
             target = self.entry_path(path)
             if target.exists():
                 continue
-            compressed = self.projector.transform(self._features(path)).numpy().astype(np.float16)
+            features = self._features(path)
+            if self.projector_type == "pca":
+                compressed = self.projector.transform(features)
+            else:
+                compressed = self.projector.encode(features)
+            compressed = compressed.numpy().astype(np.float16)
             with tempfile.NamedTemporaryFile(
                 dir=target.parent, prefix=f".{target.stem}.", suffix=".tmp", delete=False
             ) as handle:

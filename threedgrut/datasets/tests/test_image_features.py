@@ -34,3 +34,32 @@ def test_feature_cache_builds_compact_pca_maps_and_reuses_them(tmp_path, monkeyp
     assert Backend.calls == 2  # fit pass + compressed-cache pass
     cache.ensure([str(image)], fit_samples=16)
     assert Backend.calls == 2
+
+
+def test_feature_cache_can_use_a_frozen_autoencoder(tmp_path, monkeypatch):
+    class Backend:
+        def __init__(self, model, device="cuda"):
+            pass
+
+        def identity(self):
+            return {"backend": "fake-auto", "model": "fake"}
+
+        def encode(self, image):
+            return image_features.torch.arange(64, dtype=image_features.torch.float32).reshape(4, 4, 4)
+
+    monkeypatch.setitem(image_features.BACKENDS, "fake-auto", Backend)
+    image = tmp_path / "images" / "frame.png"
+    image.parent.mkdir()
+    Image.fromarray(np.zeros((28, 28, 3), dtype=np.uint8)).save(image)
+    cache = image_features.ImageFeatureCache(
+        str(tmp_path),
+        backend="fake-auto",
+        model="fake",
+        output_dim=2,
+        feature_stride=14,
+        device="cpu",
+        projector="autoencoder",
+        autoencoder_steps=2,
+    )
+    cache.ensure([str(image)], fit_samples=16)
+    assert cache.load(image).shape == (2, 2, 2)

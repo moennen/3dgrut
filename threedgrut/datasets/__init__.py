@@ -102,6 +102,9 @@ def _image_features_config(config) -> dict:
         "feature_stride": settings.get("feature_stride", 14),
         "fit_samples": settings.get("fit_samples", 250_000),
         "seed": settings.get("seed", 0),
+        "projector": settings.get("projector", "pca"),
+        "autoencoder_hidden_dim": settings.get("autoencoder_hidden_dim", 128),
+        "autoencoder_steps": settings.get("autoencoder_steps", 1_000),
     }
 
 
