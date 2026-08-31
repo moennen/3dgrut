@@ -141,7 +141,9 @@ def align_prediction(
     prediction = np.asarray(prediction, dtype=np.float64)
     gt_z = np.asarray(gt_z, dtype=np.float64)
     valid = np.isfinite(prediction) & (prediction > 0) & np.isfinite(gt_z) & (gt_z > 0)
-    target = 1.0 / gt_z if quantity == "disparity" else gt_z
+    target = gt_z.copy()
+    if quantity == "disparity":
+        target[valid] = 1.0 / gt_z[valid]
     fitted = prediction.copy()
     if alignment == "scale":
         scale = _fit_scale(prediction[valid], target[valid])
@@ -398,15 +400,17 @@ def evaluate_ob3d(model: str, predictor, frames: list[Frame], out: Path) -> list
         maps.append(_resize(prediction, (frame.view.height, frame.view.width)))
     rows = []
     for alignment in ALIGNMENTS:
-        metrics = [
-            depth_metrics(align_prediction(pred, frame.gt_z, quantity, alignment), frame.gt_z)
-            for pred, frame in zip(maps, frames)
-        ]
+        maps_dir = out / alignment / "depths"
+        maps_dir.mkdir(parents=True, exist_ok=True)
+        aligned_maps = [align_prediction(pred, frame.gt_z, quantity, alignment) for pred, frame in zip(maps, frames)]
+        for frame, prediction in zip(frames, aligned_maps):
+            np.save(maps_dir / f"{frame.name}.npy", prediction)
+        metrics = [depth_metrics(prediction, frame.gt_z) for prediction, frame in zip(aligned_maps, frames)]
         weights = np.asarray([metric["valid_pixels"] for metric in metrics], dtype=np.float64)
         rows.append(
             {
                 "suite": "ob3d",
-                "scene": out.name,
+                "scene": out.parent.name,
                 "model": model,
                 "alignment": alignment,
                 "depth": {
@@ -453,7 +457,7 @@ def main() -> None:
         predictor = BACKENDS[backend](model_id=model_id)
         for scene_name in args.ob3d_scenes.split(","):
             frames = ob3d_frames(args.ob3d_root / scene_name, max_frames, args.max_image_side)
-            records.extend(evaluate_ob3d(model, predictor, frames, args.out_dir / "ob3d" / scene_name))
+            records.extend(evaluate_ob3d(model, predictor, frames, args.out_dir / "ob3d" / scene_name / model))
         for scene_name in args.dtu_scenes.split(","):
             destination = args.out_dir / "dtu" / scene_name / model
             scene = dtu_scene(
