@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from threedgrut.geometry.tsdf import TSDFConfig, ray_distance_to_z_depth
+from threedgrut.geometry.tsdf import TSDFConfig, ray_distance_to_z_depth, z_depth_to_ray_distance
 
 
 def test_ray_distance_to_z_depth_is_exact_on_the_optical_axis():
@@ -20,6 +20,12 @@ def test_ray_distance_to_z_depth_shortens_oblique_rays():
     z = ray_distance_to_z_depth(ray, K)
     assert z[0, 0] < z[1, 1]
     np.testing.assert_allclose(z[0, 0], 5.0 / np.sqrt(3.0))
+
+
+def test_depth_convention_conversions_round_trip():
+    K = np.array([[4.0, 0.0, 1.5], [0.0, 3.0, 1.5], [0.0, 0.0, 1.0]])
+    ray = np.arange(1, 10, dtype=np.float32).reshape(3, 3)
+    np.testing.assert_allclose(z_depth_to_ray_distance(ray_distance_to_z_depth(ray, K), K), ray)
 
 
 @pytest.mark.parametrize(

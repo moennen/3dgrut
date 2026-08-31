@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from omegaconf import open_dict
 
-from threedgrut.geometry.tsdf import TSDFConfig, create_volume, extract_mesh, integrate_ray_depth
+from threedgrut.geometry.tsdf import DepthFrame, TSDFConfig, fuse_depth_frames
 
 
 def fit_pinhole(rays_dir: np.ndarray) -> tuple[np.ndarray, float]:
@@ -81,7 +81,7 @@ def extract(args: argparse.Namespace) -> dict:
         min_component_triangles=args.min_component_triangles,
         keep_largest_components=args.keep_largest_components,
     )
-    volume = create_volume(config)
+    frames: list[DepthFrame] = []
     residuals: list[float] = []
 
     with torch.no_grad():
@@ -100,9 +100,17 @@ def extract(args: argparse.Namespace) -> dict:
                 )
             residuals.append(residual)
             pose = gpu_batch.T_to_world[0].float().cpu().numpy()
-            integrate_ray_depth(volume, depth_np, K, world_to_camera(pose), config, valid=valid)
+            frames.append(
+                DepthFrame(
+                    depth=depth_np,
+                    K=K,
+                    world_to_camera=world_to_camera(pose),
+                    convention="ray",
+                    valid=valid,
+                )
+            )
 
-    mesh = extract_mesh(volume, config)
+    mesh = fuse_depth_frames(frames, config)
     import open3d as o3d
 
     output = Path(args.out)

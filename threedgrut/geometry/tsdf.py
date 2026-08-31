@@ -11,6 +11,7 @@ and poses, so a checkpoint from either tracer can be meshed the same way.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable, Literal
 
 import numpy as np
 
@@ -38,6 +39,32 @@ class TSDFConfig:
             raise ValueError("keep_largest_components must be at least one")
 
 
+@dataclass(frozen=True)
+class DepthFrame:
+    """One calibrated depth image to fuse into a TSDF.
+
+    ``world_to_camera`` follows Open3D/COLMAP's convention.  Keeping the depth convention on
+    the frame makes the conversion at the one Open3D boundary explicit: callers which already
+    have z-depth (monocular priors) and callers which render ray distance (3dgrut) now use the
+    exact same fusion code.
+    """
+
+    depth: np.ndarray
+    K: np.ndarray
+    world_to_camera: np.ndarray
+    convention: Literal["ray", "z"]
+    valid: np.ndarray | None = None
+
+
+def _ray_length_grid(K: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Per-pixel ratio between Euclidean ray distance and camera z-depth."""
+    u = np.arange(width, dtype=np.float32) + 0.5
+    v = np.arange(height, dtype=np.float32)[:, None] + 0.5
+    x = (u - K[0, 2]) / K[0, 0]
+    y = (v - K[1, 2]) / K[1, 1]
+    return np.sqrt(1.0 + x[None, :] ** 2 + y**2).astype(np.float32)
+
+
 def ray_distance_to_z_depth(ray_distance: np.ndarray, K: np.ndarray) -> np.ndarray:
     """Convert Euclidean ray distance to a pinhole camera's z-depth.
 
@@ -52,13 +79,19 @@ def ray_distance_to_z_depth(ray_distance: np.ndarray, K: np.ndarray) -> np.ndarr
     if K.shape != (3, 3) or K[0, 0] <= 0 or K[1, 1] <= 0:
         raise ValueError(f"K must be a pinhole 3x3 matrix with positive focal lengths, got {K}")
 
-    height, width = ray_distance.shape
-    u = np.arange(width, dtype=np.float32) + 0.5
-    v = np.arange(height, dtype=np.float32)[:, None] + 0.5
-    x = (u - K[0, 2]) / K[0, 0]
-    y = (v - K[1, 2]) / K[1, 1]
-    cosine = 1.0 / np.sqrt(1.0 + x[None, :] ** 2 + y**2)
-    return ray_distance * cosine.astype(np.float32)
+    ray_length = _ray_length_grid(K, *ray_distance.shape)
+    return ray_distance / ray_length
+
+
+def z_depth_to_ray_distance(z_depth: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """Convert a pinhole camera's z-depth to Euclidean distance along each ray."""
+    z_depth = np.asarray(z_depth, dtype=np.float32)
+    K = np.asarray(K, dtype=np.float64)
+    if z_depth.ndim != 2:
+        raise ValueError(f"z_depth must be [H, W], got {z_depth.shape}")
+    if K.shape != (3, 3) or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ValueError(f"K must be a pinhole 3x3 matrix with positive focal lengths, got {K}")
+    return z_depth * _ray_length_grid(K, *z_depth.shape)
 
 
 def _open3d():
@@ -82,22 +115,32 @@ def create_volume(config: TSDFConfig):
     )
 
 
-def integrate_ray_depth(
+def integrate_depth(
     volume,
-    ray_distance: np.ndarray,
+    depth: np.ndarray,
     K: np.ndarray,
     world_to_camera: np.ndarray,
     config: TSDFConfig,
+    convention: Literal["ray", "z"],
     valid: np.ndarray | None = None,
 ) -> None:
-    """Integrate one rendered ray-distance map into an Open3D TSDF volume."""
+    """Integrate one calibrated depth map into an Open3D TSDF volume.
+
+    Open3D requires z-depth.  This is the only place that interprets a depth convention; all
+    extraction paths should pass through it instead of duplicating a conversion.
+    """
     o3d = _open3d()
     K = np.asarray(K, dtype=np.float64)
     world_to_camera = np.asarray(world_to_camera, dtype=np.float64)
     if world_to_camera.shape != (4, 4):
         raise ValueError(f"world_to_camera must be 4x4, got {world_to_camera.shape}")
 
-    z_depth = ray_distance_to_z_depth(ray_distance, K)
+    if convention == "ray":
+        z_depth = ray_distance_to_z_depth(depth, K)
+    elif convention == "z":
+        z_depth = np.asarray(depth, dtype=np.float32)
+    else:
+        raise ValueError(f"depth convention must be 'ray' or 'z', got {convention!r}")
     usable = np.isfinite(z_depth) & (z_depth > 0) & (z_depth <= config.max_depth)
     if valid is not None:
         valid = np.asarray(valid, dtype=bool)
@@ -116,6 +159,18 @@ def integrate_ray_depth(
     )
     intrinsic = o3d.camera.PinholeCameraIntrinsic(width, height, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
     volume.integrate(rgbd, intrinsic, world_to_camera)
+
+
+def integrate_ray_depth(
+    volume,
+    ray_distance: np.ndarray,
+    K: np.ndarray,
+    world_to_camera: np.ndarray,
+    config: TSDFConfig,
+    valid: np.ndarray | None = None,
+) -> None:
+    """Backward-compatible ray-distance wrapper around :func:`integrate_depth`."""
+    integrate_depth(volume, ray_distance, K, world_to_camera, config, "ray", valid)
 
 
 def filter_components(mesh, config: TSDFConfig):
@@ -143,3 +198,27 @@ def extract_mesh(volume, config: TSDFConfig):
     if len(mesh.triangles):
         mesh.compute_vertex_normals()
     return mesh
+
+
+def fuse_depth_frames(frames: Iterable[DepthFrame], config: TSDFConfig):
+    """Fuse posed ray- or z-depth frames and return the cleaned TSDF mesh.
+
+    This is intentionally the common entry point for checkpoint renders and external depth
+    models.  It consumes an iterator, so a benchmark need not keep every prediction in memory.
+    """
+    volume = create_volume(config)
+    count = 0
+    for frame in frames:
+        integrate_depth(
+            volume,
+            frame.depth,
+            frame.K,
+            frame.world_to_camera,
+            config,
+            frame.convention,
+            frame.valid,
+        )
+        count += 1
+    if count == 0:
+        raise ValueError("Cannot fuse an empty depth-frame sequence")
+    return extract_mesh(volume, config)
