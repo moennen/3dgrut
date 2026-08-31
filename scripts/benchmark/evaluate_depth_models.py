@@ -443,7 +443,12 @@ def main() -> None:
     parser.add_argument("--max-image-side", type=int, default=None, help="Downscale before inference/evaluation")
     parser.add_argument("--voxel-size-dtu", type=float, default=2.0, help="TSDF voxel size in DTU millimetres")
     parser.add_argument("--voxel-size-tnt", type=float, default=0.01, help="TSDF voxel size in TnT metres")
-    parser.add_argument("--mesh-samples", type=int, default=500_000)
+    parser.add_argument(
+        "--mesh-samples",
+        type=int,
+        default=2_000_000,
+        help="Uniform mesh samples for DTU/TnT surface metrics (official evaluator-scale default)",
+    )
     parser.add_argument("--gt-voxel", type=float, default=None, help="Optional GT downsample in evaluation units")
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
