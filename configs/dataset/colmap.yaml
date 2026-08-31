@@ -45,3 +45,15 @@ pseudo_depth:
   # Requires a depth backend -- a disparity prior is affine to inverse z, so this would fit the
   # wrong thing, and the dataset raises rather than allow it.
   align_to_sparse_points: false
+
+# Frozen, low-resolution foundation-model features. This is enabled automatically when the
+# feature loss is enabled, and cached separately from pseudo depth.
+image_features:
+  enabled: false
+  backend: dinov2
+  model: facebook/dinov2-base
+  cache_dir: null
+  output_dim: 16
+  feature_stride: 14
+  fit_samples: 250000
+  seed: 0

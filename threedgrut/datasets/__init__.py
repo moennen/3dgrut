@@ -88,6 +88,23 @@ def _pseudo_depth_config(config) -> dict:
     }
 
 
+def _image_features_config(config) -> dict:
+    """Frozen feature-cache settings, enabled only when the feature loss consumes them."""
+    settings = config.dataset.get("image_features", None)
+    if settings is None:
+        return {}
+    return {
+        "enabled": bool(settings.get("enabled", False)) or bool(config.loss.get("use_image_features", False)),
+        "backend": settings.get("backend", "dinov2"),
+        "model": settings.get("model", None),
+        "cache_dir": settings.get("cache_dir", None),
+        "output_dim": settings.get("output_dim", 16),
+        "feature_stride": settings.get("feature_stride", 14),
+        "fit_samples": settings.get("fit_samples", 250_000),
+        "seed": settings.get("seed", 0),
+    }
+
+
 def make(name: str, config, ray_jitter):
     match name:
         case "nerf":
@@ -135,6 +152,7 @@ def make(name: str, config, ray_jitter):
                 # distinct from load_depth_gt above is what keeps the ground truth honest as an
                 # evaluation reference.
                 pseudo_depth=_pseudo_depth_config(config),
+                image_features=_image_features_config(config),
             )
             val_dataset = ColmapDataset(
                 config.path,

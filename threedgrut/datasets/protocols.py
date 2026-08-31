@@ -55,6 +55,7 @@ class Batch:
     # prior's ambiguity is affine in z, and converting needs the rays, so the loss does it.
     # NaN for a frame with too few points to fit, which callers must treat as "no alignment".
     pseudo_depth_affine: Optional[torch.Tensor] = None  # [B, 2]
+    image_features_target: Optional[torch.Tensor] = None  # [B, Hf, Wf, D], frozen compact target
 
     def __post_init__(self):
         batch_size = self.T_to_world.shape[0]

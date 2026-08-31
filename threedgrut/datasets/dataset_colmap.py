@@ -38,6 +38,7 @@ from .gt_geometry import (
     transform_gt_normal,
     validate_scene_conventions,
 )
+from .image_features import ImageFeatureCache
 from .protocols import Batch, BoundedMultiViewDataset, DatasetVisualization
 from .pseudo_depth import PseudoDepthCache
 from .sparse_depth_alignment import fit_frame_alignment, read_points3d_with_ids, sparse_observations
@@ -136,6 +137,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         load_depth_gt: bool = False,
         load_normal_gt: bool = False,
         pseudo_depth: Optional[dict] = None,
+        image_features: Optional[dict] = None,
     ):
         self.path = path
         self.device = device
@@ -151,6 +153,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.load_depth_gt = bool(load_depth_gt)
         self.load_normal_gt = bool(load_normal_gt)
         self.pseudo_depth_config = dict(pseudo_depth) if pseudo_depth else {}
+        self.image_features_config = dict(image_features) if image_features else {}
         self.world_normalization_transform = np.eye(4, dtype=np.float32)
 
         # Worker-based GPU cache for multiprocessing compatibility
@@ -211,6 +214,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
         self._resolve_gt_geometry_paths()
         self._prepare_pseudo_depth()
+        self._prepare_image_features()
 
         # Clear existing worker caches to force recreation with new intrinsics
         self._worker_gpu_cache.clear()
@@ -273,6 +277,29 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         self.pseudo_depth_available = True
         if self.pseudo_depth_config.get("align_to_sparse_points", False):
             self._prepare_pseudo_depth_alignment(cache)
+
+    def _prepare_image_features(self) -> None:
+        """Build compact frozen image-feature targets outside dataloader workers."""
+        self.image_features_cache = None
+        self.image_features_available = False
+        if not self.image_features_config.get("enabled", False):
+            return
+        cache = ImageFeatureCache(
+            self.path,
+            backend=self.image_features_config.get("backend", "dinov2"),
+            model=self.image_features_config["model"],
+            output_dim=int(self.image_features_config.get("output_dim", 16)),
+            feature_stride=int(self.image_features_config.get("feature_stride", 14)),
+            cache_dir=self.image_features_config.get("cache_dir"),
+            device=self.device,
+        )
+        cache.ensure(
+            self.image_paths,
+            fit_samples=int(self.image_features_config.get("fit_samples", 250_000)),
+            seed=int(self.image_features_config.get("seed", 0)),
+        )
+        self.image_features_cache = cache
+        self.image_features_available = True
 
     def _prepare_pseudo_depth_alignment(self, cache: PseudoDepthCache) -> None:
         """Fit one affine per frame taking the prior into scene z, using COLMAP's sparse points.
@@ -873,6 +900,11 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 coefficients = self.pseudo_depth_alignment[idx] or (float("nan"), float("nan"))
                 output_dict["pseudo_depth_affine"] = torch.tensor(coefficients, dtype=torch.float32).unsqueeze(0)
 
+        if self.image_features_available:
+            output_dict["image_features_target"] = torch.from_numpy(
+                self.image_features_cache.load(self.image_paths[idx])
+            )[None]
+
         # Add EXIF exposure if available for this frame
         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
             output_dict["exposure"] = torch.tensor(self.exif_exposures[idx], dtype=torch.float32)
@@ -926,7 +958,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             mask = (mask > 0.5).to(torch.float32)
             sample["mask"] = mask
 
-        for key in ("depth_gt", "normal_gt", "pseudo_depth_prior", "pseudo_depth_affine"):
+        for key in ("depth_gt", "normal_gt", "pseudo_depth_prior", "pseudo_depth_affine", "image_features_target"):
             if key in batch:
                 sample[key] = batch[key][0].to(self.device, non_blocking=True)
 
