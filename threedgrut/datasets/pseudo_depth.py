@@ -189,9 +189,13 @@ class MoGe3Predictor:
     @torch.no_grad()
     def predict(self, image: np.ndarray) -> np.ndarray:
         self._ensure_loaded()
-        tensor = torch.from_numpy(np.ascontiguousarray(image)).to(self.device, dtype=torch.float32)
+        tensor = torch.from_numpy(np.array(image, copy=True, order="C")).to(self.device, dtype=torch.float32)
         output = self._model.infer((tensor / 255.0).permute(2, 0, 1))
-        return output["depth"].detach().float().cpu().numpy()
+        depth = output["depth"].detach().float().cpu().numpy()
+        mask = output.get("mask")
+        if mask is not None:
+            depth = np.where(mask.detach().cpu().numpy().astype(bool), depth, np.nan)
+        return np.where(np.isfinite(depth) & (depth > 0), depth, np.nan).astype(np.float32)
 
 
 # Each backend fixes the quantity it emits, so a config cannot pair a model with the wrong one.
