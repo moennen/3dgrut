@@ -79,6 +79,9 @@ playground = [
     "pygltflib",
     "kaolin>=0.17.0",
 ]
+mesh = [
+    "open3d>=0.18.0",
+]
 
 [tool.setuptools]
 include-package-data = true
