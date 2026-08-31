@@ -334,6 +334,29 @@ def predict_frames(predictor, frames: list[Frame]) -> list[np.ndarray]:
     return predictions
 
 
+def camera_fusion_max_depth(frames: list[Frame], radius_multiplier: float = 2.0) -> float:
+    """AmbiSuR-style fusion cap: twice the nearest camera's distance to the camera focus.
+
+    Monocular depths may have near-zero disparity values which turn into arbitrarily distant
+    points after alignment.  A TSDF's integration range must come from the camera/scene geometry,
+    rather than those predictions.  This mirrors AmbiSuR's adaptive extractor: it finds the point
+    nearest all optical axes and uses twice the closest camera radius as ``depth_trunc``.
+    """
+    if not frames:
+        raise ValueError("Cannot estimate a fusion range without camera frames")
+    if radius_multiplier <= 0:
+        raise ValueError(f"radius_multiplier must be positive, got {radius_multiplier}")
+    origins = np.stack([frame.view.cam_center() for frame in frames])
+    directions = np.stack([frame.view.R.T[:, 2] for frame in frames])
+    projection = np.eye(3)[None] - directions[:, :, None] * directions[:, None, :]
+    normal = np.transpose(projection, (0, 2, 1)) @ projection
+    focus = np.linalg.pinv(normal.mean(axis=0)) @ (normal @ origins[..., None]).mean(axis=0)[:, 0]
+    radius = float(np.linalg.norm(origins - focus, axis=1).min())
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError(f"Could not derive a positive camera-focus radius, got {radius}")
+    return radius_multiplier * radius
+
+
 def prepare_aligned_depths(
     frames: list[Frame],
     predictions: list[np.ndarray],
@@ -341,25 +364,19 @@ def prepare_aligned_depths(
     quantity: str,
     alignment: Literal["raw", "scale", "affine"],
     out_dir: Path,
-) -> tuple[list[View], float]:
-    """Write aligned ray-depth maps one frame at a time and return their views/max z-depth."""
+) -> list[View]:
+    """Write aligned ray-depth maps one frame at a time and return their views."""
     if len(frames) != len(predictions):
         raise ValueError("Each benchmark frame needs exactly one prediction")
     out_dir.mkdir(parents=True, exist_ok=True)
     views = []
-    max_depth = 0.0
     for frame, prediction in zip(frames, predictions):
         gt_z = _z_from_ray(np.load(visibility[frame.name]), frame.view.K)
         z = align_prediction(prediction, gt_z, quantity, alignment)
-        finite = z[np.isfinite(z)]
-        if len(finite):
-            max_depth = max(max_depth, float(finite.max()))
         path = out_dir / f"{frame.name}.npy"
         np.save(path, z_depth_to_ray_distance(z, frame.view.K))
         views.append(_view_with_depth(frame, path))
-    if max_depth <= 0:
-        raise ValueError(f"No positive finite depth after {alignment} alignment")
-    return views, max_depth
+    return views
 
 
 def saved_depth_frames(frames: list[Frame], views: list[View]) -> Iterable[DepthFrame]:
@@ -397,19 +414,24 @@ def evaluate_benchmark_scene(
     mesh_samples: int,
     gt_voxel: float | None,
     surface_query_chunk_size: int,
+    fusion_max_depth: float | None,
+    fusion_depth_radius_multiplier: float,
     memory_profile: bool = False,
 ) -> list[dict]:
     # The oracle alignment is fitted to the same scan z-buffer used for visibility, in the
     # model's native quantity. A zero is an empty pixel and is excluded by ``align_prediction``.
     rows = []
+    inferred_fusion_max_depth = camera_fusion_max_depth(scene.frames, fusion_depth_radius_multiplier)
+    max_depth = fusion_max_depth if fusion_max_depth is not None else inferred_fusion_max_depth
+    fusion_range_source = "explicit" if fusion_max_depth is not None else "camera_focus_radius"
+    if max_depth <= 0:
+        raise ValueError(f"fusion_max_depth must be positive, got {max_depth}")
     for alignment in ALIGNMENTS:
         condition = out / alignment
         memory_path = condition / "memory.jsonl"
         snapshot = lambda stage: write_memory_snapshot(memory_path, stage) if memory_profile else None
         depth_dir = condition / "depths"
-        views, max_depth = prepare_aligned_depths(
-            scene.frames, predictions, scene.visibility, quantity, alignment, depth_dir
-        )
+        views = prepare_aligned_depths(scene.frames, predictions, scene.visibility, quantity, alignment, depth_dir)
         recall = evaluate_recall(
             views,
             scene.gt_points,
@@ -417,7 +439,7 @@ def evaluate_benchmark_scene(
             alignment=scene.gt_to_world,
             gt_masks=scene.masks,
         ).asdict()
-        config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=max_depth * 1.05)
+        config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=max_depth)
         snapshot("before_tsdf")
         mesh = fuse_depth_frames(
             saved_depth_frames(scene.frames, views),
@@ -470,6 +492,15 @@ def evaluate_benchmark_scene(
                 "mesh": str(mesh_path),
                 "views": len(views),
                 "oracle_alignment": alignment != "raw",
+                "tsdf": {
+                    "voxel_size": config.voxel_size,
+                    "truncation": config.truncation,
+                    "max_depth": config.max_depth,
+                    "max_depth_source": fusion_range_source,
+                    "camera_focus_radius_multiplier": (
+                        fusion_depth_radius_multiplier if fusion_max_depth is None else None
+                    ),
+                },
             }
         )
     return rows
@@ -531,6 +562,24 @@ def main() -> None:
     parser.add_argument("--voxel-size-dtu", type=float, default=2.0, help="TSDF voxel size in DTU millimetres")
     parser.add_argument("--voxel-size-tnt", type=float, default=0.01, help="TSDF voxel size in TnT metres")
     parser.add_argument(
+        "--fusion-max-depth-dtu",
+        type=float,
+        default=None,
+        help="Explicit DTU TSDF depth cap in millimetres; default is AmbiSuR-style camera-focus range.",
+    )
+    parser.add_argument(
+        "--fusion-max-depth-tnt",
+        type=float,
+        default=None,
+        help="Explicit TnT TSDF depth cap in metres; default is AmbiSuR-style camera-focus range.",
+    )
+    parser.add_argument(
+        "--fusion-depth-radius-multiplier",
+        type=float,
+        default=2.0,
+        help="Camera-focus radius multiplier for automatic TSDF depth caps (AmbiSuR adaptive default: 2).",
+    )
+    parser.add_argument(
         "--mesh-samples",
         type=int,
         default=2_000_000,
@@ -582,6 +631,8 @@ def main() -> None:
                 args.mesh_samples,
                 args.gt_voxel,
                 args.surface_query_chunk_size,
+                args.fusion_max_depth_dtu,
+                args.fusion_depth_radius_multiplier,
                 args.memory_profile,
             ):
                 row["model"] = model
@@ -601,6 +652,8 @@ def main() -> None:
                 args.mesh_samples,
                 args.gt_voxel,
                 args.surface_query_chunk_size,
+                args.fusion_max_depth_tnt,
+                args.fusion_depth_radius_multiplier,
                 args.memory_profile,
             ):
                 row["model"] = model
@@ -615,6 +668,12 @@ def main() -> None:
                 "oracle_alignment": "GT scan z-buffer per frame",
                 "mesh_samples": args.mesh_samples,
                 "surface_query_chunk_size": args.surface_query_chunk_size,
+                "fusion_depth": {
+                    "method": "explicit cap or AmbiSuR-style camera-focus radius",
+                    "radius_multiplier": args.fusion_depth_radius_multiplier,
+                    "dtu_explicit_max_depth": args.fusion_max_depth_dtu,
+                    "tnt_explicit_max_depth": args.fusion_max_depth_tnt,
+                },
             },
             indent=2,
         )

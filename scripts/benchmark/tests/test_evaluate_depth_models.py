@@ -64,15 +64,30 @@ def test_prepare_aligned_depths_streams_one_frame_at_a_time(tmp_path):
     prediction = np.full((2, 2), 2.0, dtype=np.float32)
     np.save(visibility_path, np.full((2, 2), 4.0, dtype=np.float32))
 
-    views, max_depth = benchmark.prepare_aligned_depths(
+    views = benchmark.prepare_aligned_depths(
         [frame], [prediction], {"view": visibility_path}, "depth", "scale", tmp_path / "aligned"
     )
 
     expected_z = benchmark.align_prediction(
         prediction, benchmark._z_from_ray(np.load(visibility_path), view.K), "depth", "scale"
     )
-    assert max_depth == np.max(expected_z)
     np.testing.assert_allclose(np.load(views[0].depth_path), benchmark.z_depth_to_ray_distance(expected_z, view.K))
+
+
+def test_camera_fusion_max_depth_uses_ambisur_camera_focus_radius():
+    def view_at(name, center, camera_to_world_rotation):
+        R = camera_to_world_rotation.T
+        return benchmark.Frame(
+            name,
+            Path("unused.png"),
+            benchmark.View(name, 1, 1, np.eye(3), R, -R @ np.asarray(center), Path("unused.npy")),
+        )
+
+    frames = [
+        view_at("above", [0.0, 0.0, 2.0], np.diag([1.0, -1.0, -1.0])),
+        view_at("below", [0.0, 0.0, -2.0], np.eye(3)),
+    ]
+    assert benchmark.camera_fusion_max_depth(frames) == 4.0
 
 
 def test_memory_snapshot_is_flushed_as_jsonl(tmp_path):

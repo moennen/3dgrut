@@ -143,6 +143,9 @@ two-million-sample surface metric default. The evaluator streams aligned maps/RG
 TSDF fusion and releases the Open3D mesh before surface scoring. Exact nearest-neighbour queries
 use 100,000-sample batches, which is suitable for a 64 GB host. Only use
 `--surface-query-chunk-size` to reduce peak RAM further; it does not alter the metric.
+TSDF fusion uses AmbiSuR's adaptive camera-focus depth cap by default (`2 ×` nearest camera
+radius), not a prediction maximum. Set `--fusion-max-depth-dtu` or `--fusion-max-depth-tnt` only
+when an explicit cap in that suite's units is required; it is recorded in `results.jsonl`.
 
 ```bash
 export OUT=$WORK/results/full
