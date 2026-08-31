@@ -32,7 +32,7 @@ uses oriented Gaussians, an occupancy formulation, and surface-aware densificati
 The broadly used practical baseline is **rendered-depth TSDF fusion**:
 
 1. Render a depth map from every training camera, rejecting invalid/low-opacity pixels.
-2. Integrate each RGB-D frame with its calibrated pose into a TSDF volume.
+2. Integrate each RGB-D frame with its calibrated pose into a TSDF volume. The shared implementation preserves source RGB as vertex colors in the exported PLY.
 3. Extract the zero crossing as triangles and remove small disconnected components.
 
 This is the extraction route used by AmbiSuR's public code. It is a good common baseline because

@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from threedgrut.geometry.tsdf import TSDFConfig, ray_distance_to_z_depth, z_depth_to_ray_distance
+from threedgrut.geometry.tsdf import TSDFConfig, ray_distance_to_z_depth, rgb_to_uint8, z_depth_to_ray_distance
 
 
 def test_ray_distance_to_z_depth_is_exact_on_the_optical_axis():
@@ -26,6 +26,32 @@ def test_depth_convention_conversions_round_trip():
     K = np.array([[4.0, 0.0, 1.5], [0.0, 3.0, 1.5], [0.0, 0.0, 1.0]])
     ray = np.arange(1, 10, dtype=np.float32).reshape(3, 3)
     np.testing.assert_allclose(z_depth_to_ray_distance(ray_distance_to_z_depth(ray, K), K), ray)
+
+
+def test_rgb_to_uint8_preserves_uint8_colors():
+    rgb = np.array([[[0, 12, 255]]], dtype=np.uint8)
+    np.testing.assert_array_equal(rgb_to_uint8(rgb, (1, 1)), rgb)
+
+
+def test_rgb_to_uint8_uses_black_for_depth_only_frames():
+    np.testing.assert_array_equal(rgb_to_uint8(None, (1, 2)), np.zeros((1, 2, 3), dtype=np.uint8))
+
+
+def test_rgb_to_uint8_converts_renderer_float_colors():
+    rgb = np.array([[[0.0, 0.5, 1.0]]], dtype=np.float32)
+    np.testing.assert_array_equal(rgb_to_uint8(rgb, (1, 1)), np.array([[[0, 128, 255]]], dtype=np.uint8))
+
+
+@pytest.mark.parametrize(
+    "rgb, message",
+    [
+        (np.zeros((1, 1), dtype=np.uint8), "must match depth"),
+        (np.array([[[1.1, 0.0, 0.0]]], dtype=np.float32), "must be in"),
+    ],
+)
+def test_rgb_to_uint8_rejects_invalid_input(rgb, message):
+    with pytest.raises(ValueError, match=message):
+        rgb_to_uint8(rgb, (1, 1))
 
 
 @pytest.mark.parametrize(

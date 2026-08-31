@@ -329,6 +329,7 @@ def evaluate_benchmark_scene(
     frames = [
         replace(frame, gt_z=_z_from_ray(np.load(scene.visibility[frame.name]), frame.view.K)) for frame in scene.frames
     ]
+    rgb_images = [_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)) for frame in frames]
     rows = []
     for alignment in ALIGNMENTS:
         aligned_z = [
@@ -353,13 +354,16 @@ def evaluate_benchmark_scene(
         ).asdict()
         config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=float(np.nanmax(np.stack(aligned_z))) * 1.05)
         mesh = fuse_depth_frames(
-            [DepthFrame(z, frame.view.K, _world_to_camera(frame.view), "z") for frame, z in zip(frames, aligned_z)],
+            [
+                DepthFrame(z, frame.view.K, _world_to_camera(frame.view), "z", rgb=rgb)
+                for frame, z, rgb in zip(frames, aligned_z, rgb_images)
+            ],
             config,
         )
         import open3d as o3d
 
         mesh_path = condition / "mesh.ply"
-        o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_vertex_normals=True)
+        o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_vertex_normals=True, write_vertex_colors=True)
         predicted = _sample_mesh(mesh, mesh_samples) if len(mesh.triangles) else np.empty((0, 3))
         if scene.dtu_obsmask is not None and len(predicted):
             predicted = predicted[observed_volume_mask(predicted, scene.dtu_obsmask)]

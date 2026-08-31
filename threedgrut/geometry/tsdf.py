@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TSDF mesh extraction from rendered Gaussian depth maps.
+"""TSDF mesh extraction from calibrated depth maps and optional source RGB.
 
 This is the practical RGB-D fusion baseline used by AmbiSuR and many Gaussian reconstruction
 projects. It deliberately lives outside the renderer: the only inputs are calibrated depth maps
@@ -46,7 +46,9 @@ class DepthFrame:
     ``world_to_camera`` follows Open3D/COLMAP's convention.  Keeping the depth convention on
     the frame makes the conversion at the one Open3D boundary explicit: callers which already
     have z-depth (monocular priors) and callers which render ray distance (3dgrut) now use the
-    exact same fusion code.
+    exact same fusion code. ``rgb`` is optional for backward compatibility, but when supplied it
+    is fused into the TSDF and becomes per-vertex mesh color. It must be aligned ``[H, W, 3]``
+    RGB in uint8 or floating-point ``[0, 1]`` form.
     """
 
     depth: np.ndarray
@@ -54,6 +56,7 @@ class DepthFrame:
     world_to_camera: np.ndarray
     convention: Literal["ray", "z"]
     valid: np.ndarray | None = None
+    rgb: np.ndarray | None = None
 
 
 def _ray_length_grid(K: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -94,6 +97,33 @@ def z_depth_to_ray_distance(z_depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     return z_depth * _ray_length_grid(K, *z_depth.shape)
 
 
+def rgb_to_uint8(rgb: np.ndarray | None, depth_shape: tuple[int, int]) -> np.ndarray:
+    """Validate an aligned RGB image and convert it to Open3D's RGB8 format.
+
+    A missing image intentionally produces black colors so depth-only callers retain their
+    previous behaviour. Floating point source images follow the usual renderer convention of
+    RGB values in ``[0, 1]``; integer images must already be in the ``[0, 255]`` range.
+    """
+    height, width = depth_shape
+    if rgb is None:
+        return np.zeros((height, width, 3), dtype=np.uint8)
+
+    rgb = np.asarray(rgb)
+    if rgb.shape != (height, width, 3):
+        raise ValueError(f"rgb image {rgb.shape} must match depth as [H, W, 3] ({height}, {width}, 3)")
+    if np.issubdtype(rgb.dtype, np.floating):
+        if not np.all(np.isfinite(rgb)):
+            raise ValueError("rgb image must contain only finite values")
+        if np.any((rgb < 0.0) | (rgb > 1.0)):
+            raise ValueError("floating-point rgb image must be in [0, 1]")
+        return np.rint(rgb * 255.0).astype(np.uint8)
+    if not np.issubdtype(rgb.dtype, np.integer):
+        raise ValueError(f"rgb image must be uint8 or floating point, got {rgb.dtype}")
+    if np.any((rgb < 0) | (rgb > 255)):
+        raise ValueError("integer rgb image must be in [0, 255]")
+    return rgb.astype(np.uint8, copy=False)
+
+
 def _open3d():
     try:
         import open3d as o3d
@@ -123,8 +153,9 @@ def integrate_depth(
     config: TSDFConfig,
     convention: Literal["ray", "z"],
     valid: np.ndarray | None = None,
+    rgb: np.ndarray | None = None,
 ) -> None:
-    """Integrate one calibrated depth map into an Open3D TSDF volume.
+    """Integrate one calibrated RGB-D map into an Open3D TSDF volume.
 
     Open3D requires z-depth.  This is the only place that interprets a depth convention; all
     extraction paths should pass through it instead of duplicating a conversion.
@@ -150,7 +181,7 @@ def integrate_depth(
     z_depth = np.where(usable, z_depth, 0.0).astype(np.float32)
 
     height, width = z_depth.shape
-    color = o3d.geometry.Image(np.zeros((height, width, 3), dtype=np.uint8))
+    color = o3d.geometry.Image(rgb_to_uint8(rgb, (height, width)))
     # Float32 depth plus scale 1 preserves normalized scene units; the common uint16-mm path
     # silently quantizes small normalized scenes.
     depth = o3d.geometry.Image(z_depth)
@@ -168,9 +199,10 @@ def integrate_ray_depth(
     world_to_camera: np.ndarray,
     config: TSDFConfig,
     valid: np.ndarray | None = None,
+    rgb: np.ndarray | None = None,
 ) -> None:
     """Backward-compatible ray-distance wrapper around :func:`integrate_depth`."""
-    integrate_depth(volume, ray_distance, K, world_to_camera, config, "ray", valid)
+    integrate_depth(volume, ray_distance, K, world_to_camera, config, "ray", valid, rgb)
 
 
 def filter_components(mesh, config: TSDFConfig):
@@ -201,7 +233,7 @@ def extract_mesh(volume, config: TSDFConfig):
 
 
 def fuse_depth_frames(frames: Iterable[DepthFrame], config: TSDFConfig):
-    """Fuse posed ray- or z-depth frames and return the cleaned TSDF mesh.
+    """Fuse posed ray- or z-depth frames and return the cleaned, optionally colored TSDF mesh.
 
     This is intentionally the common entry point for checkpoint renders and external depth
     models.  It consumes an iterator, so a benchmark need not keep every prediction in memory.
@@ -216,7 +248,8 @@ def fuse_depth_frames(frames: Iterable[DepthFrame], config: TSDFConfig):
             frame.world_to_camera,
             config,
             frame.convention,
-            frame.valid,
+            valid=frame.valid,
+            rgb=frame.rgb,
         )
         count += 1
     if count == 0:

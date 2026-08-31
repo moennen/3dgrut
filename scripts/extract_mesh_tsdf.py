@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Extract a mesh from a 3dgrut checkpoint by fusing rendered training depths.
+"""Extract a colored mesh from a 3dgrut checkpoint by fusing rendered training RGB-D views.
 
 This is the AmbiSuR-style TSDF baseline: render every training view, integrate calibrated depth
-maps, extract the TSDF zero crossing, then remove small disconnected components. 3dgrut depth is
+maps together with their source RGB, extract the TSDF zero crossing, then remove small
+disconnected components. The exported PLY has source-image vertex colors. 3dgrut depth is
 Euclidean ray distance, so the integrator converts it to camera z-depth before handing it to
 Open3D.
 
@@ -91,6 +92,7 @@ def extract(args: argparse.Namespace) -> dict:
             depth, confident = expected_depth(outputs["pred_dist"], outputs["pred_opacity"], args.min_opacity)
             depth_np = depth.squeeze().float().cpu().numpy()
             valid = confident.squeeze().cpu().numpy()
+            rgb = gpu_batch.rgb_gt[0].float().cpu().numpy()
             rays = gpu_batch.rays_dir[0].float().cpu().numpy()
             K, residual = fit_pinhole(rays)
             if residual > args.max_pinhole_residual:
@@ -107,6 +109,7 @@ def extract(args: argparse.Namespace) -> dict:
                     world_to_camera=world_to_camera(pose),
                     convention="ray",
                     valid=valid,
+                    rgb=rgb,
                 )
             )
 
@@ -115,13 +118,15 @@ def extract(args: argparse.Namespace) -> dict:
 
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
-    o3d.io.write_triangle_mesh(str(output), mesh, write_vertex_normals=True)
+    o3d.io.write_triangle_mesh(str(output), mesh, write_vertex_normals=True, write_vertex_colors=True)
     summary = {
         "checkpoint": str(args.checkpoint),
         "mesh": str(output),
         "views": len(residuals),
         "vertices": len(mesh.vertices),
         "triangles": len(mesh.triangles),
+        "vertex_colors": len(mesh.vertex_colors),
+        "color_source": "training RGB images",
         "max_pinhole_residual_px": max(residuals, default=0.0),
         "depth_convention": "ray converted to z for TSDF integration",
         "tsdf": config.__dict__,
