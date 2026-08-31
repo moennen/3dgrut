@@ -105,6 +105,12 @@ The output extension selects the container: `.usdz` (packaged archive),
   exported geometry is unchanged.
 - `--dataset` — dataset path for camera export, overriding the path stored
   in the checkpoint.
+- `--export-mesh --mesh-voxel-size SIZE` — render the training RGB-D views,
+  fuse their depths into the shared TSDF mesh, and author it as a colored
+  `UsdGeom.Mesh` at `/World/Mesh/Surface`, alongside the ParticleField. The
+  mesh receives the same export transform as the Gaussians. This is available
+  for `--format standard`; use `--mesh-output mesh.ply` to also retain the
+  colored PLY sidecar.
 - `--no-usd-validate` — skip OpenUSD stage validation after standard
   export.
 

@@ -797,6 +797,18 @@ class USDExporter(ModelExporter):
                 _particle_field_render_settings(has_runtime_ppisp=runtime_post_processing),
             )
 
+        mesh = kwargs.get("mesh")
+        if mesh is not None:
+            from threedgrut.export.usd.mesh import add_mesh_to_usd_stage
+
+            mesh_path = add_mesh_to_usd_stage(
+                scene_stage,
+                mesh,
+                normalizing_transform=normalizing_transform if self.apply_normalizing_transform else None,
+                coordinate_transform=coordinate_transform,
+            )
+            logger.info("Authored extracted mesh at %s", mesh_path)
+
         files: List[NamedSerialized] = []
 
         copy_source_usd = kwargs.get("copy_source_usd")

@@ -65,6 +65,10 @@ Examples:
 
     # Skip camera and background export
     python -m threedgrut.export.scripts.export_usd -c checkpoint.pt -o output.usdz --no-cameras --no-background
+
+    # Add a colored TSDF mesh beside the ParticleField in the USD scene
+    python -m threedgrut.export.scripts.export_usd -c checkpoint.pt -o output.usdz \
+        --export-mesh --mesh-voxel-size 0.002
 """,
     )
 
@@ -230,6 +234,35 @@ Examples:
         default=None,
         help="Path to dataset (overrides path from checkpoint). Required for camera export if not in checkpoint.",
     )
+    parser.add_argument(
+        "--export-mesh",
+        action="store_true",
+        help=(
+            "Render training RGB-D views and add the resulting colored TSDF mesh as /World/Mesh "
+            "beside the ParticleField. Supported only by the standard USD exporter."
+        ),
+    )
+    parser.add_argument(
+        "--mesh-output",
+        type=str,
+        default=None,
+        help="Optional colored PLY sidecar path when --export-mesh is set.",
+    )
+    parser.add_argument(
+        "--mesh-voxel-size",
+        type=float,
+        default=None,
+        help="TSDF voxel size in scene units; required with --export-mesh.",
+    )
+    parser.add_argument("--mesh-truncation", type=float, default=None, help="TSDF truncation in scene units.")
+    parser.add_argument("--mesh-truncation-voxels", type=float, default=5.0)
+    parser.add_argument("--mesh-max-depth", type=float, default=None, help="Ignore TSDF z-depth beyond this distance.")
+    parser.add_argument("--mesh-max-depth-extent", type=float, default=2.0)
+    parser.add_argument("--mesh-min-opacity", type=float, default=0.5)
+    parser.add_argument("--mesh-min-component-triangles", type=int, default=50)
+    parser.add_argument("--mesh-keep-largest-components", type=int, default=1)
+    parser.add_argument("--mesh-max-pinhole-residual", type=float, default=0.1)
+    parser.add_argument("--mesh-num-workers", type=int, default=2)
 
     # Verbosity
     parser.add_argument(
@@ -281,7 +314,14 @@ Examples:
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.export_mesh and args.format != "standard":
+        parser.error("--export-mesh is supported only with --format standard (the ParticleField exporter)")
+    if args.export_mesh and args.mesh_voxel_size is None:
+        parser.error("--mesh-voxel-size is required with --export-mesh")
+    if args.mesh_output and not args.export_mesh:
+        parser.error("--mesh-output requires --export-mesh")
+    return args
 
 
 def _load_ppisp_from_checkpoint(checkpoint, conf):
@@ -449,7 +489,7 @@ def main():
     # Load dataset for camera export and for train-split post-processing SH baking.
     dataset = None
     validation_dataset = None
-    needs_dataset = not args.no_cameras or (post_processing is not None and export_post_processing)
+    needs_dataset = not args.no_cameras or (post_processing is not None and export_post_processing) or args.export_mesh
     if needs_dataset:
         try:
             import threedgrut.datasets as datasets
@@ -474,6 +514,53 @@ def main():
                 )
         except Exception as e:
             logger.error(f"Failed to load dataset for camera export: {e}")
+            if args.verbose:
+                import traceback
+
+                traceback.print_exc()
+            sys.exit(1)
+
+    mesh = None
+    if args.export_mesh:
+        try:
+            from threedgrut.geometry.checkpoint_mesh import extract_colored_tsdf_mesh
+            from threedgrut.geometry.tsdf import TSDFConfig
+
+            mesh_config = TSDFConfig(
+                voxel_size=args.mesh_voxel_size,
+                truncation=args.mesh_truncation or args.mesh_voxel_size * args.mesh_truncation_voxels,
+                max_depth=args.mesh_max_depth or model.scene_extent * args.mesh_max_depth_extent,
+                min_component_triangles=args.mesh_min_component_triangles,
+                keep_largest_components=args.mesh_keep_largest_components,
+            )
+            result = extract_colored_tsdf_mesh(
+                model,
+                dataset,
+                mesh_config,
+                min_opacity=args.mesh_min_opacity,
+                max_pinhole_residual=args.mesh_max_pinhole_residual,
+                num_workers=args.mesh_num_workers,
+            )
+            mesh = result.mesh
+            logger.info(
+                "Extracted colored mesh from %d views (%d vertices, %d triangles; max pinhole residual %.3g px)",
+                result.views,
+                len(mesh.vertices),
+                len(mesh.triangles),
+                result.max_pinhole_residual_px,
+            )
+            if args.mesh_output:
+                import open3d as o3d
+
+                mesh_output = Path(args.mesh_output)
+                mesh_output.parent.mkdir(parents=True, exist_ok=True)
+                if not o3d.io.write_triangle_mesh(
+                    str(mesh_output), mesh, write_vertex_normals=True, write_vertex_colors=True
+                ):
+                    raise RuntimeError(f"Failed to write mesh sidecar: {mesh_output}")
+                logger.info("Wrote colored mesh sidecar: %s", mesh_output)
+        except Exception as e:
+            logger.error("Mesh extraction failed: %s", e)
             if args.verbose:
                 import traceback
 
@@ -546,6 +633,8 @@ def main():
         if args.format == "standard":
             export_kw["validate_usd"] = not args.no_usd_validate
             export_kw["up_axis"] = args.up_axis  # stage upAxis metadata only (no reorientation)
+            if mesh is not None:
+                export_kw["mesh"] = mesh
             # Optional spatial partitioning: one ParticleField prim (or .usdc layer) per partition.
             if args.max_per_volume is not None:
                 from threedgrut.export.partition import partition_scene
