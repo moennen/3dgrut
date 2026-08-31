@@ -36,7 +36,7 @@ def test_empty_mesh_is_a_reported_zero_fscore_not_a_missing_cell():
     assert metrics["overall"] is None
 
 
-def test_cached_predictions_are_reused_without_retaining_model_maps(tmp_path):
+def test_predict_frames_keeps_one_resized_map_per_frame(tmp_path):
     class Predictor:
         def __init__(self):
             self.calls = 0
@@ -51,28 +51,24 @@ def test_cached_predictions_are_reused_without_retaining_model_maps(tmp_path):
     frame = benchmark.Frame("view", image, view)
     predictor = Predictor()
 
-    paths = benchmark.cache_predictions(predictor, [frame], tmp_path / "predictions")
+    predictions = benchmark.predict_frames(predictor, [frame])
     assert predictor.calls == 1
-    np.testing.assert_array_equal(np.load(paths[0]), np.ones((2, 3), dtype=np.float32))
-
-    assert benchmark.cache_predictions(predictor, [frame], tmp_path / "predictions") == paths
-    assert predictor.calls == 1
+    np.testing.assert_array_equal(predictions[0], np.ones((2, 3), dtype=np.float32))
 
 
 def test_prepare_aligned_depths_streams_one_frame_at_a_time(tmp_path):
     view = benchmark.View("view", 2, 2, np.eye(3), np.eye(3), np.zeros(3), tmp_path / "unused.npy")
     frame = benchmark.Frame("view", tmp_path / "unused.png", view)
-    prediction_path = tmp_path / "prediction.npy"
     visibility_path = tmp_path / "visibility.npy"
-    np.save(prediction_path, np.full((2, 2), 2.0, dtype=np.float32))
+    prediction = np.full((2, 2), 2.0, dtype=np.float32)
     np.save(visibility_path, np.full((2, 2), 4.0, dtype=np.float32))
 
     views, max_depth = benchmark.prepare_aligned_depths(
-        [frame], [prediction_path], {"view": visibility_path}, "depth", "scale", tmp_path / "aligned"
+        [frame], [prediction], {"view": visibility_path}, "depth", "scale", tmp_path / "aligned"
     )
 
     expected_z = benchmark.align_prediction(
-        np.load(prediction_path), benchmark._z_from_ray(np.load(visibility_path), view.K), "depth", "scale"
+        prediction, benchmark._z_from_ray(np.load(visibility_path), view.K), "depth", "scale"
     )
     assert max_depth == np.max(expected_z)
     np.testing.assert_allclose(np.load(views[0].depth_path), benchmark.z_depth_to_ray_distance(expected_z, view.K))

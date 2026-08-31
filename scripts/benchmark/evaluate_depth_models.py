@@ -303,46 +303,32 @@ def _sample_mesh(mesh, count: int) -> np.ndarray:
     return np.asarray(mesh.sample_points_uniformly(number_of_points=count).points, dtype=np.float64)
 
 
-def cache_predictions(predictor, frames: list[Frame], out_dir: Path) -> list[Path]:
-    """Infer one frame at a time and retain the native model outputs on disk.
-
-    DTU's 49 full-resolution frames are large enough that retaining every model map alongside
-    the three alignment products needlessly raises the process peak.  The cache also means an
-    OOM in a later meshing/scoring stage can be resumed without rerunning model inference.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
+def predict_frames(predictor, frames: list[Frame]) -> list[np.ndarray]:
+    """Infer model maps in memory; they are small beside TSDF/mesh allocations."""
+    predictions = []
     for frame in frames:
-        path = out_dir / f"{frame.name}.npy"
-        if path.exists():
-            cached = np.load(path, mmap_mode="r")
-            expected_shape = (frame.view.height, frame.view.width)
-            if cached.shape != expected_shape:
-                raise ValueError(f"Cached prediction {path} has shape {cached.shape}, expected {expected_shape}")
-        else:
-            prediction = predictor.predict(_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)))
-            np.save(path, _resize(prediction, (frame.view.height, frame.view.width)))
-        paths.append(path)
-    return paths
+        prediction = predictor.predict(_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)))
+        predictions.append(_resize(prediction, (frame.view.height, frame.view.width)))
+    return predictions
 
 
 def prepare_aligned_depths(
     frames: list[Frame],
-    prediction_paths: list[Path],
+    predictions: list[np.ndarray],
     visibility: dict[str, Path],
     quantity: str,
     alignment: Literal["raw", "scale", "affine"],
     out_dir: Path,
 ) -> tuple[list[View], float]:
     """Write aligned ray-depth maps one frame at a time and return their views/max z-depth."""
-    if len(frames) != len(prediction_paths):
-        raise ValueError("Each benchmark frame needs exactly one cached prediction")
+    if len(frames) != len(predictions):
+        raise ValueError("Each benchmark frame needs exactly one prediction")
     out_dir.mkdir(parents=True, exist_ok=True)
     views = []
     max_depth = 0.0
-    for frame, prediction_path in zip(frames, prediction_paths):
+    for frame, prediction in zip(frames, predictions):
         gt_z = _z_from_ray(np.load(visibility[frame.name]), frame.view.K)
-        z = align_prediction(np.load(prediction_path), gt_z, quantity, alignment)
+        z = align_prediction(prediction, gt_z, quantity, alignment)
         finite = z[np.isfinite(z)]
         if len(finite):
             max_depth = max(max_depth, float(finite.max()))
@@ -382,7 +368,7 @@ def _empty_surface_metrics(taus: np.ndarray) -> dict:
 
 def evaluate_benchmark_scene(
     scene: BenchmarkScene,
-    prediction_paths: list[Path],
+    predictions: list[np.ndarray],
     quantity: str,
     out: Path,
     voxel_size: float,
@@ -397,7 +383,7 @@ def evaluate_benchmark_scene(
         condition = out / alignment
         depth_dir = condition / "depths"
         views, max_depth = prepare_aligned_depths(
-            scene.frames, prediction_paths, scene.visibility, quantity, alignment, depth_dir
+            scene.frames, predictions, scene.visibility, quantity, alignment, depth_dir
         )
         recall = evaluate_recall(
             views,
@@ -546,10 +532,10 @@ def main() -> None:
             scene = dtu_scene(
                 args.dtu_root, args.dtu_eval_root, scene_name, max_frames, args.max_image_side, destination
             )
-            prediction_paths = cache_predictions(predictor, scene.frames, destination / "predictions")
+            predictions = predict_frames(predictor, scene.frames)
             for row in evaluate_benchmark_scene(
                 scene,
-                prediction_paths,
+                predictions,
                 predictor.QUANTITY,
                 destination,
                 args.voxel_size_dtu,
@@ -564,10 +550,10 @@ def main() -> None:
             scene = tnt_scene(
                 args.tnt_root, args.tnt_reconstruction_root, scene_name, max_frames, args.max_image_side, destination
             )
-            prediction_paths = cache_predictions(predictor, scene.frames, destination / "predictions")
+            predictions = predict_frames(predictor, scene.frames)
             for row in evaluate_benchmark_scene(
                 scene,
-                prediction_paths,
+                predictions,
                 predictor.QUANTITY,
                 destination,
                 args.voxel_size_tnt,
