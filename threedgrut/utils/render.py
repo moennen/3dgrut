@@ -86,7 +86,12 @@ def apply_feature_decoder(
         alpha = alpha.unsqueeze(-1)  # [B, H, W, 1]
     alpha_flat = alpha.contiguous().view(-1, 1)
 
+    outputs["pred_latent"] = feature_map
     rgb_flat = feature_decoder(features_flat, ray_dir_flat, alpha=alpha_flat)
+    if feature_decoder.image_feature_dim:
+        outputs["pred_image_features"] = feature_decoder.decode_image_features(features_flat, alpha_flat).view(
+            B, H, W, -1
+        )
     outputs["pred_features"] = rgb_flat.view(B, H, W, 3)
 
     return outputs

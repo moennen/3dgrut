@@ -41,6 +41,7 @@ from threedgrut.render import Renderer
 from threedgrut.strategy.base import BaseStrategy
 from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.depth_variance_loss import depth_variance_loss
+from threedgrut.utils.image_feature_loss import image_feature_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
 from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_l1_loss, compute_pseudo_depth_order_loss
@@ -556,6 +557,7 @@ class Trainer3DGRUT:
         sh_scale = getattr(dec, "sh_scale", 1.0)
         output_activation = getattr(dec, "output_activation", "Sigmoid")
         unpremultiply_alpha = getattr(dec, "unpremultiply_alpha", False)
+        image_feature_dim = int(getattr(dec, "image_feature_dim", 0))
         ema_decay = getattr(dec_conf, "ema_decay", 0.0)
         ema_start_step = getattr(dec_conf, "ema_start_step", 0)
         logger.info(f"Initializing FeatureDecoder: {ray_feature_dim} -> 3 RGB")
@@ -570,6 +572,7 @@ class Trainer3DGRUT:
             ema_decay=ema_decay,
             ema_start_step=ema_start_step,
             unpremultiply_alpha=unpremultiply_alpha,
+            image_feature_dim=image_feature_dim,
         ).to(self.device)
 
         lr = dec.learning_rate
@@ -896,6 +899,18 @@ class Trainer3DGRUT:
                 )
                 lambda_pseudo_depth_l1 = self.conf.loss.lambda_pseudo_depth_l1
 
+        loss_image_features = torch.zeros(1, device=self.device)
+        lambda_image_features = 0.0
+        if self.conf.loss.use_image_features and not self._in_color_refine:
+            target = getattr(gpu_batch, "image_features_target", None)
+            predicted = outputs.get("pred_image_features")
+            if target is None or predicted is None:
+                raise ValueError("Image-feature loss needs cached targets and an NHT decoder image_feature_dim")
+            loss_image_features = image_feature_loss(
+                predicted, outputs["pred_opacity"], target, self.conf.loss.image_features_alpha_min
+            )
+            lambda_image_features = self.conf.loss.lambda_image_features
+
         # Total loss
         loss = (
             lambda_l1 * loss_l1
@@ -907,6 +922,7 @@ class Trainer3DGRUT:
             + lambda_depth_variance * loss_depth_variance
             + lambda_pseudo_depth * loss_pseudo_depth
             + lambda_pseudo_depth_l1 * loss_pseudo_depth_l1
+            + lambda_image_features * loss_image_features
         )
         return dict(
             total_loss=loss,
@@ -920,6 +936,7 @@ class Trainer3DGRUT:
             depth_variance_loss=lambda_depth_variance * loss_depth_variance,
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
             pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
+            image_features_loss=lambda_image_features * loss_image_features,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")

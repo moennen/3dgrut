@@ -37,6 +37,7 @@ class FeatureDecoder(nn.Module):
         ema_decay: float = 0.0,
         ema_start_step: int = 0,
         unpremultiply_alpha: bool = False,
+        image_feature_dim: int = 0,
     ):
         """Initialize the feature decoder.
 
@@ -61,6 +62,7 @@ class FeatureDecoder(nn.Module):
         self.sh_scale = sh_scale
         self.output_activation = output_activation
         self.unpremultiply_alpha = unpremultiply_alpha
+        self.image_feature_dim = image_feature_dim
         self._ema_decay = ema_decay
         self._ema_start_step = ema_start_step
         self._ema_shadow: dict[str, torch.Tensor] = {}
@@ -97,6 +99,19 @@ class FeatureDecoder(nn.Module):
         )
         if hasattr(tcnn, "supports_jit_fusion"):
             self.network.jit_fusion = tcnn.supports_jit_fusion()
+        self.image_feature_network = None
+        if image_feature_dim:
+            self.image_feature_network = tcnn.Network(
+                n_input_dims=ray_feature_dim,
+                n_output_dims=image_feature_dim,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": hidden_dim,
+                    "n_hidden_layers": num_layers,
+                },
+            )
 
         if self._ema_decay > 0:
             for name, param in self.named_parameters():
@@ -204,6 +219,14 @@ class FeatureDecoder(nn.Module):
             rgb = rgb * alpha_safe
 
         return rgb.float()
+
+    def decode_image_features(self, features: torch.Tensor, alpha: torch.Tensor | None = None) -> torch.Tensor:
+        """Decode a direction-free image feature map from the rendered NHT latent."""
+        if self.image_feature_network is None:
+            raise RuntimeError("This decoder was created without image_feature_dim")
+        if self.unpremultiply_alpha and alpha is not None:
+            features = features / alpha.clamp_min(1e-8)
+        return self.image_feature_network(features).float()
 
     def regularization_loss(self) -> torch.Tensor:
         """Compute L2 regularization loss on decoder weights."""

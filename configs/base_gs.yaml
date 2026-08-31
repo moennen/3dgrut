@@ -112,6 +112,7 @@ model:
     center_ray_encoding: false
     output_activation: "Sigmoid"
     unpremultiply_alpha: false
+    image_feature_dim: 0  # Frozen image-feature target dimension; 0 disables the feature head.
     learning_rate: 0.00068
     reg_weight: 0.0
     scheduler:
@@ -284,6 +285,9 @@ loss:
   # Iteration the term switches on. Like the ordinal term this supplies coarse placement rather
   # than sharpness, so it does not wait for settled geometry.
   pseudo_depth_l1_from_iter: 0
+  use_image_features: false
+  lambda_image_features: 0.0
+  image_features_alpha_min: 0.05
 
 # Post-processing configuration
 post_processing:
