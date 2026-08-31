@@ -62,7 +62,7 @@ Use one or more comma-separated scenes per suite. Omit `--max-frames` and `--max
 
 ### 6. Inspect the machine-readable records
 
-The output directory contains `results.jsonl` (one complete cell per model/suite/alignment), `protocol.json`, aligned depth maps, visibility z-buffers, and TSDF meshes.
+The output directory contains `results.jsonl` (one complete cell per model/suite/alignment), `protocol.json`, aligned depth maps, visibility z-buffers, TSDF meshes, and `predictions/`: native model outputs cached per frame. The cache makes a failed meshing/scoring run resumable without rerunning inference; keep it with the run directory.
 
 ```bash
 wc -l /mnt/oss/results/depth-benchmark-2026-08-31/results.jsonl
@@ -85,6 +85,7 @@ jq -c '{suite, scene, model, alignment}' /mnt/oss/results/depth-benchmark-2026-0
 - TnT recall and mesh scoring use its official crop; F1 is reported at the scene's official threshold (Barn: 1 cm).
 - All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.
 - Mesh scoring keeps the two-million-sample default, but executes exact nearest-neighbour queries in 100,000-sample batches to bound host memory. `--surface-query-chunk-size` changes only peak memory, not the metric.
+- For DTU/TnT, predictions are cached, aligned maps are written one frame at a time, and RGB-D frames are lazily loaded into TSDF fusion. The Open3D mesh is released after sampling and before scoring. A 64 GB host should therefore be sufficient for the standard protocol; use `--surface-query-chunk-size 25000` only as an additional exact-query memory guard.
 
 ## Evaluate a 3dgrut reconstruction checkpoint
 

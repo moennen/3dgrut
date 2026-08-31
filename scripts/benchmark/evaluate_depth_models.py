@@ -21,6 +21,7 @@ Run with the optional upstream packages available::
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 from dataclasses import dataclass, replace
@@ -302,6 +303,69 @@ def _sample_mesh(mesh, count: int) -> np.ndarray:
     return np.asarray(mesh.sample_points_uniformly(number_of_points=count).points, dtype=np.float64)
 
 
+def cache_predictions(predictor, frames: list[Frame], out_dir: Path) -> list[Path]:
+    """Infer one frame at a time and retain the native model outputs on disk.
+
+    DTU's 49 full-resolution frames are large enough that retaining every model map alongside
+    the three alignment products needlessly raises the process peak.  The cache also means an
+    OOM in a later meshing/scoring stage can be resumed without rerunning model inference.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for frame in frames:
+        path = out_dir / f"{frame.name}.npy"
+        if path.exists():
+            cached = np.load(path, mmap_mode="r")
+            expected_shape = (frame.view.height, frame.view.width)
+            if cached.shape != expected_shape:
+                raise ValueError(f"Cached prediction {path} has shape {cached.shape}, expected {expected_shape}")
+        else:
+            prediction = predictor.predict(_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)))
+            np.save(path, _resize(prediction, (frame.view.height, frame.view.width)))
+        paths.append(path)
+    return paths
+
+
+def prepare_aligned_depths(
+    frames: list[Frame],
+    prediction_paths: list[Path],
+    visibility: dict[str, Path],
+    quantity: str,
+    alignment: Literal["raw", "scale", "affine"],
+    out_dir: Path,
+) -> tuple[list[View], float]:
+    """Write aligned ray-depth maps one frame at a time and return their views/max z-depth."""
+    if len(frames) != len(prediction_paths):
+        raise ValueError("Each benchmark frame needs exactly one cached prediction")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    views = []
+    max_depth = 0.0
+    for frame, prediction_path in zip(frames, prediction_paths):
+        gt_z = _z_from_ray(np.load(visibility[frame.name]), frame.view.K)
+        z = align_prediction(np.load(prediction_path), gt_z, quantity, alignment)
+        finite = z[np.isfinite(z)]
+        if len(finite):
+            max_depth = max(max_depth, float(finite.max()))
+        path = out_dir / f"{frame.name}.npy"
+        np.save(path, z_depth_to_ray_distance(z, frame.view.K))
+        views.append(_view_with_depth(frame, path))
+    if max_depth <= 0:
+        raise ValueError(f"No positive finite depth after {alignment} alignment")
+    return views, max_depth
+
+
+def saved_depth_frames(frames: list[Frame], views: list[View]) -> Iterable[DepthFrame]:
+    """Lazily load one aligned RGB-D frame at a time for TSDF integration."""
+    for frame, view in zip(frames, views):
+        yield DepthFrame(
+            np.load(view.depth_path),
+            frame.view.K,
+            _world_to_camera(frame.view),
+            "ray",
+            rgb=_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)),
+        )
+
+
 def _empty_surface_metrics(taus: np.ndarray) -> dict:
     """Report a failed mesh explicitly instead of silently dropping its benchmark cell."""
     return {
@@ -318,7 +382,8 @@ def _empty_surface_metrics(taus: np.ndarray) -> dict:
 
 def evaluate_benchmark_scene(
     scene: BenchmarkScene,
-    predictions: dict[str, list[np.ndarray]],
+    prediction_paths: list[Path],
+    quantity: str,
     out: Path,
     voxel_size: float,
     mesh_samples: int,
@@ -327,25 +392,13 @@ def evaluate_benchmark_scene(
 ) -> list[dict]:
     # The oracle alignment is fitted to the same scan z-buffer used for visibility, in the
     # model's native quantity. A zero is an empty pixel and is excluded by ``align_prediction``.
-    frames = [
-        replace(frame, gt_z=_z_from_ray(np.load(scene.visibility[frame.name]), frame.view.K)) for frame in scene.frames
-    ]
-    rgb_images = [_resize_rgb(frame.image_path, (frame.view.height, frame.view.width)) for frame in frames]
     rows = []
     for alignment in ALIGNMENTS:
-        aligned_z = [
-            align_prediction(pred, frame.gt_z, predictions["quantity"], alignment)
-            for pred, frame in zip(predictions["maps"], frames)
-        ]
         condition = out / alignment
         depth_dir = condition / "depths"
-        depth_dir.mkdir(parents=True, exist_ok=True)
-        views = []
-        for frame, z in zip(frames, aligned_z):
-            ray = z_depth_to_ray_distance(z, frame.view.K)
-            path = depth_dir / f"{frame.name}.npy"
-            np.save(path, ray)
-            views.append(_view_with_depth(frame, path))
+        views, max_depth = prepare_aligned_depths(
+            scene.frames, prediction_paths, scene.visibility, quantity, alignment, depth_dir
+        )
         recall = evaluate_recall(
             views,
             scene.gt_points,
@@ -353,19 +406,17 @@ def evaluate_benchmark_scene(
             alignment=scene.gt_to_world,
             gt_masks=scene.masks,
         ).asdict()
-        config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=float(np.nanmax(np.stack(aligned_z))) * 1.05)
-        mesh = fuse_depth_frames(
-            [
-                DepthFrame(z, frame.view.K, _world_to_camera(frame.view), "z", rgb=rgb)
-                for frame, z, rgb in zip(frames, aligned_z, rgb_images)
-            ],
-            config,
-        )
+        config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=max_depth * 1.05)
+        mesh = fuse_depth_frames(saved_depth_frames(scene.frames, views), config)
         import open3d as o3d
 
         mesh_path = condition / "mesh.ply"
         o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_vertex_normals=True, write_vertex_colors=True)
         predicted = _sample_mesh(mesh, mesh_samples) if len(mesh.triangles) else np.empty((0, 3))
+        # The sampled points, rather than the potentially much larger Open3D mesh, are all the
+        # surface evaluator needs.  Drop the C++ mesh before building either KD-tree.
+        del mesh
+        gc.collect()
         if scene.dtu_obsmask is not None and len(predicted):
             predicted = predicted[observed_volume_mask(predicted, scene.dtu_obsmask)]
         if scene.tnt_crop is not None and len(predicted):
@@ -495,16 +546,11 @@ def main() -> None:
             scene = dtu_scene(
                 args.dtu_root, args.dtu_eval_root, scene_name, max_frames, args.max_image_side, destination
             )
-            maps = [
-                _resize(
-                    predictor.predict(_resize_rgb(frame.image_path, (frame.view.height, frame.view.width))),
-                    (frame.view.height, frame.view.width),
-                )
-                for frame in scene.frames
-            ]
+            prediction_paths = cache_predictions(predictor, scene.frames, destination / "predictions")
             for row in evaluate_benchmark_scene(
                 scene,
-                {"maps": maps, "quantity": predictor.QUANTITY},
+                prediction_paths,
+                predictor.QUANTITY,
                 destination,
                 args.voxel_size_dtu,
                 args.mesh_samples,
@@ -518,16 +564,11 @@ def main() -> None:
             scene = tnt_scene(
                 args.tnt_root, args.tnt_reconstruction_root, scene_name, max_frames, args.max_image_side, destination
             )
-            maps = [
-                _resize(
-                    predictor.predict(_resize_rgb(frame.image_path, (frame.view.height, frame.view.width))),
-                    (frame.view.height, frame.view.width),
-                )
-                for frame in scene.frames
-            ]
+            prediction_paths = cache_predictions(predictor, scene.frames, destination / "predictions")
             for row in evaluate_benchmark_scene(
                 scene,
-                {"maps": maps, "quantity": predictor.QUANTITY},
+                prediction_paths,
+                predictor.QUANTITY,
                 destination,
                 args.voxel_size_tnt,
                 args.mesh_samples,
