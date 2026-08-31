@@ -40,7 +40,8 @@ if str(DEPTHRECALL_ROOT) not in sys.path:
 from depthrecall.dtu import above_ground_plane_mask, observed_volume_mask, read_dtu_views, read_ground_plane
 from depthrecall.io_cameras import View, read_colmap_views
 from depthrecall.io_points import apply_alignment, read_ply, voxel_downsample
-from depthrecall.metric import MetricConfig, evaluate as evaluate_recall
+from depthrecall.metric import MetricConfig
+from depthrecall.metric import evaluate as evaluate_recall
 from depthrecall.surface import evaluate_surface
 from depthrecall.tnt import OFFICIAL_TAU_METRES, crop_volume_mask, gt_to_render_alignment
 from threedgrut.datasets.gt_geometry import depth_validity, find_gt_paths, read_gt_map, resize_gt_map
