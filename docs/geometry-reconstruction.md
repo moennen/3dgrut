@@ -41,6 +41,30 @@ it is representation-agnostic and turns every checkpoint into a usable mesh. It 
 described as a Gaussian-native surface: its result depends on view selection, depth convention,
 voxel size, truncation, masks, and component filtering. Record all of those with a mesh.
 
+### Proposed enhancement: pixel-footprint adaptive TSDF
+
+The fixed voxel size is simple but spends the same memory on distant, textureless space as it
+does on close, high-resolution observations. A compatible next baseline is a sparse **octree
+TSDF**: allocate only cells near valid rendered depths, then recursively split a leaf when its
+projected diagonal is larger than a target span (for example, one or two pixels) in any camera
+that can see it. For a cell at depth `z` in a pinhole camera with focal length `f`, this is
+equivalently a world-cell-width bound
+
+`cell_width <= target_pixels * min_visible(z / f)`.
+
+The minimum world-space pixel footprint is important: it preserves detail visible in the most
+resolving view. The equivalent image-space rule is to split according to the **maximum projected
+pixel footprint** across visible views. Using the maximum world-space footprint instead would
+under-resolve surfaces seen closely by another camera.
+
+Depth integration, opacity masks, ray-to-z conversion, source-RGB fusion, and DTU/TnT scoring
+remain unchanged. The implementation requirements beyond the present Open3D `ScalableTSDFVolume`
+are an octree/hash storage layer, narrow-band allocation around observations, visibility-aware
+refinement, and crack-free adaptive extraction (adaptive dual marching cubes or Transvoxel-style
+transition cells). Open3D's scalable volume is sparse in allocated blocks but still uses one
+global voxel size. This would be a depth-based intermediate between the current fixed-voxel TSDF
+and Gaussian-native pivot/Delaunay methods such as Blobs-to-Spokes.
+
 ## Metrics to report
 
 | Family | Metric | Direction | What it measures | Reporting rule |
