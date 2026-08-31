@@ -2,11 +2,20 @@
 
 The current branch can compare Gaussian/trisurfel primitives, depth-normal consistency, ordinal
 and aligned monocular depth supervision (DA3 and MoGe-3), TSDF meshes, rendered-depth diagnostics,
-and DTU/TnT surface metrics. A full state-of-the-art ablation still needs:
+and DTU/TnT surface metrics. It also has an opacity-weighted **depth variance** along a ray
+(`loss.use_depth_variance`), although it is disabled by default and currently requires the 3DGUT
+second-moment buffer. A full state-of-the-art ablation still needs:
 
 - Plane-intersection (unbiased) depth/normal rasterization, separate from alpha-blended expected
   ray depth, plus its gradient tests.
 - Edge-aware local planar loss and multi-view reprojection/NCC consistency with visibility checks.
+- Ray-distribution appearance and orientation regularizers: per-ray colour variance and
+  normal-direction variance, with tests that distinguish a genuinely mixed ray from a sharp
+  surface. The current depth-variance term only constrains ray distance.
+- A robust surface-location renderer: opacity-weighted median/quantile depth (and, if useful,
+  a corresponding quantile normal) as an alternative to expected depth. This needs a
+  differentiable or suitably straight-through cumulative-opacity implementation and a direct
+  comparison against mean-depth TSDF fusion and supervision.
 - MoGe-3 normal and point-map supervision; the present adapter consumes depth only.
 - A calibrated confidence model combining prior confidence, reprojection agreement, opacity, and
   image edges, with an ablation of confidence weighting versus hard masks.
