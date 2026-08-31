@@ -429,6 +429,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--models", default="dav2,dav3,moge3", help="Comma-separated: dav2,dav3,moge3")
+    parser.add_argument(
+        "--moge3-model",
+        default=MODELS["moge3"][1],
+        help="Local MoGe-3 checkpoint path (default is this workstation's ViT-L checkpoint)",
+    )
     parser.add_argument("--ob3d-root", type=Path, default=Path("/mnt/data/nerf_datasets/ob3d/OB3D_colmap"))
     parser.add_argument("--ob3d-scenes", default="emerald-square")
     parser.add_argument("--dtu-root", type=Path, default=Path("/mnt/data/nerf_datasets/dtu_dataset/dtu"))
@@ -456,10 +461,12 @@ def main() -> None:
     unknown = set(models) - set(MODELS)
     if unknown:
         raise ValueError(f"Unknown models {sorted(unknown)}; expected {sorted(MODELS)}")
+    model_specs = dict(MODELS)
+    model_specs["moge3"] = ("moge3", args.moge3_model)
     max_frames = args.max_frames or 1_000_000
     records: list[dict] = []
     for model in models:
-        backend, model_id = MODELS[model]
+        backend, model_id = model_specs[model]
         predictor = BACKENDS[backend](model_id=model_id)
         for scene_name in args.ob3d_scenes.split(","):
             frames = ob3d_frames(args.ob3d_root / scene_name, max_frames, args.max_image_side)
@@ -512,7 +519,11 @@ def main() -> None:
     output.write_text("".join(json.dumps(record, allow_nan=False) + "\n" for record in records))
     (args.out_dir / "protocol.json").write_text(
         json.dumps(
-            {"models": MODELS, "alignment": list(ALIGNMENTS), "oracle_alignment": "GT scan z-buffer per frame"},
+            {
+                "models": model_specs,
+                "alignment": list(ALIGNMENTS),
+                "oracle_alignment": "GT scan z-buffer per frame",
+            },
             indent=2,
         )
     )
