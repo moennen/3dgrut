@@ -44,6 +44,17 @@ def test_a_normal_loss_with_rendered_normals_is_accepted() -> None:
     check_normals_are_rendered(_conf(use_depth_normal=True, enable_normals=True))
 
 
+def test_multiview_normal_loss_without_rendered_normals_is_rejected() -> None:
+    conf = OmegaConf.create(
+        {
+            "render": {"enable_normals": False},
+            "loss": {"multiview": {"enabled": True, "geometric": {"lambda_normal": 0.1}}},
+        }
+    )
+    with pytest.raises(ValueError, match="render.enable_normals is false"):
+        check_normals_are_rendered(conf)
+
+
 @pytest.mark.parametrize("enable_normals", [True, False])
 def test_runs_without_a_normal_loss_are_untouched(enable_normals: bool) -> None:
     """Every existing config has no normal loss, and must keep training either way."""

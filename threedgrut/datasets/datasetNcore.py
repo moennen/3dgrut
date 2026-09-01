@@ -754,8 +754,19 @@ class NCoreDataset(torch.utils.data.Dataset, BoundedMultiViewDataset, DatasetVis
             frame_image_array = cv2.resize(frame_image_array, (target_w, target_h), interpolation=cv2.INTER_AREA)
         return frame_image_array
 
+    def get_paired_item(self, frame_idx: int) -> dict:
+        """Load one exact train frame for reprojection supervision.
+
+        Normal NCore training deliberately ignores the DataLoader index and samples a frame
+        uniformly.  A camera-affinity target instead needs the frame whose pose was selected
+        from ``get_poses()``, so it takes this explicit deterministic route.
+        """
+        if not self.split.startswith("train"):
+            raise ValueError("get_paired_item is only defined for the NCore training split")
+        return self.__getitem__(frame_idx, _forced_frame_idx=frame_idx)
+
     @torch.cuda.nvtx.range("ncore_dataset::_getitem")
-    def __getitem__(self, idx) -> dict:
+    def __getitem__(self, idx, _forced_frame_idx: int | None = None) -> dict:
         """Returns a specific sample of the dataset (depending on split type and parametrization).
 
         Returns a plain dict suitable for PyTorch DataLoader default collation.
@@ -768,7 +779,21 @@ class NCoreDataset(torch.utils.data.Dataset, BoundedMultiViewDataset, DatasetVis
         if self.split.startswith("train"):
             sequence_id = self.sequence_id
 
-            if self.sample_full_image:
+            if _forced_frame_idx is not None:
+                if not 0 <= _forced_frame_idx < self._n_train_frames:
+                    raise IndexError(f"Out of range training frame {_forced_frame_idx}")
+                valid_camera_ids = []
+                forced_closest_idx = None
+                for camera_id in self.camera_ids:
+                    start = self.camera_linear_start_frame_indices[camera_id]
+                    count = len(self.camera_train_frame_indices[camera_id])
+                    if start <= _forced_frame_idx < start + count:
+                        valid_camera_ids = [camera_id]
+                        forced_closest_idx = _forced_frame_idx - start
+                        break
+                if forced_closest_idx is None:
+                    raise IndexError(f"No camera owns training frame {_forced_frame_idx}")
+            elif self.sample_full_image:
                 # Select one random camera from available cameras
                 valid_camera_ids = [self.rng.choice(self.camera_ids)]
             else:
@@ -791,8 +816,11 @@ class NCoreDataset(torch.utils.data.Dataset, BoundedMultiViewDataset, DatasetVis
                 if len(train_frames) == 0:
                     continue
 
-                # Randomly sample a frame index directly from training frames list
-                closest_idx = self.rng.integers(0, len(train_frames))
+                # Normal training samples frames randomly. Paired supervision asks for the
+                # exact camera-blocked frame index that the affinity graph selected.
+                closest_idx = (
+                    forced_closest_idx if _forced_frame_idx is not None else self.rng.integers(0, len(train_frames))
+                )
                 camera_frame_index = train_frames[closest_idx]
 
                 # Compact, 0-based, contiguous training frame index (camera-blocked)

@@ -253,6 +253,39 @@ loss:
   lambda_appearance_variance: 0.0
   appearance_variance_from_iter: 7000
 
+  # Visibility-aware cross-view geometry. A persisted sparse affinity graph samples a useful
+  # target camera for each source frame; runtime rendered-depth agreement then rejects occluded
+  # pixels. All terms are primitive-agnostic and operate on Euclidean ray distance.
+  multiview:
+    enabled: false
+    from_iter: 3000
+    pairs_per_source: 1
+    target_batch_cache_size: 2
+    min_opacity: 0.5
+    visibility_relative_tolerance: 0.02
+    visibility_absolute_tolerance_scene: 0.002
+    signed_normals: false
+    affinity:
+      top_k: 16
+      min_baseline_ratio: 0.02
+      max_view_angle_deg: 65.0
+      overlap_weight: 1.0
+      baseline_weight: 0.5
+      angle_weight: 0.5
+    geometric:
+      lambda_point: 0.0
+      lambda_normal: 0.0
+    raw_feature_l2:
+      # rgb | latent | decoded_image_feature. `latent` is NHT's pre-decoder vector.
+      source: rgb
+      lambda: 0.0
+    zncc:
+      # rgb | decoded_image_feature; latent ZNCC is allowed but usually not identifiable.
+      source: rgb
+      lambda: 0.0
+      patch_size: 5
+      min_patch_valid_fraction: 0.7
+
   # Ordinal supervision from a monocular pseudo-depth prior: penalises pixel pairs the render
   # orders opposite to the prior, and nothing else. Reads only the sign of the prior's
   # differences, so it is invariant to any increasing transform of it and needs no alignment.

@@ -45,10 +45,17 @@ from threedgrut.utils.depth_variance_loss import depth_variance_loss
 from threedgrut.utils.image_feature_loss import image_feature_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
+from threedgrut.utils.multiview_supervision import MultiViewLossWeights, multiview_supervision_loss
 from threedgrut.utils.normal_variance_loss import normal_direction_variance_loss
 from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_l1_loss, compute_pseudo_depth_order_loss
 from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 from threedgrut.utils.timer import CudaTimer
+from threedgrut.utils.view_affinity import (
+    PairedViewSampler,
+    ViewAffinityGraph,
+    affinity_fingerprint,
+    build_view_affinity_graph,
+)
 
 
 class Trainer3DGRUT:
@@ -142,11 +149,13 @@ class Trainer3DGRUT:
         just to read it back, and taking it from the global torch RNG would make the sampled
         pairs depend on how many other terms happened to draw before it.
         """
+        self._multiview_pair_sampler: PairedViewSampler | None = None
 
         # Setup the trainer and components
         logger.log_rule("Load Datasets")
         self.init_dataloaders(conf)
         self.init_scene_extents(self.train_dataset)
+        self.init_multiview_supervision(conf)
         logger.log_rule("Initialize Model")
         self.init_model(conf, self.scene_extent)
         self.init_densification_and_pruning_strategy(conf)
@@ -251,6 +260,105 @@ class Trainer3DGRUT:
         scene_bbox = train_dataset.get_scene_bbox()
         self.scene_extent = scene_extent
         self.scene_bbox = scene_bbox
+
+    def init_multiview_supervision(self, conf: DictConfig) -> None:
+        """Construct or load the camera-pair graph before the first renderer is compiled."""
+        options = conf.loss.multiview
+        if not options.enabled:
+            return
+        weights = (
+            options.geometric.lambda_point,
+            options.geometric.lambda_normal,
+            options.raw_feature_l2["lambda"],
+            options.zncc["lambda"],
+        )
+        if not any(weight > 0.0 for weight in weights):
+            raise ValueError("loss.multiview.enabled needs at least one positive loss weight")
+        if any(weight < 0.0 for weight in weights):
+            raise ValueError("multi-view loss weights must be non-negative")
+        if options.pairs_per_source < 1:
+            raise ValueError("loss.multiview.pairs_per_source must be positive")
+        if not 0.0 <= options.min_opacity <= 1.0:
+            raise ValueError("loss.multiview.min_opacity must be in [0, 1]")
+        if options.visibility_relative_tolerance < 0.0 or options.visibility_absolute_tolerance_scene < 0.0:
+            raise ValueError("multi-view visibility tolerances must be non-negative")
+        for term in (options.raw_feature_l2, options.zncc):
+            if term.source not in {"rgb", "latent", "decoded_image_feature"}:
+                raise ValueError(f"unknown multi-view feature source {term.source!r}")
+        if not 0.0 <= options.zncc.min_patch_valid_fraction <= 1.0:
+            raise ValueError("loss.multiview.zncc.min_patch_valid_fraction must be in [0, 1]")
+        poses = np.asarray(self.train_dataset.get_poses(), dtype=np.float32)
+        if poses.shape[0] != len(self.train_dataset):
+            raise ValueError(
+                "multi-view affinity needs one pose per training frame, but get_poses returned "
+                f"{poses.shape[0]} poses for {len(self.train_dataset)} frames."
+            )
+        bbox = tuple(
+            value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value) for value in self.scene_bbox
+        )
+        affinity_options = OmegaConf.to_container(options.affinity, resolve=True)
+        fingerprint = affinity_fingerprint(poses, bbox, affinity_options)
+        cache_path = Path(conf.out_dir) / conf.experiment_name / "multiview_affinity.npz"
+        graph = ViewAffinityGraph.load(cache_path, fingerprint)
+        if graph is None:
+            graph = build_view_affinity_graph(
+                poses,
+                bbox,
+                top_k=options.affinity.top_k,
+                max_view_angle_deg=options.affinity.max_view_angle_deg,
+                min_baseline_ratio=options.affinity.min_baseline_ratio,
+                overlap_weight=options.affinity.overlap_weight,
+                baseline_weight=options.affinity.baseline_weight,
+                angle_weight=options.affinity.angle_weight,
+            )
+            graph.save(cache_path, fingerprint)
+        empty_rows = sum(graph.offsets[index] == graph.offsets[index + 1] for index in range(graph.num_views))
+        if empty_rows == graph.num_views:
+            raise ValueError(
+                "multi-view affinity graph has no valid camera pairs; relax its overlap/baseline/angle gates."
+            )
+        self._multiview_pair_sampler = PairedViewSampler(
+            self.train_dataset,
+            graph,
+            seed=conf.seed_initialization,
+            cache_size=options.target_batch_cache_size,
+        )
+        logger.info(
+            "Multi-view affinity: %d directed pairs across %d frames (%d frames without a valid target), cached at %s",
+            len(graph.indices),
+            graph.num_views,
+            empty_rows,
+            cache_path,
+        )
+
+    def render_multiview_targets(
+        self, source_frame_idx: int, frame_id: int
+    ) -> list[tuple[Batch, dict[str, torch.Tensor]]]:
+        """Sample and render target views after the source render has established this iteration."""
+        if self._multiview_pair_sampler is None or self._in_color_refine:
+            return []
+        contexts: list[tuple[Batch, dict[str, torch.Tensor]]] = []
+        for _ in range(self.conf.loss.multiview.pairs_per_source):
+            sampled = self._multiview_pair_sampler.sample(source_frame_idx)
+            if sampled is None:
+                continue
+            _, target_batch = sampled
+            target_outputs = self.model(target_batch, train=True, frame_id=frame_id)
+            if self.feature_decoder is not None:
+                target_outputs = apply_feature_decoder(
+                    self.feature_decoder,
+                    target_outputs,
+                    target_batch,
+                    training=True,
+                    center_ray_encoding=bool(getattr(self.conf.model.nht_decoder, "center_ray_encoding", False)),
+                )
+            target_outputs = apply_background(self.model.background, target_outputs, target_batch, training=True)
+            if self.post_processing is not None:
+                target_outputs = apply_post_processing(
+                    self.post_processing, target_outputs, target_batch, training=True
+                )
+            contexts.append((target_batch, target_outputs))
+        return contexts
 
     def init_model(self, conf: DictConfig, scene_extent=None) -> None:
         """Initializes the gaussian model and the optix context"""
@@ -684,7 +792,10 @@ class Trainer3DGRUT:
 
     @torch.cuda.nvtx.range("get_losses")
     def get_losses(
-        self, gpu_batch: dict[str, torch.Tensor], outputs: dict[str, torch.Tensor]
+        self,
+        gpu_batch: dict[str, torch.Tensor],
+        outputs: dict[str, torch.Tensor],
+        paired_contexts: list[tuple[Batch, dict[str, torch.Tensor]]] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Computes dictionary of losses for current batch.
         Args:
@@ -946,6 +1057,72 @@ class Trainer3DGRUT:
             )
             lambda_image_features = self.conf.loss.lambda_image_features
 
+        loss_multiview_point = torch.zeros(1, device=self.device)
+        loss_multiview_normal = torch.zeros(1, device=self.device)
+        loss_multiview_l2 = torch.zeros(1, device=self.device)
+        loss_multiview_zncc = torch.zeros(1, device=self.device)
+        multiview = self.conf.loss.multiview
+        if (
+            multiview.enabled
+            and not self._in_color_refine
+            and self.global_step >= multiview.from_iter
+            and paired_contexts
+        ):
+            with torch.cuda.nvtx.range("loss-multiview"):
+                accumulated = {"point": 0.0, "normal": 0.0, "raw_feature_l2": 0.0, "zncc": 0.0}
+                for target_batch, target_outputs in paired_contexts:
+                    geometry, _ = multiview_supervision_loss(
+                        gpu_batch,
+                        outputs,
+                        target_batch,
+                        target_outputs,
+                        scene_extent=self.model.scene_extent,
+                        min_opacity=multiview.min_opacity,
+                        visibility_relative_tolerance=multiview.visibility_relative_tolerance,
+                        visibility_absolute_tolerance_scene=multiview.visibility_absolute_tolerance_scene,
+                        weights=MultiViewLossWeights(
+                            point=multiview.geometric.lambda_point, normal=multiview.geometric.lambda_normal
+                        ),
+                        signed_normals=multiview.signed_normals,
+                    )
+                    for key, value in geometry.items():
+                        accumulated[key] = accumulated[key] + value
+                    if multiview.raw_feature_l2["lambda"]:
+                        feature, _ = multiview_supervision_loss(
+                            gpu_batch,
+                            outputs,
+                            target_batch,
+                            target_outputs,
+                            scene_extent=self.model.scene_extent,
+                            min_opacity=multiview.min_opacity,
+                            visibility_relative_tolerance=multiview.visibility_relative_tolerance,
+                            visibility_absolute_tolerance_scene=multiview.visibility_absolute_tolerance_scene,
+                            weights=MultiViewLossWeights(raw_feature_l2=multiview.raw_feature_l2["lambda"]),
+                            feature_source=multiview.raw_feature_l2.source,
+                        )
+                        accumulated["raw_feature_l2"] = accumulated["raw_feature_l2"] + feature["raw_feature_l2"]
+                    if multiview.zncc["lambda"]:
+                        zncc, _ = multiview_supervision_loss(
+                            gpu_batch,
+                            outputs,
+                            target_batch,
+                            target_outputs,
+                            scene_extent=self.model.scene_extent,
+                            min_opacity=multiview.min_opacity,
+                            visibility_relative_tolerance=multiview.visibility_relative_tolerance,
+                            visibility_absolute_tolerance_scene=multiview.visibility_absolute_tolerance_scene,
+                            weights=MultiViewLossWeights(zncc=multiview.zncc["lambda"]),
+                            feature_source=multiview.zncc.source,
+                            zncc_patch_size=multiview.zncc.patch_size,
+                            zncc_min_patch_valid_fraction=multiview.zncc.min_patch_valid_fraction,
+                        )
+                        accumulated["zncc"] = accumulated["zncc"] + zncc["zncc"]
+                count = len(paired_contexts)
+                loss_multiview_point = accumulated["point"] / count
+                loss_multiview_normal = accumulated["normal"] / count
+                loss_multiview_l2 = accumulated["raw_feature_l2"] / count
+                loss_multiview_zncc = accumulated["zncc"] / count
+
         # Total loss
         loss = (
             lambda_l1 * loss_l1
@@ -960,6 +1137,10 @@ class Trainer3DGRUT:
             + lambda_pseudo_depth * loss_pseudo_depth
             + lambda_pseudo_depth_l1 * loss_pseudo_depth_l1
             + lambda_image_features * loss_image_features
+            + multiview.geometric.lambda_point * loss_multiview_point
+            + multiview.geometric.lambda_normal * loss_multiview_normal
+            + multiview.raw_feature_l2["lambda"] * loss_multiview_l2
+            + multiview.zncc["lambda"] * loss_multiview_zncc
         )
         return dict(
             total_loss=loss,
@@ -976,6 +1157,10 @@ class Trainer3DGRUT:
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
             pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
             image_features_loss=lambda_image_features * loss_image_features,
+            multiview_point_loss=multiview.geometric.lambda_point * loss_multiview_point,
+            multiview_normal_loss=multiview.geometric.lambda_normal * loss_multiview_normal,
+            multiview_raw_feature_l2_loss=multiview.raw_feature_l2["lambda"] * loss_multiview_l2,
+            multiview_zncc_loss=multiview.zncc["lambda"] * loss_multiview_zncc,
         )
 
     @torch.cuda.nvtx.range("log_validation_iter")
@@ -1130,6 +1315,10 @@ class Trainer3DGRUT:
             if self.conf.loss.use_appearance_variance:
                 appearance_variance = np.mean(batch_metrics["losses"]["appearance_variance_loss"])
                 writer.add_scalar("loss/appearance_variance/train", appearance_variance, global_step)
+            if self.conf.loss.multiview.enabled:
+                for name in ("point", "normal", "raw_feature_l2", "zncc"):
+                    value = np.mean(batch_metrics["losses"][f"multiview_{name}_loss"])
+                    writer.add_scalar(f"loss/multiview_{name}/train", value, global_step)
             if self.conf.loss.use_pseudo_depth_order:
                 pseudo_depth = np.mean(batch_metrics["losses"]["pseudo_depth_order_loss"])
                 writer.add_scalar("loss/pseudo_depth_order/train", pseudo_depth, global_step)
@@ -1443,9 +1632,14 @@ class Trainer3DGRUT:
             with torch.cuda.nvtx.range(f"train_{global_step}_post_processing"):
                 outputs = apply_post_processing(self.post_processing, outputs, gpu_batch, training=True)
 
+        paired_contexts = []
+        if self.conf.loss.multiview.enabled and global_step >= self.conf.loss.multiview.from_iter:
+            with torch.cuda.nvtx.range(f"train_{global_step}_multiview_fwd"):
+                paired_contexts = self.render_multiview_targets(int(gpu_batch.frame_idx), global_step)
+
         # Compute the losses of a single batch
         with torch.cuda.nvtx.range(f"train_{global_step}_loss"):
-            batch_losses = self.get_losses(gpu_batch, outputs)
+            batch_losses = self.get_losses(gpu_batch, outputs, paired_contexts)
 
             # Add post-processing regularization loss
             if self.post_processing is not None:

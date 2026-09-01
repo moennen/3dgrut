@@ -13,7 +13,7 @@ across views, or replace a post-hoc mesh heuristic with a field that can be mesh
 | Surface-consistent depth and normals | Blending Gaussian-centre depths does not describe the plane that rendered the splat. | Rasterize a ray--plane intersection / plane distance, then derive ray depth; retain alpha separately. | Trisurfel hit depth already uses its local ray--plane intersection; ellipsoid hit depth does not. Both still alpha-blend hit depths into an expected ray depth. |
 | Local depth--normal consistency | Removes shapes that render well but cannot be a locally coherent surface. | Compare rendered normal with a normal unprojected from rendered depth; make the loss edge aware. | Implemented. |
 | Ray-distribution sharpness | A mean depth can hide two separated, partially opaque surfaces on one ray. | Penalize distance, colour, and normal-direction spread; compare mean with median/quantile surface location. | Depth and normal variance exist. Appearance variance is available in 3DGUT (RGB for SH; pre-decoder feature variance for NHT); all are off by default. Median/quantile depth is missing. |
-| Multi-view geometric consistency | A single view cannot resolve textureless, reflective, or repeated structure. | Reproject depth/normal patches and apply geometric and photometric consistency, commonly NCC. | Missing. |
+| Multi-view geometric consistency | A single view cannot resolve textureless, reflective, or repeated structure. | Reproject depth/normal patches and apply geometric and photometric consistency, commonly NCC. | Implemented: sparse pose affinity, depth-visibility gating, point/normal, raw-feature L2, and ZNCC terms. |
 | External geometry priors | Gives a useful cue where photometric supervision is ambiguous. | Monocular depth/normal/point-map supervision, aligned to sparse SfM; use uncertainty/confidence to limit bad priors. | DA3 ordinal and sparse-aligned depth losses exist; MoGe-3 integration is next. |
 | Confidence and ambiguity modelling | Prevents an uncertain pseudo-depth or low-parallax region from overriding multi-view evidence. | Learn or estimate per-pixel confidence from reprojection, prior agreement, opacity, and image structure. | Missing unified confidence model. |
 | A continuous extraction field | TSDF fusion of blended depth is convenient but is not a property of the Gaussian scene. | Opacity/occupancy/SDF field queried in 3D, then marching tetrahedra/cubes. | Missing. |
@@ -64,6 +64,53 @@ refinement, and crack-free adaptive extraction (adaptive dual marching cubes or 
 transition cells). Open3D's scalable volume is sparse in allocated blocks but still uses one
 global voxel size. This would be a depth-based intermediate between the current fixed-voxel TSDF
 and Gaussian-native pivot/Delaunay methods such as Blobs-to-Spokes.
+
+## Visibility-aware multi-view supervision
+
+The multi-view loss is deliberately independent of the Gaussian primitive: it applies to
+ellipsoids and trisurfels alike, and uses rendered **Euclidean ray distance** throughout.
+It has two stages.
+
+1. At startup, it builds and persists a sparse directed camera graph at
+   `<out_dir>/<experiment>/multiview_affinity.npz`. A candidate pair must jointly see the
+   scene AABB centre/corners, exceed a minimum baseline relative to scene distance, and stay
+   within the configured view-angle gate. The top `K` targets are retained and sampled in O(1)
+   from a Vose alias table according to their overlap/parallax/angle score.
+2. At each selected pair, source depth is unprojected into world space, projected into the
+   target, and accepted only when both renders are opaque and target ray distance agrees with
+   the projected world point. This runtime test is the occlusion/visibility decision; the
+   affinity graph merely avoids wasting renders on implausible pairs.
+
+The following losses can be enabled independently:
+
+| Term | Configuration | Definition |
+| --- | --- | --- |
+| Point geometry | `geometric.lambda_point` | Robust L1 (Charbonnier) distance between the two visible world points, normalized by scene extent. |
+| Normal geometry | `geometric.lambda_normal` | `1 - abs(dot(n_source, n_target))`, or signed dot with `signed_normals=true`. Normals must be rendered. |
+| Raw feature L2 | `raw_feature_l2.lambda` and `source` | Channelwise mean squared error between source features and bilinearly reprojected target features. Source can be `rgb`, NHT `latent`, or decoded image features. |
+| ZNCC | `zncc.lambda` and `source` | Patch zero-mean normalized cross correlation after reprojection; only patches with enough visible samples contribute. |
+
+Minimal geometry-only example:
+
+```bash
+python train.py --config-name apps/colmap_3dgut.yaml \
+  loss.multiview.enabled=true \
+  loss.multiview.geometric.lambda_point=0.05 \
+  loss.multiview.geometric.lambda_normal=0.01 \
+  render.enable_normals=true
+```
+
+For an NHT feature term, use `loss.multiview.raw_feature_l2.source=latent`; for a robust
+photometric patch term, use `loss.multiview.zncc.lambda=0.05`. Start the loss after initial
+geometry settles (`from_iter`) and use one target per source first; every additional target
+adds a full target-view render. `target_batch_cache_size` only caches immutable target batch
+inputs, not render outputs.
+
+The initial reprojector intentionally supports global-shutter pinhole/OpenCV-pinhole cameras.
+It rejects fisheye/F-theta and rolling-shutter target views rather than treating them as
+pinhole cameras. Add their inverse camera models and per-pixel target-pose projection before
+using the term on those captures. NCore's normal training sampler is random, so its paired
+target path explicitly fetches the graph-selected frame instead of reusing that random sampler.
 
 ## Metrics to report
 

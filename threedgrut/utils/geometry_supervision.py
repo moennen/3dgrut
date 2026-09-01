@@ -31,6 +31,10 @@ def normal_supervision_requested(conf) -> bool:
     return bool(
         OmegaConf.select(conf, "loss.use_depth_normal", default=False)
         or OmegaConf.select(conf, "loss.use_normal_variance", default=False)
+        or (
+            OmegaConf.select(conf, "loss.multiview.enabled", default=False)
+            and float(OmegaConf.select(conf, "loss.multiview.geometric.lambda_normal", default=0.0)) > 0.0
+        )
     )
 
 
@@ -49,7 +53,7 @@ def check_normals_are_rendered(conf) -> None:
         return
 
     raise ValueError(
-        "loss.use_depth_normal is set but render.enable_normals is false, so the tracer "
+        "a configured normal loss is set but render.enable_normals is false, so the tracer "
         "returns a constant placeholder instead of a rendered normal and the term would "
         "supervise against that constant. Set render.enable_normals=true."
     )
