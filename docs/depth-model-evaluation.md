@@ -100,6 +100,7 @@ jq -c '{suite, scene, model, alignment}' /mnt/oss/results/depth-benchmark-2026-0
 - Scale and affine benchmark maps are **oracle** per-frame fits to the GT scan z-buffer; they are diagnostics, never deployable results.
 - DTU recall uses the official ground-plane GT cull and visibility z-buffer; its mesh score is Chamfer `(accuracy + completeness)/2` in millimetres, with the official observation mask on predictions.
 - TnT recall and mesh scoring use the official crop; F1 is reported at each scene's official threshold.
+- The generated PDF includes visible-scan recall curves for raw, scale, and affine conditions. DTU uses absolute millimetre tolerances; TnT uses each scene's official tolerance multiplier so scenes can be averaged fairly.
 - All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.
 - Mesh scoring keeps the two-million-sample default, but executes exact nearest-neighbour queries in 100,000-sample batches to bound host memory. `--surface-query-chunk-size` changes only peak memory, not the metric.
 - For DTU/TnT, aligned maps are written one frame at a time and RGB-D frames are lazily loaded into TSDF fusion. The Open3D mesh is released after sampling and before scoring. A 64 GB host should therefore be sufficient for the standard protocol; use `--surface-query-chunk-size 25000` only as an additional exact-query memory guard.

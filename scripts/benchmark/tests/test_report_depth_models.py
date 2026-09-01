@@ -7,11 +7,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from report_depth_models import markdown, pivot, qualitative_page, suite_view_subtitle
+from report_depth_models import markdown, pivot, qualitative_page, recall_curve_data, suite_view_subtitle
 
 
 def _record(suite: str, scene: str, model: str, alignment: str, value: float, views: int) -> dict:
@@ -19,8 +20,11 @@ def _record(suite: str, scene: str, model: str, alignment: str, value: float, vi
     if suite == "ob3d":
         record["frames"] = views
         record["depth"] = {"abs_rel": value}
-    else:
+    elif suite == "dtu":
         record["recall"] = {"recall": [0.0, 0.0, 0.0, value], "taus": [0.0, 0.0, 0.0, 5.0]}
+        record["surface"] = {"overall": value, "fscore": [value]}
+    else:
+        record["recall"] = {"recall": [value, value, value], "taus": [0.01, 0.02, 0.05]}
         record["surface"] = {"overall": value, "fscore": [value]}
     return record
 
@@ -43,6 +47,22 @@ def test_report_uses_actual_multiview_count_and_never_claims_one_view():
     assert "| tnt | Barn | 410 |" in report
     assert "One-view fusion" not in report
     assert suite_view_subtitle(records, "tnt", "fallback") == "Barn: 410 posed views"
+
+
+def test_recall_curves_average_scenes_and_normalize_tnt_scene_tolerances():
+    records = [
+        {
+            **_record("tnt", "Barn", "model", "scale", 0.0, 10),
+            "recall": {"taus": [0.01, 0.02, 0.05], "recall": [0.2, 0.4, 0.8]},
+        },
+        {
+            **_record("tnt", "Truck", "model", "scale", 0.0, 10),
+            "recall": {"taus": [0.02, 0.04, 0.10], "recall": [0.4, 0.6, 1.0]},
+        },
+    ]
+    taus, curves = recall_curve_data(records, normalize_taus=True)
+    np.testing.assert_allclose(taus, [1.0, 2.0, 5.0])
+    np.testing.assert_allclose(curves[("model", "scale")], [0.3, 0.5, 0.9])
 
 
 def test_qualitative_page_is_optional_when_only_records_are_fetched(tmp_path):

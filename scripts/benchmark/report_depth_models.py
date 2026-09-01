@@ -60,6 +60,51 @@ def suite_view_subtitle(records: list[dict], suite: str, fallback: str) -> str:
     return "; ".join(f"{scene}: {count} posed views" for scene, count in rows) if rows else fallback
 
 
+def recall_curve_data(
+    records: list[dict], normalize_taus: bool = False
+) -> tuple[np.ndarray, dict[tuple[str, str], np.ndarray]]:
+    """Return mean per-scene visible-recall curves grouped by model and alignment.
+
+    TnT's official tolerance is scene-specific.  Normalizing its three thresholds by the first
+    one makes a cross-scene curve meaningful while preserving the exact raw values in JSONL.
+    """
+    curves: dict[tuple[str, str], list[np.ndarray]] = {}
+    reference_taus: np.ndarray | None = None
+    for record in records:
+        recall = record["recall"]
+        taus = np.asarray(recall["taus"], dtype=np.float64)
+        values = np.asarray(recall["recall"], dtype=np.float64)
+        if taus.ndim != 1 or values.shape != taus.shape:
+            raise ValueError(f"Invalid recall curve in {record['suite']}/{record['scene']}")
+        if normalize_taus:
+            if taus[0] <= 0:
+                raise ValueError(
+                    f"Cannot normalize a non-positive recall tolerance in {record['suite']}/{record['scene']}"
+                )
+            taus = taus / taus[0]
+        if reference_taus is None:
+            reference_taus = taus
+        elif not np.allclose(reference_taus, taus):
+            raise ValueError("Cannot combine recall curves with different tolerance grids")
+        curves.setdefault((record["model"], record["alignment"]), []).append(values)
+    if reference_taus is None:
+        return np.empty(0), {}
+    return reference_taus, {key: np.mean(values, axis=0) for key, values in curves.items()}
+
+
+def recall_curve_table(records: list[dict], normalize_taus: bool, unit: str) -> list[str]:
+    """Render all curve samples instead of hiding them behind one headline tolerance."""
+    taus, curves = recall_curve_data(records, normalize_taus)
+    headers = [f"@{tau:g}{unit}" for tau in taus]
+    text = [
+        "| model | alignment | " + " | ".join(headers) + " |",
+        "| --- | --- | " + " | ".join(["---:"] * len(headers)) + " |",
+    ]
+    for (model, alignment), values in sorted(curves.items()):
+        text.append(f"| {model} | {alignment} | " + " | ".join(number(value) for value in values) + " |")
+    return text
+
+
 def markdown(records: list[dict], note: str) -> str:
     ob3d, dtu, tnt = (rows_by_suite(records, name) for name in ("ob3d", "dtu", "tnt"))
     text = [
@@ -277,26 +322,34 @@ def markdown(records: list[dict], note: str) -> str:
     models, table = pivot(ob3d, lambda row: row["depth"]["abs_rel"])
     text += ["| model | raw abs-rel | scale abs-rel | affine abs-rel |", "| --- | ---: | ---: | ---: |"]
     text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
-    models, table = pivot(dtu, lambda row: row["recall"]["recall"][3])
     text += [
         "",
         "## DTU",
         "",
-        "Recall is visibility-corrected recall@5 mm; scale and affine are oracle scan-z-buffer fits.",
+        "Visible-scan recall curves use millimetre tolerances. Values are unweighted means over evaluated scenes; "
+        "scale and affine are oracle scan-z-buffer fits.",
         "",
     ]
-    text += ["| model | raw recall@5mm | scale recall@5mm | affine recall@5mm |", "| --- | ---: | ---: | ---: |"]
-    text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
+    text += recall_curve_table(dtu, normalize_taus=False, unit="mm")
     models, table = pivot(dtu, lambda row: row["surface"].get("overall"))
     text += ["", "DTU TSDF mesh Chamfer is `(accuracy + completeness) / 2` in millimetres; `—` is an empty mesh.", ""]
     text += ["| model | raw Chamfer | scale Chamfer | affine Chamfer |", "| --- | ---: | ---: | ---: |"]
     text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
-    models, table = pivot(tnt, lambda row: row["recall"]["recall"][0])
-    text += ["", "## Tanks and Temples", "", "Recall is visibility-corrected at the official scene tolerance.", ""]
-    text += ["| model | raw recall@1cm | scale recall@1cm | affine recall@1cm |", "| --- | ---: | ---: | ---: |"]
-    text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
+    text += [
+        "",
+        "## Tanks and Temples",
+        "",
+        "Visible-scan recall curves are normalized by each scene's official tolerance (1×, 2×, 5×) before "
+        "averaging across scenes.",
+        "",
+    ]
+    text += recall_curve_table(tnt, normalize_taus=True, unit="×")
     models, table = pivot(tnt, lambda row: row["surface"].get("fscore", [None])[0])
-    text += ["", "TnT mesh F1 is at the official 1 cm Barn tolerance; `—` denotes an empty mesh.", ""]
+    text += [
+        "",
+        "TnT mesh F1 is at each scene's official threshold; `—` denotes an empty mesh.",
+        "",
+    ]
     text += ["| model | raw F1 | scale F1 | affine F1 |", "| --- | ---: | ---: | ---: |"]
     text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
     text += [
@@ -352,6 +405,44 @@ def bar_page(pdf: PdfPages, records: list[dict]) -> None:
     axis.set_title("OB3D depth alignment ladder", fontsize=24, weight="bold")
     axis.legend(title="alignment")
     axis.grid(axis="y", alpha=0.25)
+    pdf.savefig(figure, bbox_inches="tight")
+    plt.close(figure)
+
+
+def recall_curve_page(pdf: PdfPages, records: list[dict], suite: str) -> None:
+    """Plot all tolerances, splitting oracle conditions into readable panels."""
+    suite_records = rows_by_suite(records, suite)
+    normalize_taus = suite == "tnt"
+    taus, curves = recall_curve_data(suite_records, normalize_taus=normalize_taus)
+    if not len(taus):
+        return
+    alignments = ["raw", "scale", "affine"]
+    models = sorted({model for model, _ in curves})
+    figure, axes = plt.subplots(1, len(alignments), figsize=(13.33, 5.5), sharey=True)
+    for axis, alignment in zip(axes, alignments):
+        for model in models:
+            values = curves.get((model, alignment))
+            if values is not None:
+                axis.plot(taus, values, marker="o", linewidth=2.5, label=model)
+        axis.set_title(alignment)
+        axis.set_xlabel("official tolerance multiplier" if normalize_taus else "tolerance (mm)")
+        axis.grid(alpha=0.25)
+        axis.set_ylim(0, 1)
+        if not normalize_taus and len(taus) > 2 and taus[-1] / taus[0] >= 10:
+            axis.set_xscale("log")
+    axes[0].set_ylabel("visible-scan recall")
+    handles, labels = axes[-1].get_legend_handles_labels()
+    if handles:
+        figure.legend(handles, labels, loc="lower center", ncol=len(models), frameon=False)
+    title = "DTU visible-depth recall curves" if suite == "dtu" else "Tanks and Temples visible-depth recall curves"
+    figure.suptitle(title, fontsize=22, weight="bold", y=0.98)
+    subtitle = (
+        "GT ground-plane cull + per-view visibility z-buffer; higher is better"
+        if suite == "dtu"
+        else "Official crop + per-view visibility z-buffer; x-axis is normalized per scene; higher is better"
+    )
+    figure.text(0.5, 0.90, subtitle, ha="center", fontsize=11)
+    figure.tight_layout(rect=(0, 0.10, 1, 0.84))
     pdf.savefig(figure, bbox_inches="tight")
     plt.close(figure)
 
@@ -414,17 +505,9 @@ def main() -> None:
             pdf, "OB3D depth", ["raw abs-rel", "scale abs-rel", "affine abs-rel"], models, table, "Lower is better"
         )
         bar_page(pdf, records)
-        dtu = rows_by_suite(records, "dtu")
-        models, table = pivot(dtu, lambda row: row["recall"]["recall"][3])
-        table_page(
-            pdf,
-            "DTU scan24 recall",
-            ["raw @5mm", "scale @5mm", "affine @5mm"],
-            models,
-            table,
-            "Visibility-corrected; higher is better",
-        )
+        recall_curve_page(pdf, records, "dtu")
         tnt = rows_by_suite(records, "tnt")
+        recall_curve_page(pdf, records, "tnt")
         models, table = pivot(tnt, lambda row: row["surface"].get("fscore", [None])[0])
         table_page(
             pdf,
