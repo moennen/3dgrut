@@ -180,7 +180,7 @@ SplatRaster::SplatRaster(const nlohmann::json& config)
 SplatRaster::~SplatRaster(void) {
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
                    torch::Tensor particleDensity,
                    torch::Tensor particleRadiance,
@@ -227,6 +227,13 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
 #else
     torch::Tensor rayHitDistanceSq = torch::empty({0}, opts);
 #endif
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+    // Always fp32: the appearance variance subtracts moments and needs more precision than
+    // the optional fp16 primary feature output provides.
+    torch::Tensor rayFeatureSq = torch::zeros({height, width, static_cast<int64_t>(RAY_FEATURE_DIM)}, opts);
+#else
+    torch::Tensor rayFeatureSq = torch::empty({0}, opts);
+#endif
 
     m_parameters.values.numParticles               = numParticles;
     m_parameters.values.radianceSphDegree          = numActiveFeatures;
@@ -269,7 +276,12 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         nullptr,
 #endif
 #if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
-        reinterpret_cast<float*>(voidDataPtr(rayHitDistanceSq))
+        reinterpret_cast<float*>(voidDataPtr(rayHitDistanceSq)),
+#else
+        nullptr,
+#endif
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+        reinterpret_cast<float*>(voidDataPtr(rayFeatureSq))
 #else
         nullptr
 #endif
@@ -281,8 +293,8 @@ SplatRaster::trace(uint32_t frameNumber, int numActiveFeatures,
         timer->stop();
     }
 
-    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(
-        rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility, rayHitNormal, rayHitDistanceSq);
+    return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>(
+        rayRadianceDensity, rayHitDistance, rayHitCount, particleVisibility, rayHitNormal, rayHitDistanceSq, rayFeatureSq);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
@@ -305,7 +317,9 @@ SplatRaster::traceBwd(uint32_t frameNumber, int numActiveFeatures,
                       torch::Tensor rayHitNormal,
                       torch::Tensor rayHitNormalGradient,
                       torch::Tensor rayHitDistanceSq,
-                      torch::Tensor rayHitDistanceSqGradient) {
+                      torch::Tensor rayHitDistanceSqGradient,
+                      torch::Tensor rayFeatureSq,
+                      torch::Tensor rayFeatureSqGradient) {
 
     const int cudaDeviceIndex = rayOrigin.get_device();
     cudaStream_t cudaStream   = at::cuda::getCurrentCUDAStream(cudaDeviceIndex);
@@ -377,7 +391,14 @@ SplatRaster::traceBwd(uint32_t frameNumber, int numActiveFeatures,
 #endif
 #if GAUSSIAN_ENABLE_HIT_DISTANCE_SQ
         reinterpret_cast<const float*>(voidDataPtr(rayHitDistanceSq)),
-        reinterpret_cast<const float*>(voidDataPtr(rayHitDistanceSqGradient))
+        reinterpret_cast<const float*>(voidDataPtr(rayHitDistanceSqGradient)),
+#else
+        nullptr,
+        nullptr,
+#endif
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+        reinterpret_cast<const float*>(voidDataPtr(rayFeatureSq)),
+        reinterpret_cast<const float*>(voidDataPtr(rayFeatureSqGradient))
 #else
         nullptr,
         nullptr

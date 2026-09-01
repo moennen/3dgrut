@@ -133,6 +133,25 @@ void integrateRadianceFromBuffer<let backToFront : bool>(no_diff float3 incident
                                                  integratedRadiance);
 }
 
+[BackwardDifferentiable][ForceInline]
+void integrateSquaredRadianceFromBuffer<let backToFront : bool>(no_diff float3 incidentDirection,
+                                                                no_diff uint32_t sphDegree,
+                                                                float weight,
+                                                                no_diff uint32_t particleIdx,
+                                                                no_diff ParametersBuffer parametersBuffer,
+                                                                inout vector<float, Dim> integratedRadiance)
+{
+    if (weight > 0.0f)
+    {
+        const vector<float, Dim> radiance = radianceFromBuffer(particleIdx, incidentDirection, sphDegree, parametersBuffer);
+        const vector<float, Dim> squaredRadiance = radiance * radiance;
+        if (backToFront)
+            integratedRadiance = lerp(integratedRadiance, squaredRadiance, weight);
+        else
+            integratedRadiance += squaredRadiance * weight;
+    }
+}
+
 } // namespace shRadiativeParticle
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -302,6 +321,55 @@ inline void particleFeaturesIntegrateFwdFromBuffer(
             integratedFeaturesDiff);
 
         [ForceUnroll] for (int i = 0; i < shRadiativeParticle.Dim; ++i) {
+            integratedFeaturesGrad[i] = integratedFeaturesDiff.getDifferential()[i];
+        }
+        alphaGrad += alphaDiff.getDifferential();
+    }
+}
+
+[CudaDeviceExport] void particleFeaturesSquaredIntegrateBwdToBuffer(
+    in float3 incidentDirection,
+    in float3 canonicalPosition,
+    inout float3 canonicalPositionGrad,
+    in float alpha,
+    inout float alphaGrad,
+    in uint32_t particleIdx,
+    in float *featuresBufferPtr,
+    in float *featuresBufferGradPtr,
+    in int auxParam,
+    in bool exclusiveGradient,
+    in float features[shRadiativeParticle.Dim],
+    inout float integratedFeatures[shRadiativeParticle.Dim],
+    inout float integratedFeaturesGrad[shRadiativeParticle.Dim])
+{
+    if (alpha > 0.0f)
+    {
+        shRadiativeParticle.ParametersBuffer parametersBuffer;
+        parametersBuffer._dataPtr = (Ptr<vector<float, 3>, Access.Read>)featuresBufferPtr;
+        parametersBuffer._gradPtr = (vector<float, 3>*)featuresBufferGradPtr;
+        parametersBuffer.exclusiveGradient = exclusiveGradient;
+
+        DifferentialPair<float> alphaDiff = DifferentialPair<float>(alpha, alphaGrad);
+        const float weight = 1.0f / (1.0f - alpha);
+        vector<float, shRadiativeParticle.Dim> integratedFeaturesVec;
+        vector<float, shRadiativeParticle.Dim> integratedFeaturesGradVec;
+        [ForceUnroll] for (int i = 0; i < shRadiativeParticle.Dim; ++i) {
+            integratedFeaturesVec[i] = (integratedFeatures[i] - features[i] * features[i] * alpha) * weight;
+            integratedFeaturesGradVec[i] = integratedFeaturesGrad[i];
+        }
+        DifferentialPair<vector<float, shRadiativeParticle.Dim>> integratedFeaturesDiff =
+            DifferentialPair<vector<float, shRadiativeParticle.Dim>>(integratedFeaturesVec, integratedFeaturesGradVec);
+
+        bwd_diff(shRadiativeParticle.integrateSquaredRadianceFromBuffer<true>)(
+            incidentDirection,
+            auxParam,
+            alphaDiff,
+            particleIdx,
+            parametersBuffer,
+            integratedFeaturesDiff);
+
+        [ForceUnroll] for (int i = 0; i < shRadiativeParticle.Dim; ++i) {
+            integratedFeatures[i] = integratedFeaturesVec[i];
             integratedFeaturesGrad[i] = integratedFeaturesDiff.getDifferential()[i];
         }
         alphaGrad += alphaDiff.getDifferential();

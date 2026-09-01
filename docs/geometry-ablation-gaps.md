@@ -6,17 +6,19 @@ and DTU/TnT surface metrics. It also has an opacity-weighted **depth variance** 
 (`loss.use_depth_variance`), although it is disabled by default and currently requires the 3DGUT
 second-moment buffer. A full state-of-the-art ablation still needs:
 
-- Plane-intersection (unbiased) depth/normal rasterization, separate from alpha-blended expected
-  ray depth, plus its gradient tests.
+- Plane-intersection (unbiased) depth/normal rasterization for ellipsoids, separate from
+  alpha-blended expected ray depth, plus its gradient tests. Trisurfel hit depth already uses
+  its local ray--plane intersection; the remaining issue is the final alpha blend.
 - Edge-aware local planar loss and multi-view reprojection/NCC consistency with visibility checks.
 - Frozen compressed image-feature supervision is now available: cached DINOv2 or C-RADIOv4 maps,
   frozen PCA or nonlinear autoencoder compression, a direction-free NHT feature head, and an
   alpha-aware low-resolution cosine loss alongside RGB. Remaining work is DINOv3 support, feature
   pyramids, a robust cosine/Charbonnier residual, and sweeps of loss weight, target resolution,
   and RGB-only versus RGB-plus-feature supervision across seeds.
-- Ray-distribution appearance and orientation regularizers: per-ray colour variance and
-  normal-direction variance, with tests that distinguish a genuinely mixed ray from a sharp
-  surface. The current depth-variance term only constrains ray distance.
+- Quantile/median surface location and a sweep of the now-available ray-distribution terms:
+  depth variance, normal-direction variance, and appearance variance. The latter is exactly
+  RGB variance for SH and pre-decoder latent-feature variance for NHT, is primitive-agnostic,
+  and requires `render.enable_appearance_variance=true` under 3DGUT.
 - A robust surface-location renderer: opacity-weighted median/quantile depth (and, if useful,
   a corresponding quantile normal) as an alternative to expected depth. This needs a
   differentiable or suitably straight-through cumulative-opacity implementation and a direct

@@ -15,6 +15,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from threedgrut.utils.geometry_supervision import (
+    check_appearance_variance_is_rendered,
     check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
@@ -106,3 +107,31 @@ def test_runs_without_the_variance_term_are_untouched(method: str, enable_depth_
     check_depth_variance_is_rendered(
         _variance_conf(use_depth_variance=False, enable_depth_variance=enable_depth_variance, method=method)
     )
+
+
+@pytest.mark.parametrize(
+    "method,enabled,message",
+    [
+        ("3dgut", False, "render.enable_appearance_variance is false"),
+        ("3dgrt", True, "3DGUT-only"),
+    ],
+)
+def test_appearance_variance_requires_its_3dgut_second_moment(method: str, enabled: bool, message: str) -> None:
+    conf = OmegaConf.create(
+        {
+            "render": {"method": method, "enable_appearance_variance": enabled},
+            "loss": {"use_appearance_variance": True},
+        }
+    )
+    with pytest.raises(ValueError, match=message):
+        check_appearance_variance_is_rendered(conf)
+
+
+def test_appearance_variance_accepts_enabled_3dgut():
+    conf = OmegaConf.create(
+        {
+            "render": {"method": "3dgut", "enable_appearance_variance": True},
+            "loss": {"use_appearance_variance": True},
+        }
+    )
+    check_appearance_variance_is_rendered(conf)

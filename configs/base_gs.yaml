@@ -245,6 +245,14 @@ loss:
   lambda_normal_variance: 0.0
   normal_variance_from_iter: 7000
 
+  # Relative per-ray appearance variance. It uses the renderer's actual per-hit vector:
+  # RGB in SH mode and NHT's pre-decoder latent feature in NHT mode, so no nonlinear decoder
+  # approximation is involved. Needs render.enable_appearance_variance and 3DGUT. It applies
+  # identically to ellipsoids and trisurfels, and is held until geometry is roughly settled.
+  use_appearance_variance: false
+  lambda_appearance_variance: 0.0
+  appearance_variance_from_iter: 7000
+
   # Ordinal supervision from a monocular pseudo-depth prior: penalises pixel pairs the render
   # orders opposite to the prior, and nothing else. Reads only the sign of the prior's
   # differences, so it is invariant to any increasing transform of it and needs no alignment.

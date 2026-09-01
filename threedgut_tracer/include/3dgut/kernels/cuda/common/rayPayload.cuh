@@ -116,6 +116,14 @@ struct RayPayload : TOptionalNormal {
     float hitTSq;
 #endif
 
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+    // Per-channel second raw moment of the same alpha-composited appearance vector as
+    // `features`: sum(w * f^2).  `features` is RGB for SH and the latent ray feature for
+    // NHT, so this stays an appearance statistic rather than a renderer-specific colour
+    // special case.
+    tcnn::vec<FeatN> featuresSq;
+#endif
+
     __device__ __forceinline__ bool isAlive() const {
         return flags & Alive;
     }
@@ -160,6 +168,9 @@ __device__ __inline__ RayPayloadT initializeRay(const threedgut::RenderParameter
     ray.hitT          = 0.0f;
     ray.transmittance = 1.0f;
     ray.features      = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+    ray.featuresSq    = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#endif
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
     ray.normalVec = tcnn::vec3(0.0f);
 #endif
@@ -217,6 +228,9 @@ __device__ __inline__ RayPayloadT initializeRayPerPixel(const threedgut::RenderP
     ray.hitT          = 0.0f;
     ray.transmittance = 1.0f;
     ray.features      = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+    ray.featuresSq    = tcnn::vec<RayPayloadT::FeatDim>::zero();
+#endif
 #if GAUSSIAN_PARTICLE_ENABLE_NORMAL
     ray.normal.vec = tcnn::vec3(0.0f);
 #endif
@@ -251,7 +265,8 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
                                        TFeatureDensityElem* __restrict__ featureDensityPtr,
                                        const tcnn::mat4x3& sensorToWorldTransform,
                                        tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr,
-                                       float* __restrict__ worldHitDistanceSqPtr = nullptr) {
+                                       float* __restrict__ worldHitDistanceSqPtr = nullptr,
+                                       float* __restrict__ worldFeatureSqPtr = nullptr) {
     if (!ray.isValid()) {
         return;
     }
@@ -279,6 +294,16 @@ __device__ __inline__ void finalizeRay(const TRayPayload& ray,
     // opacity needed to normalize both moments is already available.
     if (worldHitDistanceSqPtr != nullptr) {
         worldHitDistanceSqPtr[ray.idx] = ray.hitTSq;
+    }
+#endif
+
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+    if (worldFeatureSqPtr != nullptr) {
+        const uint32_t featureBase = ray.idx * RAY_FEATURE_DIM;
+#pragma unroll
+        for (int i = 0; i < TRayPayload::FeatDim; ++i) {
+            worldFeatureSqPtr[featureBase + i] = ray.featuresSq[i];
+        }
     }
 #endif
 

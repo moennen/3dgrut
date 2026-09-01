@@ -165,23 +165,55 @@ struct GUTKBufferRenderer : Params {
             float hitAlphaGrad               = 0.f;
             float3 canonicalIntersectionGrad = make_float3(0.f, 0.f, 0.f);
             if constexpr (Params::PerRayParticleFeatures) {
+                const TFeaturesVec hitFeatures =
+                    particles.featuresFromBuffer(hitParticle.idx, ray.direction, hitParticle.canonicalIntersection);
                 particles.featuresIntegrateBwdToBuffer<false>(ray.direction,
                                                               hitParticle.canonicalIntersection,
                                                               canonicalIntersectionGrad,
                                                               hitParticle.alpha,
                                                               hitAlphaGrad,
                                                               hitParticle.idx,
-                                                              particles.featuresFromBuffer(hitParticle.idx, ray.direction, hitParticle.canonicalIntersection),
+                                                              hitFeatures,
                                                               ray.featuresBackward,
                                                               ray.featuresGradient);
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+                particles.featuresSquaredIntegrateBwdToBuffer<false>(ray.direction,
+                                                                      hitParticle.canonicalIntersection,
+                                                                      canonicalIntersectionGrad,
+                                                                      hitParticle.alpha,
+                                                                      hitAlphaGrad,
+                                                                      hitParticle.idx,
+                                                                      hitFeatures,
+                                                                      ray.featuresSqBackward,
+                                                                      ray.featuresSqGradient);
+#endif
             } else {
                 TFeaturesVec particleFeaturesGradientVec = TFeaturesVec::zero();
+                const TFeaturesVec hitFeatures = tcnn::max(particleFeatures[hitParticle.idx], 0.f);
                 particles.featuresIntegrateBwd(hitParticle.alpha,
                                                hitAlphaGrad,
-                                               tcnn::max(particleFeatures[hitParticle.idx], 0.f),
+                                               hitFeatures,
                                                particleFeaturesGradientVec,
                                                ray.featuresBackward,
                                                ray.featuresGradient);
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+                TFeaturesVec hitFeaturesSq = TFeaturesVec::zero();
+                TFeaturesVec hitFeaturesSqGradient = TFeaturesVec::zero();
+#pragma unroll
+                for (int i = 0; i < Particles::RayFeatureDim; ++i) {
+                    hitFeaturesSq[i] = hitFeatures[i] * hitFeatures[i];
+                }
+                particles.featuresIntegrateBwd(hitParticle.alpha,
+                                               hitAlphaGrad,
+                                               hitFeaturesSq,
+                                               hitFeaturesSqGradient,
+                                               ray.featuresSqBackward,
+                                               ray.featuresSqGradient);
+#pragma unroll
+                for (int i = 0; i < Particles::RayFeatureDim; ++i) {
+                    particleFeaturesGradientVec[i] += 2.0f * hitFeatures[i] * hitFeaturesSqGradient[i];
+                }
+#endif
 #pragma unroll
                 for (int i = 0; i < Particles::RayFeatureDim; ++i) {
                     atomicAdd(&(particleFeaturesGradient[hitParticle.idx][i]), particleFeaturesGradientVec[i]);
@@ -229,15 +261,19 @@ struct GUTKBufferRenderer : Params {
             // `if constexpr` branches so the SH specialization of Hit (which
             // has no `canonicalIntersection` member) is not instantiated with
             // a missing field reference.
+            TFeaturesVec hitFeatures;
             if constexpr (Params::PerRayParticleFeatures) {
-                particles.featureIntegrateFwd(hitWeight,
-                                              particles.featuresFromBuffer(hitParticle.idx, ray.direction, hitParticle.canonicalIntersection),
-                                              ray.features);
+                hitFeatures = particles.featuresFromBuffer(hitParticle.idx, ray.direction, hitParticle.canonicalIntersection);
             } else {
-                particles.featureIntegrateFwd(hitWeight,
-                                              tcnn::max(particleFeatures[hitParticle.idx], 0.f),
-                                              ray.features);
+                hitFeatures = tcnn::max(particleFeatures[hitParticle.idx], 0.f);
             }
+            particles.featureIntegrateFwd(hitWeight, hitFeatures, ray.features);
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+#pragma unroll
+            for (int i = 0; i < Particles::RayFeatureDim; ++i) {
+                ray.featuresSq[i] += hitWeight * hitFeatures[i] * hitFeatures[i];
+            }
+#endif
 
             if (hitWeight > 0.0f)
                 ray.countHit();
@@ -638,6 +674,18 @@ struct GUTKBufferRenderer : Params {
                                                                       ray.featuresBackward,
                                                                       ray.featuresGradient,
                                                                       featureLocalGrad);
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+                            particles.featuresSquaredIntegrateBwdToLocalGrad(ray.direction,
+                                                                              canonicalIntersection,
+                                                                              canonicalIntersectionGrad,
+                                                                              hitAlpha,
+                                                                              hitAlphaGrad,
+                                                                              particleData.idx,
+                                                                              hitFeatures,
+                                                                              ray.featuresSqBackward,
+                                                                              ray.featuresSqGradient,
+                                                                              featureLocalGrad);
+#endif
 
                             particles.template densityProcessHitBwdToBuffer<false>(ray.origin,
                                                                                    ray.direction,
@@ -718,7 +766,7 @@ struct GUTKBufferRenderer : Params {
                     TFeaturesVec featuresGrad = TFeaturesVec::zero();
 
                     if (ray.isAlive()) {
-#if GAUSSIAN_PARTICLE_ENABLE_NORMAL
+#if GAUSSIAN_PARTICLE_ENABLE_NORMAL || GAUSSIAN_ENABLE_FEATURE_SQ
                         // Normal-aware split backward. The fused `processHitBwd` carries no
                         // normal, so when normals are compiled in we re-evaluate the hit and
                         // back-prop features and density separately -- the same steps as
@@ -728,7 +776,7 @@ struct GUTKBufferRenderer : Params {
                         float hitAlpha                           = 0.0f;
                         float hitT                               = 0.0f;
                         float3 canonicalIntersection             = make_float3(0.f, 0.f, 0.f);
-                        OptionalNormal<true> hitNormal;
+                        OptionalNormal<GAUSSIAN_PARTICLE_ENABLE_NORMAL> hitNormal;
                         if (particles.densityHit(ray.origin, ray.direction, cookedParameters,
                                                  hitAlpha, hitT, canonicalIntersection, hitNormal.normalPtr()) &&
                             (hitT > ray.tMinMax.x) && (hitT < ray.tMinMax.y)) {
@@ -742,6 +790,25 @@ struct GUTKBufferRenderer : Params {
                                                            featuresGrad,
                                                            ray.featuresBackward,
                                                            ray.featuresGradient);
+
+#if GAUSSIAN_ENABLE_FEATURE_SQ
+                            TFeaturesVec featuresSq = TFeaturesVec::zero();
+                            TFeaturesVec featuresSqGrad = TFeaturesVec::zero();
+#pragma unroll
+                            for (int i = 0; i < Particles::RayFeatureDim; ++i) {
+                                featuresSq[i] = particleData.features[i] * particleData.features[i];
+                            }
+                            particles.featuresIntegrateBwd(hitAlpha,
+                                                           hitAlphaGrad,
+                                                           featuresSq,
+                                                           featuresSqGrad,
+                                                           ray.featuresSqBackward,
+                                                           ray.featuresSqGradient);
+#pragma unroll
+                            for (int i = 0; i < Particles::RayFeatureDim; ++i) {
+                                featuresGrad[i] += 2.0f * particleData.features[i] * featuresSqGrad[i];
+                            }
+#endif
 
                             particles.densityProcessHitBwdToRawParameters(ray.origin,
                                                                           ray.direction,

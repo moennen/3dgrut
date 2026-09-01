@@ -83,7 +83,8 @@ public:
                          int cudaDeviceIndex,
                          cudaStream_t cudaStream,
                          tcnn::vec3* worldHitNormalCudaPtr = nullptr,
-                         float* worldHitDistanceSqCudaPtr  = nullptr);
+                         float* worldHitDistanceSqCudaPtr  = nullptr,
+                         float* worldFeatureSqCudaPtr      = nullptr);
 
     Status renderBackward(const RenderParameters& params,
                           const tcnn::vec3* sensorRayOriginCudaPtr,
@@ -100,7 +101,9 @@ public:
                           const tcnn::vec3* worldHitNormalCudaPtr         = nullptr,
                           const tcnn::vec3* worldHitNormalGradientCudaPtr = nullptr,
                           const float* worldHitDistanceSqCudaPtr          = nullptr,
-                          const float* worldHitDistanceSqGradientCudaPtr  = nullptr);
+                          const float* worldHitDistanceSqGradientCudaPtr  = nullptr,
+                          const float* worldFeatureSqCudaPtr              = nullptr,
+                          const float* worldFeatureSqGradientCudaPtr      = nullptr);
 };
 
 } // namespace threedgut

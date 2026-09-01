@@ -39,6 +39,7 @@ from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.optimizers import SelectiveAdam
 from threedgrut.render import Renderer
 from threedgrut.strategy.base import BaseStrategy
+from threedgrut.utils.appearance_variance_loss import appearance_feature_variance_loss
 from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.depth_variance_loss import depth_variance_loss
 from threedgrut.utils.image_feature_loss import image_feature_loss
@@ -820,6 +821,26 @@ class Trainer3DGRUT:
                 )
                 lambda_normal_variance = self.conf.loss.lambda_normal_variance
 
+        # Appearance dispersion uses exactly the vector composited by the renderer: RGB for
+        # SH and the pre-decoder feature vector for NHT.  It therefore sharpens multi-layer
+        # rays without assuming a particular primitive or an RGB decoder.
+        loss_appearance_variance = torch.zeros(1, device=self.device)
+        lambda_appearance_variance = 0.0
+        if (
+            self.conf.loss.use_appearance_variance
+            and not self._in_color_refine
+            and self.global_step >= self.conf.loss.appearance_variance_from_iter
+        ):
+            with torch.cuda.nvtx.range("loss-appearance-variance"):
+                # NHT replaces pred_features with decoded RGB for the photometric loss, but
+                # its second moment belongs to the pre-decoder vector saved as pred_latent.
+                # SH has no decoder and therefore uses pred_features directly.
+                appearance_features = outputs.get("pred_latent", outputs["pred_features"])
+                loss_appearance_variance, _ = appearance_feature_variance_loss(
+                    appearance_features, outputs["pred_feature_sq"], outputs["pred_opacity"]
+                )
+                lambda_appearance_variance = self.conf.loss.lambda_appearance_variance
+
         # Ordinal pseudo-depth supervision. Not gated on settled geometry like the two terms
         # above: it constrains *where* surfaces are rather than how sharp they are, which is
         # most useful before the geometry commits.
@@ -935,6 +956,7 @@ class Trainer3DGRUT:
             + lambda_depth_normal * loss_depth_normal
             + lambda_depth_variance * loss_depth_variance
             + lambda_normal_variance * loss_normal_variance
+            + lambda_appearance_variance * loss_appearance_variance
             + lambda_pseudo_depth * loss_pseudo_depth
             + lambda_pseudo_depth_l1 * loss_pseudo_depth_l1
             + lambda_image_features * loss_image_features
@@ -950,6 +972,7 @@ class Trainer3DGRUT:
             depth_normal_loss=lambda_depth_normal * loss_depth_normal,
             depth_variance_loss=lambda_depth_variance * loss_depth_variance,
             normal_variance_loss=lambda_normal_variance * loss_normal_variance,
+            appearance_variance_loss=lambda_appearance_variance * loss_appearance_variance,
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
             pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
             image_features_loss=lambda_image_features * loss_image_features,
@@ -1104,6 +1127,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_normal_variance:
                 normal_variance = np.mean(batch_metrics["losses"]["normal_variance_loss"])
                 writer.add_scalar("loss/normal_variance/train", normal_variance, global_step)
+            if self.conf.loss.use_appearance_variance:
+                appearance_variance = np.mean(batch_metrics["losses"]["appearance_variance_loss"])
+                writer.add_scalar("loss/appearance_variance/train", appearance_variance, global_step)
             if self.conf.loss.use_pseudo_depth_order:
                 pseudo_depth = np.mean(batch_metrics["losses"]["pseudo_depth_order_loss"])
                 writer.add_scalar("loss/pseudo_depth_order/train", pseudo_depth, global_step)

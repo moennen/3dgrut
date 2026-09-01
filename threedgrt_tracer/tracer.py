@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from threedgrut.datasets.protocols import Batch
 from threedgrut.model.features import Features
 from threedgrut.utils.geometry_supervision import (
+    check_appearance_variance_is_rendered,
     check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
@@ -83,6 +84,7 @@ def check_normal_supervision_supported(conf) -> None:
     check_normals_are_rendered(conf)
     check_flatness_applies(conf)
     check_depth_variance_is_rendered(conf)
+    check_appearance_variance_is_rendered(conf)
     if not (
         OmegaConf.select(conf, "loss.use_depth_normal", default=False)
         or OmegaConf.select(conf, "loss.use_normal_variance", default=False)

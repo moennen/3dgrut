@@ -253,6 +253,29 @@ void integrateFeaturesFromBuffer<let backToFront : bool>(float weight,
     }
 }
 
+// Same alpha compositing as `integrateFeatures`, but for the per-channel second
+// moment.  Keeping this in the feature model means NHT differentiates through its
+// interpolation/activation before the external decoder, while SH differentiates its RGB.
+[BackwardDifferentiable][ForceInline]
+void integrateSquaredFeaturesFromBuffer<let backToFront : bool>(float weight,
+                                                                no_diff uint32_t particleIdx,
+                                                                ParametersBuffer parametersBuffer,
+                                                                float3 canonicalPosition,
+                                                                inout float integratedFeatures[RayFeatureDim])
+{
+    if (weight > 0.0f) {
+        Array<float, RayFeatureDim> features;
+        featuresFromParametersBuffer(parametersBuffer, particleIdx, canonicalPosition, features);
+        [ForceUnroll] for (int i = 0; i < RayFeatureDim; ++i) {
+            const float squaredFeature = features[i] * features[i];
+            if (backToFront)
+                integratedFeatures[i] = lerp(integratedFeatures[i], squaredFeature, weight);
+            else
+                integratedFeatures[i] += squaredFeature * weight;
+        }
+    }
+}
+
 } // namespace neuralHarmonicFeaturesParticle
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -388,5 +411,49 @@ inline void particleFeaturesIntegrateFwdFromBuffer(
         alphaGrad = alphaDiff.getDifferential();
         featuresGrad = featuresDiff.getDifferential();
         integratedFeaturesGrad = integratedFeaturesDiff.getDifferential();
+    }
+}
+
+[CudaDeviceExport] void particleFeaturesSquaredIntegrateBwdToBuffer(
+    in float3 incidentDirection,
+    in float3 canonicalPosition,
+    inout float3 canonicalPositionGrad,
+    in float alpha,
+    inout float alphaGrad,
+    in uint32_t particleIdx,
+    in feat_elem_t *featuresBufferPtr,
+    in float *featuresBufferGradPtr,
+    in int auxParam,
+    in bool exclusiveGradient,
+    in float features[neuralHarmonicFeaturesParticle.RayFeatureDim],
+    inout float integratedFeatures[neuralHarmonicFeaturesParticle.RayFeatureDim],
+    inout float integratedFeaturesGrad[neuralHarmonicFeaturesParticle.RayFeatureDim])
+{
+    if (alpha > 0.0f)
+    {
+        neuralHarmonicFeaturesParticle.ParametersBuffer parametersBuffer;
+        parametersBuffer._dataPtr = (Ptr<feat_elem_t, Access.Read>)featuresBufferPtr;
+        parametersBuffer._gradPtr = (Ptr<float, Access.ReadWrite>)featuresBufferGradPtr;
+        parametersBuffer.exclusiveGradient = exclusiveGradient;
+
+        DifferentialPair<float> alphaDiff = DifferentialPair<float>(alpha, alphaGrad);
+        const float weight = 1.0f / (1.0f - alpha);
+        [ForceUnroll] for (int i = 0; i < neuralHarmonicFeaturesParticle.RayFeatureDim; ++i) {
+            integratedFeatures[i] = (integratedFeatures[i] - features[i] * features[i] * alpha) * weight;
+        }
+        DifferentialPair<float[neuralHarmonicFeaturesParticle.RayFeatureDim]> integratedFeaturesDiff =
+            DifferentialPair<float[neuralHarmonicFeaturesParticle.RayFeatureDim]>(integratedFeatures, integratedFeaturesGrad);
+        DifferentialPair<float3> canonicalPositionDiff = DifferentialPair<float3>(canonicalPosition, canonicalPositionGrad);
+
+        bwd_diff(neuralHarmonicFeaturesParticle.integrateSquaredFeaturesFromBuffer<true>)(
+            alphaDiff,
+            particleIdx,
+            parametersBuffer,
+            canonicalPositionDiff,
+            integratedFeaturesDiff);
+
+        integratedFeaturesGrad = integratedFeaturesDiff.getDifferential();
+        canonicalPositionGrad += canonicalPositionDiff.getDifferential();
+        alphaGrad += alphaDiff.getDifferential();
     }
 }

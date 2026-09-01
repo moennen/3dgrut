@@ -48,7 +48,7 @@ public:
 
     ~SplatRaster();
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
     trace(uint32_t frameNumber, int numActiveFeatures,
           // Particles
           torch::Tensor particleDensity,
@@ -87,7 +87,9 @@ public:
              torch::Tensor rayHitNormal,
              torch::Tensor rayHitNormalGradient,
              torch::Tensor rayHitDistanceSq,
-             torch::Tensor rayHitDistanceSqGradient);
+             torch::Tensor rayHitDistanceSqGradient,
+             torch::Tensor rayFeatureSq,
+             torch::Tensor rayFeatureSqGradient);
 
     std::map<std::string, float>
     collectTimes();

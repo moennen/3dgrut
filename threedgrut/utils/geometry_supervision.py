@@ -82,6 +82,31 @@ def check_depth_variance_is_rendered(conf) -> None:
         )
 
 
+def check_appearance_variance_is_rendered(conf) -> None:
+    """Reject an appearance-variance loss without its exact feature second moment.
+
+    The moment is deliberately defined before the NHT decoder: for SH it is RGB, while for
+    NHT it is the decoded-ray latent vector.  Both are accumulated in 3DGUT with the same
+    alpha weights as the primary appearance buffer.  Other renderers cannot substitute a
+    variance of their final RGB image because a nonlinear decoder would change the statistic.
+    """
+    if not OmegaConf.select(conf, "loss.use_appearance_variance", default=False):
+        return
+
+    method = OmegaConf.select(conf, "render.method", default="3dgut")
+    if method != "3dgut":
+        raise ValueError(
+            f"loss.use_appearance_variance is set with render.method={method}, which does not render "
+            "the appearance-feature second moment. The term is 3DGUT-only; use render.method=3dgut."
+        )
+    if not OmegaConf.select(conf, "render.enable_appearance_variance", default=False):
+        raise ValueError(
+            "loss.use_appearance_variance is set but render.enable_appearance_variance is false, so "
+            "the tracer returns an empty feature second-moment buffer. Set "
+            "render.enable_appearance_variance=true."
+        )
+
+
 def check_flatness_applies(conf) -> None:
     """Reject the flatness penalty on a primitive that is already flat.
 

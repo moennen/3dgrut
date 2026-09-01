@@ -19,6 +19,7 @@ import os
 from threedgrut.model.features import Features
 from threedgrut.utils import jit
 from threedgrut.utils.geometry_supervision import (
+    check_appearance_variance_is_rendered,
     check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
@@ -31,6 +32,7 @@ def setup_3dgut(conf):
     check_normals_are_rendered(conf)
     check_flatness_applies(conf)
     check_depth_variance_is_rendered(conf)
+    check_appearance_variance_is_rendered(conf)
 
     # The load-balanced kernel accumulates in a warp-cooperative loop that never touches
     # the normal accumulator, so combining the two would silently yield all-zero normals.
@@ -50,6 +52,15 @@ def setup_3dgut(conf):
             "render.splat.fine_grained_load_balancing: the load-balanced kernel does not "
             "accumulate the hit-distance second moment and would return zeros. "
             "Disable one of the two."
+        )
+
+    if getattr(conf.render, "enable_appearance_variance", False) and getattr(
+        conf.render.splat, "fine_grained_load_balancing", False
+    ):
+        raise ValueError(
+            "render.enable_appearance_variance is not supported with "
+            "render.splat.fine_grained_load_balancing: the load-balanced kernel does not "
+            "accumulate the feature second moment and would return zeros. Disable one of the two."
         )
 
     include_paths = []
@@ -94,6 +105,7 @@ def setup_3dgut(conf):
         f"-DGAUSSIAN_PARTICLE_MAX_ALPHA={conf.render.particle_kernel_max_alpha}",
         f"-DGAUSSIAN_PARTICLE_ENABLE_NORMAL={to_cpp_bool(conf.render.enable_normals)}",
         f"-DGAUSSIAN_ENABLE_HIT_DISTANCE_SQ={to_cpp_bool(getattr(conf.render, 'enable_depth_variance', False))}",
+        f"-DGAUSSIAN_ENABLE_FEATURE_SQ={to_cpp_bool(getattr(conf.render, 'enable_appearance_variance', False))}",
         f"-DGAUSSIAN_PARTICLE_SURFEL={to_cpp_bool(conf.render.primitive_type=='trisurfel')}",
         f"-DGAUSSIAN_MIN_TRANSMITTANCE_THRESHOLD={conf.render.min_transmittance}",
         f"-DGAUSSIAN_ENABLE_HIT_COUNT={to_cpp_bool(conf.render.enable_hitcounts)}",
@@ -164,6 +176,7 @@ def setup_3dgut(conf):
         f"_n{int(conf.render.enable_normals)}"
         f"_s{int(conf.render.primitive_type == 'trisurfel')}"
         f"_v{int(getattr(conf.render, 'enable_depth_variance', False))}"
+        f"_a{int(getattr(conf.render, 'enable_appearance_variance', False))}"
         f"_kb{conf.render.splat.k_buffer_size}"
     )
     build_dir = jit.variant_build_directory("lib3dgut_cc", cflags + cuda_cflags, label=label, verbose=True)

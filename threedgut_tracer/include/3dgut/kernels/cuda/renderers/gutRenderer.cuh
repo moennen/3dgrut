@@ -95,7 +95,8 @@ __global__ void render(threedgut::RenderParameters params,
                        const float* __restrict__ particlesPrecomputedFeaturesPtr,
                        const uint64_t* __restrict__ parameterMemoryHandles,
                        tcnn::vec3* __restrict__ worldHitNormalPtr = nullptr,
-                       float* __restrict__ worldHitDistanceSqPtr  = nullptr) {
+                       float* __restrict__ worldHitDistanceSqPtr  = nullptr,
+                       float* __restrict__ worldFeatureSqPtr      = nullptr) {
 
     auto ray = initializeRay<TGUTRenderer::TRayPayload>(
         params, sensorRayOriginPtr, sensorRayDirectionPtr, sensorToWorldTransform);
@@ -114,7 +115,7 @@ __global__ void render(threedgut::RenderParameters params,
 
     // NB : finalize ray is not differentiable (has to be no-op when used in a differentiable renderer)
     finalizeRay(ray, params, sensorRayOriginPtr, worldHitCountPtr, worldHitDistancePtr, featureDensityPtr,
-                sensorToWorldTransform, worldHitNormalPtr, worldHitDistanceSqPtr);
+                sensorToWorldTransform, worldHitNormalPtr, worldHitDistanceSqPtr, worldFeatureSqPtr);
 }
 
 #if FINE_GRAINED_LOAD_BALANCING
@@ -255,7 +256,9 @@ __global__ NHT_BWD_LB void renderBackward(threedgut::RenderParameters params,
                                           const tcnn::vec3* __restrict__ worldHitNormalPtr         = nullptr,
                                           const tcnn::vec3* __restrict__ worldHitNormalGradientPtr = nullptr,
                                           const float* __restrict__ worldHitDistanceSqPtr          = nullptr,
-                                          const float* __restrict__ worldHitDistanceSqGradientPtr  = nullptr) {
+                                          const float* __restrict__ worldHitDistanceSqGradientPtr  = nullptr,
+                                          const float* __restrict__ worldFeatureSqPtr              = nullptr,
+                                          const float* __restrict__ worldFeatureSqGradientPtr      = nullptr) {
 
     auto ray = initializeBackwardRay<TGUTRenderer::TRayPayloadBackward>(params,
                                                                         sensorRayOriginPtr,
@@ -268,7 +271,9 @@ __global__ NHT_BWD_LB void renderBackward(threedgut::RenderParameters params,
                                                                         worldHitNormalPtr,
                                                                         worldHitNormalGradientPtr,
                                                                         worldHitDistanceSqPtr,
-                                                                        worldHitDistanceSqGradientPtr);
+                                                                        worldHitDistanceSqGradientPtr,
+                                                                        worldFeatureSqPtr,
+                                                                        worldFeatureSqGradientPtr);
 
     // TGUTModel::evalBackward(params, ray, {parameterMemoryHandles}, {parameterGradientMemoryHandles});
 

@@ -441,6 +441,37 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
         }
     }
 
+    // Back-propagate the alpha-composited second appearance moment through the same feature
+    // model as the primary appearance.  Thus this is RGB^2 for SH and latent-feature^2 for
+    // NHT, including NHT's canonical-position interpolation gradient.
+    template <bool exclusiveGradient>
+    __forceinline__ __device__ void featuresSquaredIntegrateBwdToBuffer(const tcnn::vec3& incidentDirection,
+                                                                         const float3& canonicalIntersection,
+                                                                         float3& canonicalIntersectionGrad,
+                                                                         float alpha,
+                                                                         float& alphaGrad,
+                                                                         uint32_t particleIdx,
+                                                                         const TFeaturesVec& features,
+                                                                         TFeaturesVec& integratedFeatures,
+                                                                         TFeaturesVec& integratedFeaturesGrad) const {
+        if constexpr (TDifferentiable) {
+            particleFeaturesSquaredIntegrateBwdToBuffer(
+                *reinterpret_cast<const float3*>(&incidentDirection),
+                canonicalIntersection,
+                &canonicalIntersectionGrad,
+                alpha,
+                &alphaGrad,
+                particleIdx,
+                reinterpret_cast<TFeatureRawParamPtr*>(m_featureRawParameters.ptr),
+                m_featureRawParameters.gradPtr,
+                m_featureActiveShDegree,
+                exclusiveGradient,
+                *reinterpret_cast<const FixedArray<float, RAY_FEATURE_DIM>*>(&features),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeatures),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeaturesGrad));
+        }
+    }
+
     // NHT warp reduction step 1: compute feature grad into a thread-private local buffer (no atomics).
     // featureLocalGrad must be zero-initialized (size ExtParams::ParticleFeatureDim) before calling.
     // Follow with featureLocalGradWarpReduceAndWrite (called by ALL warp threads) to write to global buffer.
@@ -468,6 +499,35 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                 featureLocalGrad,
                 m_featureActiveShDegree,
                 true, // exclusiveGradient=true → += without atomics
+                *reinterpret_cast<const FixedArray<float, RAY_FEATURE_DIM>*>(&features),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeatures),
+                reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeaturesGrad));
+        }
+    }
+
+    __forceinline__ __device__ void featuresSquaredIntegrateBwdToLocalGrad(const tcnn::vec3& incidentDirection,
+                                                                            const float3& canonicalIntersection,
+                                                                            float3& canonicalIntersectionGrad,
+                                                                            float alpha,
+                                                                            float& alphaGrad,
+                                                                            uint32_t particleIdx,
+                                                                            const TFeaturesVec& features,
+                                                                            TFeaturesVec& integratedFeatures,
+                                                                            TFeaturesVec& integratedFeaturesGrad,
+                                                                            float* featureLocalGrad) const {
+        if constexpr (TDifferentiable) {
+            const uint32_t particleOffset = particleIdx * ExtParams::ParticleFeatureDim;
+            particleFeaturesSquaredIntegrateBwdToBuffer(
+                *reinterpret_cast<const float3*>(&incidentDirection),
+                canonicalIntersection,
+                &canonicalIntersectionGrad,
+                alpha,
+                &alphaGrad,
+                0,
+                reinterpret_cast<TFeatureRawParamPtr*>(m_featureRawParameters.ptr) + particleOffset,
+                featureLocalGrad,
+                m_featureActiveShDegree,
+                true,
                 *reinterpret_cast<const FixedArray<float, RAY_FEATURE_DIM>*>(&features),
                 reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeatures),
                 reinterpret_cast<FixedArray<float, RAY_FEATURE_DIM>*>(&integratedFeaturesGrad));

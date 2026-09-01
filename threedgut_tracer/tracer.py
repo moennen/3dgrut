@@ -45,6 +45,7 @@ def _plugin_variant(conf) -> tuple:
         bool(conf.render.enable_normals),
         conf.render.primitive_type,
         bool(getattr(conf.render, "enable_depth_variance", False)),
+        bool(getattr(conf.render, "enable_appearance_variance", False)),
         conf.render.splat.k_buffer_size,
         bool(conf.render.splat.fine_grained_load_balancing),
     )
@@ -70,7 +71,7 @@ def load_3dgut_plugin(conf):
                 f"  loaded:    {_3dgut_plugin_variant}\n"
                 f"  requested: {variant}\n"
                 "(fields: particle_kernel_degree, enable_normals, primitive_type, "
-                "enable_depth_variance, k_buffer_size, fine_grained_load_balancing)\n"
+                "enable_depth_variance, enable_appearance_variance, k_buffer_size, fine_grained_load_balancing)\n"
                 "Reusing the loaded binary would silently render with the wrong kernel. Run "
                 "the two configurations in separate processes."
             )
@@ -214,6 +215,7 @@ class Tracer:
             sensor_params,
             sensor_poses,
             dist_sq_differentiable,
+            appearance_sq_differentiable,
         ):
             particle_density = torch.concat(
                 [mog_pos, mog_dns, mog_rot, mog_scl, torch.zeros_like(mog_dns)], dim=1
@@ -234,6 +236,7 @@ class Tracer:
                 mog_visibility,
                 ray_hit_normal,
                 ray_hit_distance_sq,
+                ray_feature_sq,
             ) = tracer_wrapper.trace(
                 frame_id,
                 n_active_features,
@@ -262,6 +265,7 @@ class Tracer:
                 ray_hit_normal,
                 # Likewise for the second moment.
                 ray_hit_distance_sq,
+                ray_feature_sq,
             )
 
             # The second moment only has a backward on the hand-written CUDA compositing
@@ -269,6 +273,8 @@ class Tracer:
             # loss built from it rather than silently returning a zero gradient.
             if not dist_sq_differentiable:
                 ctx.mark_non_differentiable(ray_hit_distance_sq)
+            if not appearance_sq_differentiable:
+                ctx.mark_non_differentiable(ray_feature_sq)
 
             ctx.frame_id = frame_id
             ctx.n_active_features = n_active_features
@@ -287,6 +293,7 @@ class Tracer:
                 # Empty unless render.enable_depth_variance is set; differentiable only on
                 # the configurations listed in Tracer._dist_sq_differentiable.
                 ray_hit_distance_sq,
+                ray_feature_sq,
             )
 
         @staticmethod
@@ -298,6 +305,7 @@ class Tracer:
             mog_visibility_grd_UNUSED,
             ray_hit_normal_grd,
             ray_hit_distance_sq_grd,  # None unless ctx.dist_sq_differentiable
+            ray_feature_sq_grd,
         ):
             (
                 ray_ori,
@@ -309,6 +317,7 @@ class Tracer:
                 particle_features,
                 ray_hit_normal,
                 ray_hit_distance_sq,
+                ray_feature_sq,
             ) = ctx.saved_variables
 
             # Autograd passes None when nothing downstream consumed the normals, and the
@@ -320,6 +329,8 @@ class Tracer:
             # explicit zero is what keeps it from adding a stale gradient.
             if ray_hit_distance_sq_grd is None:
                 ray_hit_distance_sq_grd = torch.zeros_like(ray_hit_distance_sq)
+            if ray_feature_sq_grd is None:
+                ray_feature_sq_grd = torch.zeros_like(ray_feature_sq)
 
             frame_id = ctx.frame_id
             n_active_features = ctx.n_active_features
@@ -347,6 +358,8 @@ class Tracer:
                 ray_hit_normal_grd.contiguous(),
                 ray_hit_distance_sq,
                 ray_hit_distance_sq_grd.contiguous(),
+                ray_feature_sq,
+                ray_feature_sq_grd.contiguous(),
             )
 
             mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, _ = torch.split(
@@ -368,6 +381,7 @@ class Tracer:
                 None,  # sensor_params
                 None,  # sensor_poses
                 None,  # dist_sq_differentiable
+                None,  # appearance_sq_differentiable
             )
 
     def __init__(self, conf):
@@ -389,6 +403,9 @@ class Tracer:
         Marking it non-differentiable turns that into a raise.
         """
         return bool(getattr(self.conf.render, "enable_depth_variance", False))
+
+    def _appearance_sq_differentiable(self) -> bool:
+        return bool(getattr(self.conf.render, "enable_appearance_variance", False))
 
     @property
     def timings(self):
@@ -412,6 +429,7 @@ class Tracer:
                 mog_visibility,
                 pred_normals,
                 pred_dist_sq,
+                pred_feature_sq,
             ) = Tracer._Autograd.apply(
                 self.tracer_wrapper,
                 frame_id,
@@ -426,6 +444,7 @@ class Tracer:
                 sensor,
                 poses,
                 self._dist_sq_differentiable(),
+                self._appearance_sq_differentiable(),
             )
 
             # pred_features_alpha is [..., RAY_FEATURE_DIM + 1]: features (fp32) + density
@@ -435,6 +454,8 @@ class Tracer:
             pred_dist = pred_dist.unsqueeze(0).contiguous()
             if pred_dist_sq.numel() > 0:
                 pred_dist_sq = pred_dist_sq.unsqueeze(0).contiguous()
+            if pred_feature_sq.numel() > 0:
+                pred_feature_sq = pred_feature_sq.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
             pred_normal_accum = pred_normals.unsqueeze(0).contiguous()
             pred_normals = self.__resolve_normals(pred_normals, pred_features)
@@ -446,6 +467,7 @@ class Tracer:
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
             "pred_dist_sq": pred_dist_sq,
+            "pred_feature_sq": pred_feature_sq,
             "pred_normal_accum": pred_normal_accum,
             "pred_normals": pred_normals,
             "hits_count": hits_count,

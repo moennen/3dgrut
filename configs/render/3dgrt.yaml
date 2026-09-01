@@ -21,6 +21,9 @@ enable_normals: false
 # loss.use_depth_variance can train against it. Left off by default: it costs a buffer and a
 # per-hit multiply-add, and nothing reads it unless asked.
 enable_depth_variance: false
+# Renders sum(w * f^2) for the exact alpha-composited appearance variance.  In 3DGUT `f`
+# is RGB for SH and the NHT pre-decoder latent feature vector; 3DGRT does not implement it.
+enable_appearance_variance: false
 enable_hitcounts: true
 enable_kernel_timings: false
 particle_feature_half: false
