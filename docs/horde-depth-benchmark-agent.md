@@ -7,6 +7,20 @@ and results below one writable work directory and retain the final result direct
 The initial run is deliberately bounded to OB3D `emerald-square`, DTU `scan24`, and TnT `Barn`.
 Do not copy complete dataset trees when only these scenes are evaluated.
 
+For a full-sequence sweep, use the resumable uploader from the source workstation instead. It
+copies all locally available OB3D (12), DTU (15 plus shared evaluation assets), and TnT GOF
+TrainingSet scenes (6): approximately 61 GiB of inputs. Reserve at least 100 GiB remotely.
+
+```bash
+cd /mnt/oss/3dgrut-bernardin
+scripts/benchmark/upload_full_datasets.sh --dry-run
+scripts/benchmark/upload_full_datasets.sh
+```
+
+It targets `/home/horde/data` by default, is additive (never deletes remote data), and resumes
+interrupted files with `rsync --append-verify`. Override the destination with `--remote-data` or
+the connection with `--remote` / `--proxy-jump` when needed.
+
 ## 1. Publish and fetch the exact branch
 
 On the source workstation, publish the clean current branch. Commits that have not been pushed
