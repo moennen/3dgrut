@@ -82,6 +82,12 @@ playground = [
 mesh = [
     "open3d>=0.18.0",
 ]
+foundation_features = [
+    # DINOv2 feature targets are loaded through Hugging Face; C-RADIOv4's official TorchHub
+    # entry point imports timm.  Neither is imported unless that backend has a cache miss.
+    "transformers>=4.46",
+    "timm>=1.0",
+]
 
 [tool.setuptools]
 include-package-data = true

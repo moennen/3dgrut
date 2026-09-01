@@ -96,7 +96,9 @@ class NVRadio4Backend:
     @torch.no_grad()
     def encode(self, image: np.ndarray) -> torch.Tensor:
         self._ensure_loaded()
-        pixels = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1).float().div_(255).unsqueeze(0)
+        # PIL-backed ``np.asarray`` images are read-only.  Copy before handing them to Torch,
+        # whose tensor otherwise advertises writable storage and emits an unsafe-storage warning.
+        pixels = torch.from_numpy(np.array(image, copy=True)).permute(2, 0, 1).float().div_(255).unsqueeze(0)
         pixels = pixels.to(self.device)
         supported_size = self._model.get_nearest_supported_resolution(*pixels.shape[-2:])
         pixels = F.interpolate(pixels, supported_size, mode="bilinear", align_corners=False)
