@@ -9,13 +9,11 @@ second-moment buffer. A full state-of-the-art ablation still needs:
 - Plane-intersection (unbiased) depth/normal rasterization, separate from alpha-blended expected
   ray depth, plus its gradient tests.
 - Edge-aware local planar loss and multi-view reprojection/NCC consistency with visibility checks.
-- Frozen compressed image-feature supervision alongside RGB photometric loss: extract low-resolution,
-  spatial features from a foundation encoder (for example DINOv2/DINOv3 or NVIDIA Radio 4), render
-  a compact per-Gaussian feature field, and use a robust cosine/Charbonnier feature residual where
-  RGB is ambiguous. This needs cached feature pyramids, a feature-dimension/projection choice,
-  visibility/alpha masking, and an ablation over encoder, feature resolution, loss weight, and
-  RGB-only versus RGB-plus-feature supervision. The encoder must remain frozen so this is a robust
-  reconstruction data term rather than a jointly learned appearance encoder that can collapse.
+- Frozen compressed image-feature supervision is now available: cached DINOv2 or C-RADIOv4 maps,
+  frozen PCA or nonlinear autoencoder compression, a direction-free NHT feature head, and an
+  alpha-aware low-resolution cosine loss alongside RGB. Remaining work is DINOv3 support, feature
+  pyramids, a robust cosine/Charbonnier residual, and sweeps of loss weight, target resolution,
+  and RGB-only versus RGB-plus-feature supervision across seeds.
 - Ray-distribution appearance and orientation regularizers: per-ray colour variance and
   normal-direction variance, with tests that distinguish a genuinely mixed ray from a sharp
   surface. The current depth-variance term only constrains ray distance.

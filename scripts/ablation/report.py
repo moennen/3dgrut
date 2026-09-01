@@ -71,16 +71,20 @@ COST_COLUMNS = [
 ]
 
 
-def read_rows(path: Path) -> list[dict]:
+def read_rows(paths: Path | list[Path]) -> list[dict]:
+    """Read one or more result records, with later records winning duplicate cells."""
+    if isinstance(paths, Path):
+        paths = [paths]
     rows = []
-    with open(path) as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass  # Truncated final line from an interrupted sweep.
+    for path in paths:
+        with open(path) as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass  # Truncated final line from an interrupted sweep.
     # Later rows win, so a re-run of a failed cell supersedes the earlier failure.
     deduped = {(row.get("variant"), row.get("scene")): row for row in rows}
     return list(deduped.values())
@@ -158,7 +162,7 @@ def per_scene_table(rows: list[dict], key: str, fmt: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("results", type=Path, help="results.jsonl written by run_ob3d.py")
+    parser.add_argument("results", type=Path, nargs="+", help="One or more results.jsonl files written by run_ob3d.py")
     parser.add_argument("--output", type=Path, default=None, help="Write markdown here instead of stdout")
     parser.add_argument("--per-scene", default="depth_abs_rel", help="Metric to break down per scene")
     args = parser.parse_args()
