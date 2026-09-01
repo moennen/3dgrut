@@ -45,7 +45,7 @@ class FeatureDecoder(nn.Module):
             ray_feature_dim: Per-ray feature dimension (rendered features input to the decoder MLP)
             hidden_dim: Hidden layer dimension for MLP decoder (default 128)
             num_layers: Number of hidden layers in the MLP (default 4)
-            dir_encoding: Direction encoding type ("SphericalHarmonics" or "Frequency")
+            dir_encoding: Direction encoding type ("SphericalHarmonics", "Frequency", or "Identity")
             dir_encoding_degree: Degree for direction encoding (SH degree or frequency bands; default 3)
             sh_scale: Scale applied to ray directions before encoding: (v*sh_scale+1)/2 maps to [0,1].
                       sh_scale=1 is standard unit sphere coverage; sh_scale=3 extends coverage for
@@ -72,6 +72,10 @@ class FeatureDecoder(nn.Module):
             dir_enc = {"otype": "SphericalHarmonics", "degree": dir_encoding_degree, "n_dims_to_encode": 3}
         elif dir_encoding == "Frequency":
             dir_enc = {"otype": "Frequency", "n_frequencies": dir_encoding_degree, "n_dims_to_encode": 3}
+        elif dir_encoding == "Identity":
+            # Direct view vectors are the non-harmonic NHT baseline: view dependent RGB remains
+            # possible, while avoiding an SH/Fourier expansion of either latent or directions.
+            dir_enc = {"otype": "Identity", "n_dims_to_encode": 3}
         else:
             raise ValueError(f"Unknown dir_encoding: {dir_encoding}")
 

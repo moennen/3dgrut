@@ -213,6 +213,68 @@ DEPTH_VARIANCE_RELATIVE_VARIANTS: tuple[Variant, ...] = tuple(
     )
 )
 
+# Frozen image features are evaluated on the direct NHT baseline, not the historical harmonic
+# configuration.  The 32-D per-Gaussian latent is rendered directly (one center sample) and RGB
+# receives a raw view vector; only the RGB branch is view dependent.  This makes the robust,
+# direction-free image-feature term the sole difference between `nht_rgb` and the three feature
+# conditions.  `color_refine_steps=0` keeps that term active for all 7k smoke iterations.
+DIRECT_NHT_OVERRIDES = (
+    "model.feature_type=nht",
+    "model.nht_features.dim=32",
+    "model.nht_features.activation.type=none",
+    "model.nht_features.interpolation_type=none",
+    "model.nht_decoder.dir_encoding=Identity",
+    "model.nht_decoder.dir_encoding_degree=0",
+    "model.nht_decoder.color_refine_steps=0",
+    "model.nht_decoder.scheduler.max_steps=7000",
+)
+
+IMAGE_FEATURE_VARIANTS: tuple[Variant, ...] = (
+    Variant("nht_rgb", DIRECT_NHT_OVERRIDES, "Direct non-harmonic NHT RGB-only control."),
+    Variant(
+        "dinov2_pca",
+        DIRECT_NHT_OVERRIDES
+        + (
+            "loss.use_image_features=true",
+            "loss.lambda_image_features=0.1",
+            "model.nht_decoder.image_feature_dim=16",
+            "dataset.image_features.backend=dinov2",
+            "dataset.image_features.model=facebook/dinov2-base",
+            "dataset.image_features.feature_stride=14",
+            "dataset.image_features.projector=pca",
+        ),
+        "Frozen 16-D DINOv2 features with a PCA projector.",
+    ),
+    Variant(
+        "dinov2_autoencoder",
+        DIRECT_NHT_OVERRIDES
+        + (
+            "loss.use_image_features=true",
+            "loss.lambda_image_features=0.1",
+            "model.nht_decoder.image_feature_dim=16",
+            "dataset.image_features.backend=dinov2",
+            "dataset.image_features.model=facebook/dinov2-base",
+            "dataset.image_features.feature_stride=14",
+            "dataset.image_features.projector=autoencoder",
+        ),
+        "Frozen 16-D DINOv2 features with the nonlinear offline autoencoder projector.",
+    ),
+    Variant(
+        "nvradio4_pca",
+        DIRECT_NHT_OVERRIDES
+        + (
+            "loss.use_image_features=true",
+            "loss.lambda_image_features=0.1",
+            "model.nht_decoder.image_feature_dim=16",
+            "dataset.image_features.backend=nvradio4",
+            "dataset.image_features.model=c-radio_v4-h",
+            "dataset.image_features.feature_stride=16",
+            "dataset.image_features.projector=pca",
+        ),
+        "Frozen 16-D C-RADIOv4 features with a PCA projector.",
+    ),
+)
+
 # Ordinal supervision from a monocular pseudo-depth prior (DepthAnythingV2). Unlike every term
 # above, this one brings *external information* rather than an internal consistency condition,
 # which is what makes it the interesting comparison: the depth-variance family can only ask a ray
@@ -420,6 +482,7 @@ ALL_VARIANTS: tuple[Variant, ...] = (
     + PSEUDO_DEPTH_BOTH_VARIANTS
     + PSEUDO_DEPTH_VARIANCE_VARIANTS
     + DEPTH_VARIANCE_RELATIVE_VARIANTS
+    + IMAGE_FEATURE_VARIANTS
 )
 
 
