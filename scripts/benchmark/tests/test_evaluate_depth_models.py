@@ -23,6 +23,25 @@ def test_depth_alignment_respects_disparity_parameterization():
     np.testing.assert_allclose(aligned, truth)
 
 
+def test_dataset_scene_presets_are_fixed_and_cover_the_uploaded_suites():
+    full = benchmark.selected_scenes("full", {"ob3d": None, "dtu": None, "tnt": None})
+    reduced = benchmark.selected_scenes("reduced", {"ob3d": None, "dtu": None, "tnt": None})
+
+    assert tuple(map(len, (full["ob3d"], full["dtu"], full["tnt"]))) == (12, 15, 6)
+    assert reduced == {
+        "ob3d": ("archiviz-flat", "classroom", "lone-monk", "san-miguel"),
+        "dtu": ("scan105", "scan114", "scan24", "scan55", "scan69"),
+        "tnt": ("Barn", "Ignatius"),
+    }
+
+
+def test_explicit_scene_override_wins_over_dataset_preset():
+    scenes = benchmark.selected_scenes("reduced", {"ob3d": "emerald-square,sponza", "dtu": None, "tnt": "Barn"})
+    assert scenes["ob3d"] == ("emerald-square", "sponza")
+    assert scenes["dtu"] == benchmark.REDUCED_SCENES["dtu"]
+    assert scenes["tnt"] == ("Barn",)
+
+
 def test_depth_alignment_recovers_depth_scale_and_offset():
     prediction = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     truth = 3.0 * prediction + 2.0

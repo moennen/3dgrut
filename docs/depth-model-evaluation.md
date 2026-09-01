@@ -44,20 +44,32 @@ export CUDA_VISIBLE_DEVICES=0
 ```bash
 .venv/bin/python scripts/benchmark/evaluate_depth_models.py \
   --out-dir /tmp/depth-benchmark-smoke --max-frames 1 --max-image-side 160 \
-  --mesh-samples 1000 --gt-voxel 10
+  --mesh-samples 1000 --gt-voxel 10 \
+  --ob3d-scenes emerald-square --dtu-scenes scan24 --tnt-scenes Barn
 ```
 
 ### 5. Run the benchmark
 
-Use one or more comma-separated scenes per suite. Omit `--max-frames` and `--max-image-side` for the full-resolution multi-view run. The default surface sampler uses two million uniform mesh samples; keep `--gt-voxel` unset for benchmark scoring. The MoGe-3 default checkpoint is `/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt`.
+`--dataset-scale full` is the default and evaluates every supported uploaded sequence: 12 OB3D,
+15 DTU, and 6 TnT GOF scenes. `--dataset-scale reduced` always selects the same fixed third:
+OB3D `archiviz-flat,classroom,lone-monk,san-miguel`; DTU
+`scan105,scan114,scan24,scan55,scan69`; and TnT `Barn,Ignatius`. Use the reduced protocol for
+development comparisons; use full for reported results. Omit `--max-frames` and
+`--max-image-side` for a full-resolution multi-view run. The default surface sampler uses two
+million uniform mesh samples; keep `--gt-voxel` unset for benchmark scoring. The MoGe-3 default
+checkpoint is `/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt`.
 
 ```bash
 .venv/bin/python scripts/benchmark/evaluate_depth_models.py \
   --out-dir /mnt/oss/results/depth-benchmark-2026-08-31 \
   --models dav2,dav3,moge3 \
-  --ob3d-scenes emerald-square,sponza \
-  --dtu-scenes scan24 --tnt-scenes Barn
+  --dataset-scale full
 ```
+
+To run the deterministic one-third protocol, change the last option to
+`--dataset-scale reduced`. Individual suite lists can still be overridden with
+`--ob3d-scenes`, `--dtu-scenes`, or `--tnt-scenes`; this is a custom protocol and should be
+recorded as such.
 
 To diagnose a memory limit without altering the protocol, add `--memory-profile`. Each alignment
 then writes `memory.jsonl`, including process RSS and cgroup memory before TSDF fusion, after each
@@ -87,7 +99,7 @@ jq -c '{suite, scene, model, alignment}' /mnt/oss/results/depth-benchmark-2026-0
 - Alignment is fit in each model's native quantity: inverse z for DAv2 disparity, z for DA3/MoGe-3.
 - Scale and affine benchmark maps are **oracle** per-frame fits to the GT scan z-buffer; they are diagnostics, never deployable results.
 - DTU recall uses the official ground-plane GT cull and visibility z-buffer; its mesh score is Chamfer `(accuracy + completeness)/2` in millimetres, with the official observation mask on predictions.
-- TnT recall and mesh scoring use its official crop; F1 is reported at the scene's official threshold (Barn: 1 cm).
+- TnT recall and mesh scoring use the official crop; F1 is reported at each scene's official threshold.
 - All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.
 - Mesh scoring keeps the two-million-sample default, but executes exact nearest-neighbour queries in 100,000-sample batches to bound host memory. `--surface-query-chunk-size` changes only peak memory, not the metric.
 - For DTU/TnT, aligned maps are written one frame at a time and RGB-D frames are lazily loaded into TSDF fusion. The Open3D mesh is released after sampling and before scoring. A 64 GB host should therefore be sufficient for the standard protocol; use `--surface-query-chunk-size 25000` only as an additional exact-query memory guard.

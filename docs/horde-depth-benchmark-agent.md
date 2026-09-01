@@ -4,8 +4,9 @@ This runbook is for an agent that is already running on a Horde instance. It mak
 bastion, or host-key configuration assumptions. Keep the repository, vendor dependencies, data,
 and results below one writable work directory and retain the final result directory for collection.
 
-The initial run is deliberately bounded to OB3D `emerald-square`, DTU `scan24`, and TnT `Barn`.
-Do not copy complete dataset trees when only these scenes are evaluated.
+The full benchmark evaluates all supported uploaded sequences. For a shorter, reproducible run,
+use the fixed one-third `--dataset-scale reduced` preset. Do not call a custom scene selection a
+full or reduced benchmark in reports.
 
 For a full-sequence sweep, use the resumable uploader from the source workstation instead. It
 copies all locally available OB3D (12), DTU (15 plus shared evaluation assets), and TnT GOF
@@ -145,9 +146,9 @@ export OUT=$WORK/results/smoke
   --out-dir "$OUT" --models dav2,dav3,moge3 --max-frames 1 --max-image-side 160 \
   --mesh-samples 1000 --gt-voxel 10 \
   --moge3-model "$VENDOR/MoGe/checkpoints/moge-3-vitl/model.pt" \
-  --ob3d-root "$DATA/ob3d/OB3D_colmap" \
-  --dtu-root "$DATA/dtu_dataset/dtu" --dtu-eval-root "$DATA/dtu_dataset/dtu_eval" \
-  --tnt-root "$DATA/tnt_dataset/tnt" --tnt-reconstruction-root "$DATA/tnt_dataset/tnt_gof"
+  --ob3d-root "$DATA/ob3d/OB3D_colmap" --ob3d-scenes emerald-square \
+  --dtu-root "$DATA/dtu_dataset/dtu" --dtu-eval-root "$DATA/dtu_dataset/dtu_eval" --dtu-scenes scan24 \
+  --tnt-root "$DATA/tnt_dataset/tnt" --tnt-reconstruction-root "$DATA/tnt_dataset/tnt_gof" --tnt-scenes Barn
 test "$(wc -l < "$OUT/results.jsonl")" -eq 27
 ```
 
@@ -167,11 +168,15 @@ mkdir -p "$OUT"
 .venv/bin/python scripts/benchmark/evaluate_depth_models.py \
   --out-dir "$OUT" --models dav2,dav3,moge3 \
   --moge3-model "$VENDOR/MoGe/checkpoints/moge-3-vitl/model.pt" \
-  --ob3d-root "$DATA/ob3d/OB3D_colmap" --ob3d-scenes emerald-square \
-  --dtu-root "$DATA/dtu_dataset/dtu" --dtu-eval-root "$DATA/dtu_dataset/dtu_eval" --dtu-scenes scan24 \
-  --tnt-root "$DATA/tnt_dataset/tnt" --tnt-reconstruction-root "$DATA/tnt_dataset/tnt_gof" --tnt-scenes Barn \
+  --dataset-scale full \
+  --ob3d-root "$DATA/ob3d/OB3D_colmap" \
+  --dtu-root "$DATA/dtu_dataset/dtu" --dtu-eval-root "$DATA/dtu_dataset/dtu_eval" \
+  --tnt-root "$DATA/tnt_dataset/tnt" --tnt-reconstruction-root "$DATA/tnt_dataset/tnt_gof" \
   2>&1 | tee "$OUT/run.log"
 ```
+
+For the deterministic lower-cost run, replace `--dataset-scale full` with
+`--dataset-scale reduced`. Its fixed scene set is recorded in `protocol.json`.
 
 For a 64 GB OOM investigation, append `--memory-profile` to that command. Inspect the last line
 of `$OUT/dtu/scan24/<model>/raw/memory.jsonl`: it contains process RSS and cgroup memory after

@@ -56,6 +56,66 @@ MODELS = {
 }
 ALIGNMENTS: tuple[Literal["raw", "scale", "affine"], ...] = ("raw", "scale", "affine")
 
+# Keep these suite definitions in the runner rather than deriving them from directory iteration:
+# a benchmark invocation must mean the same experiment on every machine.  TnT Church is present
+# in the official point-cloud tree but does not have the matching GOF/COLMAP reconstruction, so it
+# cannot be evaluated by this posed-depth protocol.
+FULL_SCENES = {
+    "ob3d": (
+        "archiviz-flat",
+        "barbershop",
+        "bistro",
+        "classroom",
+        "emerald-square",
+        "fisher-hut",
+        "lone-monk",
+        "pavillion",
+        "restroom",
+        "san-miguel",
+        "sponza",
+        "sun-temple",
+    ),
+    "dtu": (
+        "scan105",
+        "scan106",
+        "scan110",
+        "scan114",
+        "scan118",
+        "scan122",
+        "scan24",
+        "scan37",
+        "scan40",
+        "scan55",
+        "scan63",
+        "scan65",
+        "scan69",
+        "scan83",
+        "scan97",
+    ),
+    "tnt": ("Barn", "Caterpillar", "Courthouse", "Ignatius", "Meetingroom", "Truck"),
+}
+# Fixed every-third scene selections from FULL_SCENES.  Do not randomise this set: it
+# is the comparable reduced protocol used for development and regression checks.
+REDUCED_SCENES = {suite: scenes[::3] for suite, scenes in FULL_SCENES.items()}
+
+
+def selected_scenes(
+    dataset_scale: Literal["full", "reduced"], overrides: dict[str, str | None]
+) -> dict[str, tuple[str, ...]]:
+    """Resolve a reproducible dataset preset, allowing an explicit suite-level override."""
+    preset = FULL_SCENES if dataset_scale == "full" else REDUCED_SCENES
+    selected = {}
+    for suite, fallback in preset.items():
+        override = overrides[suite]
+        if override is None:
+            selected[suite] = fallback
+            continue
+        scenes = tuple(scene.strip() for scene in override.split(",") if scene.strip())
+        if not scenes:
+            raise ValueError(f"--{suite}-scenes must name at least one scene")
+        selected[suite] = scenes
+    return selected
+
 
 @dataclass(frozen=True)
 class Frame:
@@ -547,16 +607,22 @@ def main() -> None:
         default=MODELS["moge3"][1],
         help="Local MoGe-3 checkpoint path (default is this workstation's ViT-L checkpoint)",
     )
+    parser.add_argument(
+        "--dataset-scale",
+        choices=("full", "reduced"),
+        default="full",
+        help="Scene preset: full uses every supported scene; reduced uses the fixed one-third subset.",
+    )
     parser.add_argument("--ob3d-root", type=Path, default=Path("/mnt/data/nerf_datasets/ob3d/OB3D_colmap"))
-    parser.add_argument("--ob3d-scenes", default="emerald-square")
+    parser.add_argument("--ob3d-scenes", default=None, help="Comma-separated override for the OB3D preset scenes")
     parser.add_argument("--dtu-root", type=Path, default=Path("/mnt/data/nerf_datasets/dtu_dataset/dtu"))
     parser.add_argument("--dtu-eval-root", type=Path, default=Path("/mnt/data/nerf_datasets/dtu_dataset/dtu_eval"))
-    parser.add_argument("--dtu-scenes", default="scan24")
+    parser.add_argument("--dtu-scenes", default=None, help="Comma-separated override for the DTU preset scenes")
     parser.add_argument("--tnt-root", type=Path, default=Path("/mnt/data/nerf_datasets/tnt_dataset/tnt"))
     parser.add_argument(
         "--tnt-reconstruction-root", type=Path, default=Path("/mnt/data/nerf_datasets/tnt_dataset/tnt_gof")
     )
-    parser.add_argument("--tnt-scenes", default="Barn")
+    parser.add_argument("--tnt-scenes", default=None, help="Comma-separated override for the TnT preset scenes")
     parser.add_argument("--max-frames", type=int, default=0, help="0 means every frame")
     parser.add_argument("--max-image-side", type=int, default=None, help="Downscale before inference/evaluation")
     parser.add_argument("--voxel-size-dtu", type=float, default=2.0, help="TSDF voxel size in DTU millimetres")
@@ -609,14 +675,18 @@ def main() -> None:
     model_specs = dict(MODELS)
     model_specs["moge3"] = ("moge3", args.moge3_model)
     max_frames = args.max_frames or 1_000_000
+    scenes = selected_scenes(
+        args.dataset_scale,
+        {"ob3d": args.ob3d_scenes, "dtu": args.dtu_scenes, "tnt": args.tnt_scenes},
+    )
     records: list[dict] = []
     for model in models:
         backend, model_id = model_specs[model]
         predictor = BACKENDS[backend](model_id=model_id)
-        for scene_name in args.ob3d_scenes.split(","):
+        for scene_name in scenes["ob3d"]:
             frames = ob3d_frames(args.ob3d_root / scene_name, max_frames, args.max_image_side)
             records.extend(evaluate_ob3d(model, predictor, frames, args.out_dir / "ob3d" / scene_name / model))
-        for scene_name in args.dtu_scenes.split(","):
+        for scene_name in scenes["dtu"]:
             destination = args.out_dir / "dtu" / scene_name / model
             scene = dtu_scene(
                 args.dtu_root, args.dtu_eval_root, scene_name, max_frames, args.max_image_side, destination
@@ -637,7 +707,7 @@ def main() -> None:
             ):
                 row["model"] = model
                 records.append(row)
-        for scene_name in args.tnt_scenes.split(","):
+        for scene_name in scenes["tnt"]:
             destination = args.out_dir / "tnt" / scene_name / model
             scene = tnt_scene(
                 args.tnt_root, args.tnt_reconstruction_root, scene_name, max_frames, args.max_image_side, destination
@@ -664,6 +734,8 @@ def main() -> None:
         json.dumps(
             {
                 "models": model_specs,
+                "dataset_scale": args.dataset_scale,
+                "scenes": scenes,
                 "alignment": list(ALIGNMENTS),
                 "oracle_alignment": "GT scan z-buffer per frame",
                 "mesh_samples": args.mesh_samples,

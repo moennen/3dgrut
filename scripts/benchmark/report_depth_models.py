@@ -111,22 +111,25 @@ def markdown(records: list[dict], note: str) -> str:
         "```bash",
         ".venv/bin/python scripts/benchmark/evaluate_depth_models.py \\",
         "  --out-dir /tmp/depth-benchmark-smoke --max-frames 1 --max-image-side 160 \\",
-        "  --mesh-samples 1000 --gt-voxel 10",
+        "  --mesh-samples 1000 --gt-voxel 10 \\",
+        "  --ob3d-scenes emerald-square --dtu-scenes scan24 --tnt-scenes Barn",
         "```",
         "",
         "### 5. Run the benchmark",
         "",
-        "Use one or more comma-separated scenes per suite. Omit `--max-frames` and `--max-image-side` for the "
-        "full-resolution multi-view run. The default surface sampler uses two million uniform mesh samples; keep "
-        "`--gt-voxel` unset for benchmark scoring. The MoGe-3 default checkpoint is "
-        "`/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt`.",
+        "`--dataset-scale full` is the default and evaluates every supported uploaded sequence. "
+        "`--dataset-scale reduced` always selects the same fixed one-third subset: OB3D "
+        "`archiviz-flat,classroom,lone-monk,san-miguel`; DTU `scan105,scan114,scan24,scan55,scan69`; "
+        "and TnT `Barn,Ignatius`. Omit "
+        "`--max-frames` and `--max-image-side` for the full-resolution multi-view run. The default surface sampler "
+        "uses two million uniform mesh samples; keep `--gt-voxel` unset for benchmark scoring. The MoGe-3 default "
+        "checkpoint is `/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt`.",
         "",
         "```bash",
         ".venv/bin/python scripts/benchmark/evaluate_depth_models.py \\",
         "  --out-dir /mnt/oss/results/depth-benchmark-2026-08-31 \\",
         "  --models dav2,dav3,moge3 \\",
-        "  --ob3d-scenes emerald-square,sponza \\",
-        "  --dtu-scenes scan24 --tnt-scenes Barn",
+        "  --dataset-scale full",
         "```",
         "",
         "",
@@ -153,7 +156,7 @@ def markdown(records: list[dict], note: str) -> str:
         "- Alignment is fit in each model's native quantity: inverse z for DAv2 disparity, z for DA3/MoGe-3.",
         "- Scale and affine benchmark maps are **oracle** per-frame fits to the GT scan z-buffer; they are diagnostics, never deployable results.",
         "- DTU recall uses the official ground-plane GT cull and visibility z-buffer; its mesh score is Chamfer `(accuracy + completeness)/2` in millimetres, with the official observation mask on predictions.",
-        "- TnT recall and mesh scoring use its official crop; F1 is reported at the scene's official threshold (Barn: 1 cm).",
+        "- TnT recall and mesh scoring use the official crop; F1 is reported at each scene's official threshold.",
         "- All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.",
         "- Mesh scoring retains two million samples by default. Exact cKDTree queries are reduced in 100,000-sample batches to bound host RAM; this does not alter the metric.",
         "",
