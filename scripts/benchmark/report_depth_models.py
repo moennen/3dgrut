@@ -21,19 +21,43 @@ def rows_by_suite(records: list[dict], suite: str) -> list[dict]:
     return [record for record in records if record["suite"] == suite]
 
 
+def mean(values: list[float | None]) -> float | None:
+    finite = [value for value in values if value is not None and np.isfinite(value)]
+    return float(np.mean(finite)) if finite else None
+
+
 def pivot(records: list[dict], value) -> tuple[list[str], list[list[str]]]:
+    """Average a metric over scenes instead of silently selecting the first matching row."""
     models = sorted({record["model"] for record in records})
     alignments = ["raw", "scale", "affine"]
     table = []
     for model in models:
         cells = []
         for alignment in alignments:
-            cell = next(
-                (record for record in records if record["model"] == model and record["alignment"] == alignment), None
-            )
-            cells.append(number(value(cell) if cell else None))
+            matches = [record for record in records if record["model"] == model and record["alignment"] == alignment]
+            cells.append(number(mean([value(record) for record in matches])))
         table.append(cells)
     return models, table
+
+
+def scene_view_rows(records: list[dict]) -> list[tuple[str, str, int | None]]:
+    """One verified view-count row per benchmark scene."""
+    grouped: dict[tuple[str, str], set[int]] = {}
+    for record in records:
+        count = record.get("views", record.get("frames"))
+        if count is not None:
+            grouped.setdefault((record["suite"], record["scene"]), set()).add(int(count))
+    rows = []
+    for (suite, scene), counts in sorted(grouped.items()):
+        if len(counts) != 1:
+            raise ValueError(f"Inconsistent view counts for {suite}/{scene}: {sorted(counts)}")
+        rows.append((suite, scene, counts.pop()))
+    return rows
+
+
+def suite_view_subtitle(records: list[dict], suite: str, fallback: str) -> str:
+    rows = [(scene, count) for record_suite, scene, count in scene_view_rows(records) if record_suite == suite]
+    return "; ".join(f"{scene}: {count} posed views" for scene, count in rows) if rows else fallback
 
 
 def markdown(records: list[dict], note: str) -> str:
@@ -132,6 +156,16 @@ def markdown(records: list[dict], note: str) -> str:
         "- TnT recall and mesh scoring use its official crop; F1 is reported at the scene's official threshold (Barn: 1 cm).",
         "- All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.",
         "- Mesh scoring retains two million samples by default. Exact cKDTree queries are reduced in 100,000-sample batches to bound host RAM; this does not alter the metric.",
+        "",
+        "## Evaluation coverage",
+        "",
+        "Each count is the actual number of input camera views used for one condition, recorded by the runner.",
+        "",
+        "| suite | scene | views |",
+        "| --- | --- | ---: |",
+    ]
+    text += [f"| {suite} | {scene} | {count} |" for suite, scene, count in scene_view_rows(records)]
+    text += [
         "",
         "## Evaluate a 3dgrut reconstruction checkpoint",
         "",
@@ -243,7 +277,7 @@ def markdown(records: list[dict], note: str) -> str:
     models, table = pivot(dtu, lambda row: row["recall"]["recall"][3])
     text += [
         "",
-        "## DTU scan24",
+        "## DTU",
         "",
         "Recall is visibility-corrected recall@5 mm; scale and affine are oracle scan-z-buffer fits.",
         "",
@@ -255,7 +289,7 @@ def markdown(records: list[dict], note: str) -> str:
     text += ["| model | raw Chamfer | scale Chamfer | affine Chamfer |", "| --- | ---: | ---: | ---: |"]
     text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
     models, table = pivot(tnt, lambda row: row["recall"]["recall"][0])
-    text += ["", "## Tanks and Temples Barn", "", "Recall is visibility-corrected at the official 1 cm tolerance.", ""]
+    text += ["", "## Tanks and Temples", "", "Recall is visibility-corrected at the official scene tolerance.", ""]
     text += ["| model | raw recall@1cm | scale recall@1cm | affine recall@1cm |", "| --- | ---: | ---: | ---: |"]
     text += [f"| {model} | {' | '.join(cells)} |" for model, cells in zip(models, table)]
     models, table = pivot(tnt, lambda row: row["surface"].get("fscore", [None])[0])
@@ -268,8 +302,9 @@ def markdown(records: list[dict], note: str) -> str:
         "",
         "- Raw DAv2/DA3 are intentionally uncalibrated relative outputs; their absolute scores are not comparable to a metric-depth claim.",
         "- Per-frame scale/affine use a GT scan z-buffer and are explicitly oracle diagnostics, not deployable alignments.",
+        "- Affine contains scale and cannot lose on its fitted, unweighted native-space least-squares objective. It can lose on AbsRel, threshold recall, or TSDF mesh metrics, which use different weighting, depth/ray conversion, validity, and nonlinear fusion operations.",
         "- DTU uses its ground-plane completeness cull and predicted-surface observation mask; TnT uses its official crop plus a GT visibility z-buffer to remove scan self-occlusion.",
-        "- TSDF is the shared posed-depth path used by checkpoint extraction and this benchmark. One-view fusion is expected to be incomplete; mesh values here validate the path, not a competitive reconstruction setting.",
+        "- TSDF is the shared posed-depth path used by checkpoint extraction and this benchmark. Multi-view fusion improves coverage but does not make independently predicted monocular depths mutually consistent; mesh values are a pipeline and prior-quality diagnostic, not a competitive learned reconstruction result.",
     ]
     return "\n".join(text) + "\n"
 
@@ -299,10 +334,12 @@ def bar_page(pdf: PdfPages, records: list[dict]) -> None:
     width = 0.24
     for index, alignment in enumerate(alignments):
         values = [
-            next(
-                record["depth"]["abs_rel"]
-                for record in ob3d
-                if record["model"] == model and record["alignment"] == alignment
+            mean(
+                [
+                    record["depth"]["abs_rel"]
+                    for record in ob3d
+                    if record["model"] == model and record["alignment"] == alignment
+                ]
             )
             for model in models
         ]
@@ -317,12 +354,17 @@ def bar_page(pdf: PdfPages, records: list[dict]) -> None:
 
 
 def qualitative_page(pdf: PdfPages, result_dir: Path, dtu_root: Path, records: list[dict]) -> None:
+    """Add a sample only when the optional local RGB/depth artifacts are present."""
     dtu = rows_by_suite(records, "dtu")
     models = sorted({record["model"] for record in dtu})
     if not models:
         return
     scene = dtu[0]["scene"]
-    image = np.asarray(plt.imread(dtu_root / scene / "images" / "0000.png"))
+    image_path = dtu_root / scene / "images" / "0000.png"
+    depth_paths = [result_dir / "dtu" / scene / model / "affine" / "depths" / "0000.npy" for model in models]
+    if not image_path.is_file() or not all(path.is_file() for path in depth_paths):
+        return
+    image = np.asarray(plt.imread(image_path))
     figure, axes = plt.subplots(2, len(models), figsize=(4 * len(models), 7))
     if len(models) == 1:
         axes = np.asarray(axes).reshape(2, 1)
@@ -331,8 +373,7 @@ def qualitative_page(pdf: PdfPages, result_dir: Path, dtu_root: Path, records: l
     for column, model in enumerate(models):
         axes[0, column].imshow(image)
         axes[0, column].set_title(model, fontsize=15)
-        depth_path = result_dir / "dtu" / scene / model / "affine" / "depths" / "0000.npy"
-        depth = np.load(depth_path)
+        depth = np.load(depth_paths[column])
         axes[1, column].imshow(depth, cmap="turbo", vmin=np.nanpercentile(depth, 2), vmax=np.nanpercentile(depth, 98))
         for axis in axes[:, column]:
             axis.axis("off")
@@ -348,7 +389,8 @@ def main() -> None:
     parser.add_argument("--pdf", type=Path, required=True)
     parser.add_argument("--dtu-root", type=Path, default=Path("/mnt/data/nerf_datasets/dtu_dataset/dtu"))
     parser.add_argument(
-        "--note", default="Smoke protocol: one view per scene at a 160 px maximum side; meshes use 1,000 samples."
+        "--note",
+        default="Report generated from the supplied benchmark records; see the coverage table for actual views.",
     )
     args = parser.parse_args()
     records = [json.loads(line) for line in args.results.read_text().splitlines() if line]
@@ -383,11 +425,11 @@ def main() -> None:
         models, table = pivot(tnt, lambda row: row["surface"].get("fscore", [None])[0])
         table_page(
             pdf,
-            "Tanks and Temples Barn mesh",
+            "Tanks and Temples mesh",
             ["raw F1", "scale F1", "affine F1"],
             models,
             table,
-            "Official 1 cm F1; one-view meshes are deliberately incomplete",
+            suite_view_subtitle(tnt, "tnt", "Official scene-threshold F1"),
         )
         qualitative_page(pdf, args.results.parent, args.dtu_root, records)
     print(f"Wrote {args.markdown} and {args.pdf}")
