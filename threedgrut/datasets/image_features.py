@@ -59,7 +59,55 @@ class DINOv2Backend:
         return tokens.reshape(height, width, -1).float().cpu()
 
 
-BACKENDS = {"dinov2": DINOv2Backend}
+class NVRadio4Backend:
+    """Dense C-RADIOv4 backbone features through the official TorchHub entry point.
+
+    ``model_id`` is the RADIO version, for example ``c-radio_v4-h`` or
+    ``c-radio_v4-so400m``.  Set ``THREEDGRUT_RADIO_REPO`` to a checkout of
+    NVlabs/RADIO to avoid a TorchHub source download (and to pin the implementation used for a
+    run); otherwise TorchHub obtains the official repository on the first cache miss.
+    """
+
+    def __init__(self, model_id: str, device: str = "cuda"):
+        self.model_id, self.device = model_id, device
+        self._model = None
+
+    def identity(self) -> dict:
+        return {"backend": "nvradio4", "model": self.model_id}
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        repo = os.environ.get("THREEDGRUT_RADIO_REPO", "NVlabs/RADIO")
+        source = "local" if Path(repo).is_dir() else "github"
+        self._model = (
+            torch.hub.load(
+                repo,
+                "radio_model",
+                source=source,
+                version=self.model_id,
+                progress=True,
+                skip_validation=True,
+            )
+            .to(self.device)
+            .eval()
+        )
+
+    @torch.no_grad()
+    def encode(self, image: np.ndarray) -> torch.Tensor:
+        self._ensure_loaded()
+        pixels = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1).float().div_(255).unsqueeze(0)
+        pixels = pixels.to(self.device)
+        supported_size = self._model.get_nearest_supported_resolution(*pixels.shape[-2:])
+        pixels = F.interpolate(pixels, supported_size, mode="bilinear", align_corners=False)
+        with torch.autocast(
+            device_type=torch.device(self.device).type, enabled=torch.device(self.device).type == "cuda"
+        ):
+            _, spatial = self._model(pixels, feature_fmt="NCHW")
+        return spatial[0].float().permute(1, 2, 0).cpu()
+
+
+BACKENDS = {"dinov2": DINOv2Backend, "nvradio4": NVRadio4Backend}
 
 
 def _slug(value: str) -> str:

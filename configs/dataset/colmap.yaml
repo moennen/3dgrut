@@ -50,7 +50,9 @@ pseudo_depth:
 # feature loss is enabled, and cached separately from pseudo depth.
 image_features:
   enabled: false
-  backend: dinov2
+  # `dinov2` uses a Hugging Face model ID. `nvradio4` uses a C-RADIO version such as
+  # c-radio_v4-h; set THREEDGRUT_RADIO_REPO to a local NVlabs/RADIO checkout to pin the source.
+  backend: dinov2  # dinov2 | nvradio4
   model: facebook/dinov2-base
   cache_dir: null
   output_dim: 16

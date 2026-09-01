@@ -63,3 +63,32 @@ def test_feature_cache_can_use_a_frozen_autoencoder(tmp_path, monkeypatch):
     )
     cache.ensure([str(image)], fit_samples=16)
     assert cache.load(image).shape == (2, 2, 2)
+
+
+def test_nvradio4_backend_uses_spatial_backbone_features(monkeypatch):
+    class Model:
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def get_nearest_supported_resolution(self, height, width):
+            return height, width
+
+        def __call__(self, pixels, feature_fmt):
+            assert feature_fmt == "NCHW"
+            return None, image_features.torch.ones((1, 5, 2, 3), device=pixels.device)
+
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Model()
+
+    monkeypatch.setattr(image_features.torch.hub, "load", load)
+    backend = image_features.NVRadio4Backend("c-radio_v4-h", device="cpu")
+    encoded = backend.encode(np.zeros((8, 12, 3), dtype=np.uint8))
+    assert encoded.shape == (2, 3, 5)
+    assert calls[0][0][:2] == ("NVlabs/RADIO", "radio_model")
+    assert calls[0][1]["version"] == "c-radio_v4-h"
