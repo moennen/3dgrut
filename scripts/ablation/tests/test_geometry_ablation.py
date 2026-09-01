@@ -26,6 +26,7 @@ def load(name: str):
 runner = load("run_geometry_ablation")
 report = load("report_geometry_ablation")
 scorer = load("score_geometry_checkpoint")
+merger = load("merge_geometry_ablation_results")
 
 
 def test_matrix_is_one_factor_plus_a_compatible_full_stack():
@@ -56,6 +57,7 @@ def test_reference_image_maps_are_requested_only_for_ob3d(tmp_path):
         out_dir=tmp_path / "out",
         n_iterations=30000,
         moge3_model="moge.pt",
+        cache_root=None,
         config_name="apps/colmap_3dgut.yaml",
         override=[],
     )
@@ -65,6 +67,24 @@ def test_reference_image_maps_are_requested_only_for_ob3d(tmp_path):
     assert "dataset.load_depth_gt=true" in ob3d
     assert "dataset.load_normal_gt=true" in ob3d
     assert "dataset.load_depth_gt=true" not in dtu
+
+
+def test_cache_root_is_namespaced_by_suite_and_scene(tmp_path):
+    args = Namespace(
+        ob3d_root=tmp_path / "ob3d",
+        dtu_root=tmp_path / "dtu",
+        tnt_reconstruction_root=tmp_path / "tnt",
+        out_dir=tmp_path / "out",
+        n_iterations=30000,
+        moge3_model="moge.pt",
+        cache_root=tmp_path / "cache",
+        config_name="apps/colmap_3dgut.yaml",
+        override=[],
+    )
+    variant = next(item for item in runner.VARIANTS if item.name == "moge3_l1")
+    command, _ = runner.train_command(args, "dtu", "scan24", variant)
+    assert f"dataset.pseudo_depth.cache_dir={tmp_path / 'cache' / 'dtu' / 'scan24' / 'pseudo_depth'}" in command
+    assert f"dataset.image_features.cache_dir={tmp_path / 'cache' / 'dtu' / 'scan24' / 'image_features'}" in command
 
 
 def test_surface_and_recall_report_official_source_units_after_normalization():
@@ -118,3 +138,11 @@ def test_report_keeps_only_shared_scenes_and_reads_benchmark_fields(tmp_path):
     headers, body, _ = report.table(data, "dtu")
     assert headers[-2:] == ["visible recall @5 mm ↑", "Chamfer (mm) ↓"]
     assert body == [["a", "1", "0.400", "2.00"], ["b", "1", "0.500", "1.00"]]
+
+
+def test_merge_rejects_conflicting_cloud_retries(tmp_path):
+    first, second = tmp_path / "first.jsonl", tmp_path / "second.jsonl"
+    first.write_text(json.dumps({"suite": "dtu", "scene": "scan24", "variant": "a"}) + "\n")
+    second.write_text(json.dumps({"suite": "dtu", "scene": "scan24", "variant": "a", "status": "ok"}) + "\n")
+    with pytest.raises(ValueError, match="Conflicting duplicate"):
+        merger.merge([first, second])

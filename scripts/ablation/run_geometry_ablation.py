@@ -174,6 +174,15 @@ def train_command(args, suite: str, scene: str, variant: Variant) -> tuple[list[
     # would turn a valid surface benchmark cell into a dataset-loading failure.
     if suite == "ob3d":
         overrides += ["dataset.load_depth_gt=true", "dataset.load_normal_gt=true"]
+    if args.cache_root is not None:
+        # Dataset cache keys intentionally contain only the image folder/stem.  Namespace them
+        # per benchmark scene here: DTU scans otherwise all have an ``images/000000.png`` and
+        # would corrupt one another through a seemingly shared cache hit.
+        cache = args.cache_root / suite / scene
+        overrides += [
+            f"dataset.pseudo_depth.cache_dir={cache / 'pseudo_depth'}",
+            f"dataset.image_features.cache_dir={cache / 'image_features'}",
+        ]
     if any(value.startswith("dataset.pseudo_depth.backend=moge3") for value in overrides):
         overrides.append(f"dataset.pseudo_depth.model={args.moge3_model}")
     return (
@@ -224,6 +233,12 @@ def main() -> int:
     parser.add_argument("--variants", default=None, help="Comma-separated variant shard")
     parser.add_argument("--n-iterations", type=int, default=30000)
     parser.add_argument("--moge3-model", default="/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt")
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=None,
+        help="Persistent root for per-scene MoGe-3 and C-RADIO caches; safe to share after prewarming.",
+    )
     parser.add_argument("--config-name", default="apps/colmap_3dgut.yaml")
     parser.add_argument("--timeout-s", type=int, default=43200)
     parser.add_argument("--mesh-samples", type=int, default=2_000_000)
