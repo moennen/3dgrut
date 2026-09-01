@@ -44,6 +44,7 @@ from threedgrut.utils.depth_variance_loss import depth_variance_loss
 from threedgrut.utils.image_feature_loss import image_feature_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
+from threedgrut.utils.normal_variance_loss import normal_direction_variance_loss
 from threedgrut.utils.pseudo_depth_loss import compute_pseudo_depth_l1_loss, compute_pseudo_depth_order_loss
 from threedgrut.utils.render import apply_background, apply_feature_decoder, apply_post_processing
 from threedgrut.utils.timer import CudaTimer
@@ -806,6 +807,19 @@ class Trainer3DGRUT:
                 )
                 lambda_depth_variance = self.conf.loss.lambda_depth_variance
 
+        loss_normal_variance = torch.zeros(1, device=self.device)
+        lambda_normal_variance = 0.0
+        if (
+            self.conf.loss.use_normal_variance
+            and not self._in_color_refine
+            and self.global_step >= self.conf.loss.normal_variance_from_iter
+        ):
+            with torch.cuda.nvtx.range("loss-normal-variance"):
+                loss_normal_variance, _ = normal_direction_variance_loss(
+                    outputs["pred_normal_accum"], outputs["pred_opacity"]
+                )
+                lambda_normal_variance = self.conf.loss.lambda_normal_variance
+
         # Ordinal pseudo-depth supervision. Not gated on settled geometry like the two terms
         # above: it constrains *where* surfaces are rather than how sharp they are, which is
         # most useful before the geometry commits.
@@ -920,6 +934,7 @@ class Trainer3DGRUT:
             + lambda_scale_flatten * loss_scale_flatten
             + lambda_depth_normal * loss_depth_normal
             + lambda_depth_variance * loss_depth_variance
+            + lambda_normal_variance * loss_normal_variance
             + lambda_pseudo_depth * loss_pseudo_depth
             + lambda_pseudo_depth_l1 * loss_pseudo_depth_l1
             + lambda_image_features * loss_image_features
@@ -934,6 +949,7 @@ class Trainer3DGRUT:
             scale_flatten_loss=lambda_scale_flatten * loss_scale_flatten,
             depth_normal_loss=lambda_depth_normal * loss_depth_normal,
             depth_variance_loss=lambda_depth_variance * loss_depth_variance,
+            normal_variance_loss=lambda_normal_variance * loss_normal_variance,
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
             pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
             image_features_loss=lambda_image_features * loss_image_features,
@@ -1085,6 +1101,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_depth_variance:
                 depth_variance = np.mean(batch_metrics["losses"]["depth_variance_loss"])
                 writer.add_scalar("loss/depth_variance/train", depth_variance, global_step)
+            if self.conf.loss.use_normal_variance:
+                normal_variance = np.mean(batch_metrics["losses"]["normal_variance_loss"])
+                writer.add_scalar("loss/normal_variance/train", normal_variance, global_step)
             if self.conf.loss.use_pseudo_depth_order:
                 pseudo_depth = np.mean(batch_metrics["losses"]["pseudo_depth_order_loss"])
                 writer.add_scalar("loss/pseudo_depth_order/train", pseudo_depth, global_step)

@@ -436,6 +436,7 @@ class Tracer:
             if pred_dist_sq.numel() > 0:
                 pred_dist_sq = pred_dist_sq.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
+            pred_normal_accum = pred_normals.unsqueeze(0).contiguous()
             pred_normals = self.__resolve_normals(pred_normals, pred_features)
 
             timings = self.tracer_wrapper.collect_times()
@@ -445,6 +446,7 @@ class Tracer:
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
             "pred_dist_sq": pred_dist_sq,
+            "pred_normal_accum": pred_normal_accum,
             "pred_normals": pred_normals,
             "hits_count": hits_count,
             "frame_time_ms": timings["forward_render"] if "forward_render" in timings else 0.0,

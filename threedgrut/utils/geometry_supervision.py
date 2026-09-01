@@ -28,7 +28,10 @@ from omegaconf import OmegaConf
 
 def normal_supervision_requested(conf) -> bool:
     """Whether any configured loss reads the rendered normal buffer."""
-    return bool(OmegaConf.select(conf, "loss.use_depth_normal", default=False))
+    return bool(
+        OmegaConf.select(conf, "loss.use_depth_normal", default=False)
+        or OmegaConf.select(conf, "loss.use_normal_variance", default=False)
+    )
 
 
 def check_normals_are_rendered(conf) -> None:

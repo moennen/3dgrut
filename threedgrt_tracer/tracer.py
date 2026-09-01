@@ -83,13 +83,16 @@ def check_normal_supervision_supported(conf) -> None:
     check_normals_are_rendered(conf)
     check_flatness_applies(conf)
     check_depth_variance_is_rendered(conf)
-    if not OmegaConf.select(conf, "loss.use_depth_normal", default=False):
+    if not (
+        OmegaConf.select(conf, "loss.use_depth_normal", default=False)
+        or OmegaConf.select(conf, "loss.use_normal_variance", default=False)
+    ):
         return
     if supports_normal_gradients(conf):
         return
 
     raise ValueError(
-        f"loss.use_depth_normal is set but render.backward_pipeline_type="
+        f"a normal loss is set but render.backward_pipeline_type="
         f"'{conf.render.backward_pipeline_type}' does not differentiate the rendered normal "
         "buffer, so the normal term would contribute silently zero gradients. Use "
         "render.pipeline_type=referenceSlang."
@@ -298,6 +301,7 @@ class Tracer:
             "pred_features": pred_features,
             "pred_opacity": pred_opacity,
             "pred_dist": pred_dist,
+            "pred_normal_accum": pred_normals,
             "pred_normals": torch.nn.functional.normalize(pred_normals, dim=3),
             "hits_count": hits_count,
             "frame_time_ms": self.frame_timer.timing() if self.frame_timer is not None else 0.0,

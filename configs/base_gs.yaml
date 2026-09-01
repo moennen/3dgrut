@@ -238,6 +238,13 @@ loss:
   # every ray is diffuse and the term would fight the reconstruction rather than sharpen it.
   depth_variance_from_iter: 7000
 
+  # Directional variance of the alpha-weighted normal distribution on each ray. A coherent
+  # surface has zero cost; conflicting normals from overlapping layers approach one. It applies
+  # to every primitive type, needs render.enable_normals, and is invariant to uniform fading.
+  use_normal_variance: false
+  lambda_normal_variance: 0.0
+  normal_variance_from_iter: 7000
+
   # Ordinal supervision from a monocular pseudo-depth prior: penalises pixel pairs the render
   # orders opposite to the prior, and nothing else. Reads only the sign of the prior's
   # differences, so it is invariant to any increasing transform of it and needs no alignment.
