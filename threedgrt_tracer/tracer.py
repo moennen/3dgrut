@@ -24,6 +24,7 @@ from threedgrut.datasets.protocols import Batch
 from threedgrut.model.features import Features
 from threedgrut.utils.geometry_supervision import (
     check_appearance_variance_is_rendered,
+    check_confidence_inputs_are_rendered,
     check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
@@ -85,6 +86,7 @@ def check_normal_supervision_supported(conf) -> None:
     check_flatness_applies(conf)
     check_depth_variance_is_rendered(conf)
     check_appearance_variance_is_rendered(conf)
+    check_confidence_inputs_are_rendered(conf)
     if not normal_supervision_requested(conf):
         return
     if supports_normal_gradients(conf):

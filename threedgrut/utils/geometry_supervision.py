@@ -111,6 +111,29 @@ def check_appearance_variance_is_rendered(conf) -> None:
         )
 
 
+def check_confidence_inputs_are_rendered(conf) -> None:
+    """Reject confidence features whose renderer inputs are not available.
+
+    Confidence is detached before it weights a loss, so it does not need the 3DGRT normal
+    backward path. It still must read genuine buffers: silently replacing one of these signals
+    with an empty tensor would make a configured reliability model mean something else.
+    """
+    if not OmegaConf.select(conf, "loss.confidence.enabled", default=False):
+        return
+    method = OmegaConf.select(conf, "render.method", default="3dgut")
+    if float(OmegaConf.select(conf, "loss.confidence.depth_variance_weight", default=0.0)) > 0.0:
+        if method != "3dgut" or not OmegaConf.select(conf, "render.enable_depth_variance", default=False):
+            raise ValueError("depth confidence needs render.method=3dgut and render.enable_depth_variance=true.")
+    if float(OmegaConf.select(conf, "loss.confidence.normal_variance_weight", default=0.0)) > 0.0:
+        if not OmegaConf.select(conf, "render.enable_normals", default=False):
+            raise ValueError("normal confidence needs render.enable_normals=true.")
+    if float(OmegaConf.select(conf, "loss.confidence.appearance_variance_weight", default=0.0)) > 0.0:
+        if method != "3dgut" or not OmegaConf.select(conf, "render.enable_appearance_variance", default=False):
+            raise ValueError(
+                "appearance confidence needs render.method=3dgut and render.enable_appearance_variance=true."
+            )
+
+
 def check_flatness_applies(conf) -> None:
     """Reject the flatness penalty on a primitive that is already flat.
 

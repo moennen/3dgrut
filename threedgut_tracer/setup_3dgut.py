@@ -20,6 +20,7 @@ from threedgrut.model.features import Features
 from threedgrut.utils import jit
 from threedgrut.utils.geometry_supervision import (
     check_appearance_variance_is_rendered,
+    check_confidence_inputs_are_rendered,
     check_depth_variance_is_rendered,
     check_flatness_applies,
     check_normals_are_rendered,
@@ -33,6 +34,7 @@ def setup_3dgut(conf):
     check_flatness_applies(conf)
     check_depth_variance_is_rendered(conf)
     check_appearance_variance_is_rendered(conf)
+    check_confidence_inputs_are_rendered(conf)
 
     # The load-balanced kernel accumulates in a warp-cooperative loop that never touches
     # the normal accumulator, so combining the two would silently yield all-zero normals.

@@ -228,6 +228,24 @@ def test_unconfident_pixels_are_excluded():
     assert torch.isfinite(loss)
 
 
+def test_detached_reliability_can_remove_ambiguous_ordinal_pairs():
+    depth = _ramp()
+    prior = (10.0 - depth)[None, ..., None]
+    pred_dist, pred_opacity = _buffers(depth.flip(-1))
+    confidence = torch.ones_like(pred_dist)
+    confidence[..., :, 1:, :] = 0.0
+    loss = compute_pseudo_depth_order_loss(
+        pred_dist,
+        pred_opacity,
+        prior,
+        scene_extent=1.0,
+        quantity="disparity",
+        rng=_horizontal_offset_rng(),
+        confidence=confidence,
+    )
+    assert loss.item() == pytest.approx(0.0)
+
+
 def test_scene_extent_scales_the_loss():
     depth = _ramp()
     prior = (10.0 - depth)[None, ..., None]

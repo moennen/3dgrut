@@ -253,6 +253,26 @@ loss:
   lambda_appearance_variance: 0.0
   appearance_variance_from_iter: 7000
 
+  # Detached reliability weighting for geometry supervision. It cannot be learned down to zero:
+  # opacity and optional rendered ray dispersions estimate which pixels are ambiguous, and the
+  # map is detached before it weights pseudo-depth or cross-view terms. Variance components need
+  # their corresponding render buffer; their nonzero weights are rejected otherwise.
+  confidence:
+    enabled: false
+    min_opacity: 0.5
+    full_opacity: 0.95
+    # Applied only after min_opacity; zero fully drops ambiguous but still covered rays.
+    min_weight: 0.05
+    # exp(-weight * relative_variance); zero disables that source without changing the renderer.
+    depth_variance_weight: 0.0
+    normal_variance_weight: 0.0
+    appearance_variance_weight: 0.0
+    # Soft target-depth agreement within the hard multi-view visibility tolerance.
+    multiview_agreement_weight: 1.0
+    apply_pseudo_depth_order: true
+    apply_pseudo_depth_l1: true
+    apply_multiview: true
+
   # Visibility-aware cross-view geometry. A persisted sparse affinity graph samples a useful
   # target camera for each source frame; runtime rendered-depth agreement then rejects occluded
   # pixels. All terms are primitive-agnostic and operate on Euclidean ray distance.

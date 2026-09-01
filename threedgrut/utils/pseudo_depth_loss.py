@@ -136,6 +136,7 @@ def compute_pseudo_depth_order_loss(
     gate: float = 0.0,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
     rng: Optional[random.Random] = None,
+    confidence: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Penalise pixel pairs the render orders opposite to the prior.
 
@@ -146,8 +147,10 @@ def compute_pseudo_depth_order_loss(
     no default: the two priors in use here disagree on it, and reading one as the other is a
     silent failure rather than a loud one. `PseudoDepthCache.quantity` reports what was stored.
 
-    Returns a 0-dim tensor: the mean over surviving pairs of the rendered depth gap, in units of
-    `scene_extent`, on pairs whose order disagrees with the prior. Zero when no pair survives.
+    ``confidence`` is an optional detached per-pixel reliability map of the same shape. A pair
+    uses the geometric mean of its endpoint weights, so one ambiguous endpoint downweights the
+    pair without completely discarding the other. Returns a 0-dim weighted mean over surviving
+    pairs in units of `scene_extent`, or zero when no pair survives.
     """
     if quantity not in FARTHER_SIGN:
         raise ValueError(f"unknown prior quantity {quantity!r}; expected one of {sorted(FARTHER_SIGN)}")
@@ -160,12 +163,21 @@ def compute_pseudo_depth_order_loss(
         raise ValueError(f"scene_extent must be positive, got {scene_extent}")
 
     depth, confident = expected_depth(pred_dist, pred_opacity, min_opacity)
+    if confidence is not None and confidence.shape != pred_dist.shape:
+        raise ValueError("pseudo-depth confidence must match pred_dist [B, H, W, 1]")
+    if confidence is not None:
+        confidence = torch.nan_to_num(confidence.detach(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
     height, width = depth.shape[-3:-1]
     dy, dx = sample_pair_offset(height, width, shift_fraction, rng)
 
     depth_base, depth_shifted = _shifted_views(depth, dy, dx)
     prior_base, prior_shifted = _shifted_views(prior, dy, dx)
     confident_base, confident_shifted = _shifted_views(confident, dy, dx)
+    if confidence is None:
+        pair_confidence = torch.ones_like(depth_base)
+    else:
+        confidence_base, confidence_shifted = _shifted_views(confidence, dy, dx)
+        pair_confidence = (confidence_base * confidence_shifted).clamp_min(0.0).sqrt()
 
     # A disparity prior is affine to *inverse* depth and so decreases with distance, where a
     # depth prior increases with it; `FARTHER_SIGN` turns both into the same depth ordering.
@@ -187,11 +199,12 @@ def compute_pseudo_depth_order_loss(
     # rendered gap; `relu` keeps the disagreements and discards the rest, so agreeing pairs
     # receive no gradient at all.
     disagreement = torch.relu(-(depth_base - depth_shifted) * prior_order)
-    masked = torch.where(keep, disagreement, torch.zeros_like(disagreement))
+    weights = torch.where(keep, pair_confidence, torch.zeros_like(pair_confidence))
+    masked = disagreement * weights
 
     # Clamped division rather than a Python branch on the mask: this runs every iteration, and
     # reading the count on the host would stall the training loop.
-    return masked.sum() / keep.sum().clamp_min(1) / scene_extent
+    return masked.sum() / weights.sum().clamp_min(1.0) / scene_extent
 
 
 def aligned_prior_distance(prior: torch.Tensor, affine: torch.Tensor, rays_dir: torch.Tensor) -> torch.Tensor:
@@ -240,6 +253,7 @@ def compute_pseudo_depth_l1_loss(
     *,
     quantity: str,
     min_opacity: float = MIN_ACCUMULATED_OPACITY,
+    confidence: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """L1 between the rendered ray distance and the sparse-aligned prior, in units of `scene_extent`.
 
@@ -275,6 +289,10 @@ def compute_pseudo_depth_l1_loss(
         raise ValueError(f"scene_extent must be positive, got {scene_extent}")
 
     depth, confident = expected_depth(pred_dist, pred_opacity, min_opacity)
+    if confidence is not None and confidence.shape != pred_dist.shape:
+        raise ValueError("pseudo-depth confidence must match pred_dist [B, H, W, 1]")
+    if confidence is not None:
+        confidence = torch.nan_to_num(confidence.detach(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
     target = aligned_prior_distance(prior, affine, rays_dir)
 
     # `confident` excludes pixels the render places no surface at; there is nothing there for a
@@ -285,5 +303,7 @@ def compute_pseudo_depth_l1_loss(
     # rather than masked after the fact, or the gradient is NaN everywhere.
     safe_target = torch.where(keep, target, depth.detach())
     residual = (depth - safe_target).abs()
-    masked = torch.where(keep, residual, torch.zeros_like(residual))
-    return masked.sum() / keep.sum().clamp_min(1) / scene_extent
+    weights = torch.where(
+        keep, confidence if confidence is not None else torch.ones_like(residual), torch.zeros_like(residual)
+    )
+    return (residual * weights).sum() / weights.sum().clamp_min(1.0) / scene_extent

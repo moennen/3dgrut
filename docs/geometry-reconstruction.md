@@ -15,7 +15,7 @@ across views, or replace a post-hoc mesh heuristic with a field that can be mesh
 | Ray-distribution sharpness | A mean depth can hide two separated, partially opaque surfaces on one ray. | Penalize distance, colour, and normal-direction spread; compare mean with median/quantile surface location. | Depth and normal variance exist. Appearance variance is available in 3DGUT (RGB for SH; pre-decoder feature variance for NHT); all are off by default. Median/quantile depth is missing. |
 | Multi-view geometric consistency | A single view cannot resolve textureless, reflective, or repeated structure. | Reproject depth/normal patches and apply geometric and photometric consistency, commonly NCC. | Implemented: sparse pose affinity, depth-visibility gating, point/normal, raw-feature L2, and ZNCC terms. |
 | External geometry priors | Gives a useful cue where photometric supervision is ambiguous. | Monocular depth/normal/point-map supervision, aligned to sparse SfM; use uncertainty/confidence to limit bad priors. | DA3 ordinal and sparse-aligned depth losses exist; MoGe-3 integration is next. |
-| Confidence and ambiguity modelling | Prevents an uncertain pseudo-depth or low-parallax region from overriding multi-view evidence. | Learn or estimate per-pixel confidence from reprojection, prior agreement, opacity, and image structure. | Missing unified confidence model. |
+| Confidence and ambiguity modelling | Prevents an uncertain pseudo-depth or low-parallax region from overriding multi-view evidence. | Learn or estimate per-pixel confidence from reprojection, prior agreement, opacity, and image structure. | Implemented deterministic, detached confidence from opacity and optional ray dispersion; multi-view also uses soft depth agreement. A learned uncertainty model remains future work. |
 | A continuous extraction field | TSDF fusion of blended depth is convenient but is not a property of the Gaussian scene. | Opacity/occupancy/SDF field queried in 3D, then marching tetrahedra/cubes. | Missing. |
 | Mesh-in-the-loop optimisation | A post-hoc mesh can discard geometry that the splats learned. | Differentiably extract and render a mesh during training; enforce two-way mesh--Gaussian agreement. | Missing. |
 
@@ -111,6 +111,33 @@ It rejects fisheye/F-theta and rolling-shutter target views rather than treating
 pinhole cameras. Add their inverse camera models and per-pixel target-pose projection before
 using the term on those captures. NCore's normal training sampler is random, so its paired
 target path explicitly fetches the graph-selected frame instead of reusing that random sampler.
+
+## Detached geometry confidence
+
+`loss.confidence` turns rendered ambiguity into a reliability map for pseudo-depth and
+multi-view supervision. It is explicitly detached: otherwise a model can reduce any weighted
+loss by predicting low confidence instead of improving geometry. Opacity is always available;
+it ramps from `min_opacity` to `full_opacity`. Optional depth, normal, and appearance dispersion
+multiply that score by `exp(-weight * variance)`. The latter three must enable their corresponding
+renderer buffers, and configuration fails early if they do not.
+
+The same source/target structural weights are applied to every selected multi-view term. Inside
+the hard visibility band, a soft target-depth agreement weight further distinguishes a near
+match from a pixel just inside tolerance. Pseudo-depth L1 is weighted per pixel; ordinal pairs
+use the geometric mean of their endpoint weights. Enable it without changing the baseline losses:
+
+```bash
+python train.py --config-name apps/colmap_3dgut.yaml \
+  loss.confidence.enabled=true \
+  loss.confidence.depth_variance_weight=1.0 \
+  render.enable_depth_variance=true \
+  loss.multiview.enabled=true \
+  loss.multiview.geometric.lambda_point=0.05
+```
+
+Start with opacity-only confidence, then ablate one dispersion source at a time. The TensorBoard
+metric `geometry/confidence_mean/train` is a guardrail: a collapse toward zero means the loss is
+being starved, not that reconstruction became certain.
 
 ## Metrics to report
 

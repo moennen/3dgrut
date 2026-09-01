@@ -42,6 +42,7 @@ from threedgrut.strategy.base import BaseStrategy
 from threedgrut.utils.appearance_variance_loss import appearance_feature_variance_loss
 from threedgrut.utils.depth_normal_loss import depth_normal_consistency_loss
 from threedgrut.utils.depth_variance_loss import depth_variance_loss
+from threedgrut.utils.geometry_confidence import rendered_geometry_confidence, validate_confidence_config
 from threedgrut.utils.image_feature_loss import image_feature_loss
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import check_step_condition, create_summary_writer, jet_map
@@ -155,6 +156,7 @@ class Trainer3DGRUT:
         logger.log_rule("Load Datasets")
         self.init_dataloaders(conf)
         self.init_scene_extents(self.train_dataset)
+        validate_confidence_config(conf)
         self.init_multiview_supervision(conf)
         logger.log_rule("Initialize Model")
         self.init_model(conf, self.scene_extent)
@@ -807,6 +809,20 @@ class Trainer3DGRUT:
         rgb_gt = gpu_batch.rgb_gt
         rgb_pred = outputs["pred_features"]
         mask = gpu_batch.mask
+        confidence_options = self.conf.loss.confidence
+        source_confidence = None
+        confidence_mean = torch.ones((), device=self.device)
+        if confidence_options.enabled:
+            source_confidence = rendered_geometry_confidence(
+                outputs,
+                min_opacity=confidence_options.min_opacity,
+                full_opacity=confidence_options.full_opacity,
+                min_weight=confidence_options.min_weight,
+                depth_variance_weight=confidence_options.depth_variance_weight,
+                normal_variance_weight=confidence_options.normal_variance_weight,
+                appearance_variance_weight=confidence_options.appearance_variance_weight,
+            )
+            confidence_mean = source_confidence.mean()
 
         # Mask out the invalid pixels if the mask is provided
         if mask is not None:
@@ -990,6 +1006,7 @@ class Trainer3DGRUT:
                     shift_fraction=self.conf.loss.pseudo_depth_shift_fraction,
                     gate=self.conf.loss.pseudo_depth_gate,
                     rng=self._pseudo_depth_rng,
+                    confidence=(source_confidence if confidence_options.apply_pseudo_depth_order else None),
                 )
                 lambda_pseudo_depth = self.conf.loss.lambda_pseudo_depth_order
 
@@ -1042,6 +1059,7 @@ class Trainer3DGRUT:
                     gpu_batch.rays_dir,
                     self.model.scene_extent,
                     quantity=cache.quantity,
+                    confidence=(source_confidence if confidence_options.apply_pseudo_depth_l1 else None),
                 )
                 lambda_pseudo_depth_l1 = self.conf.loss.lambda_pseudo_depth_l1
 
@@ -1071,6 +1089,18 @@ class Trainer3DGRUT:
             with torch.cuda.nvtx.range("loss-multiview"):
                 accumulated = {"point": 0.0, "normal": 0.0, "raw_feature_l2": 0.0, "zncc": 0.0}
                 for target_batch, target_outputs in paired_contexts:
+                    target_confidence = None
+                    if confidence_options.enabled and confidence_options.apply_multiview:
+                        target_confidence = rendered_geometry_confidence(
+                            target_outputs,
+                            min_opacity=confidence_options.min_opacity,
+                            full_opacity=confidence_options.full_opacity,
+                            min_weight=confidence_options.min_weight,
+                            depth_variance_weight=confidence_options.depth_variance_weight,
+                            normal_variance_weight=confidence_options.normal_variance_weight,
+                            appearance_variance_weight=confidence_options.appearance_variance_weight,
+                        )
+                    multiview_confidence = source_confidence if confidence_options.apply_multiview else None
                     geometry, _ = multiview_supervision_loss(
                         gpu_batch,
                         outputs,
@@ -1084,6 +1114,13 @@ class Trainer3DGRUT:
                             point=multiview.geometric.lambda_point, normal=multiview.geometric.lambda_normal
                         ),
                         signed_normals=multiview.signed_normals,
+                        source_confidence=multiview_confidence,
+                        target_confidence=target_confidence,
+                        agreement_weight=(
+                            confidence_options.multiview_agreement_weight
+                            if confidence_options.enabled and confidence_options.apply_multiview
+                            else 0.0
+                        ),
                     )
                     for key, value in geometry.items():
                         accumulated[key] = accumulated[key] + value
@@ -1099,6 +1136,13 @@ class Trainer3DGRUT:
                             visibility_absolute_tolerance_scene=multiview.visibility_absolute_tolerance_scene,
                             weights=MultiViewLossWeights(raw_feature_l2=multiview.raw_feature_l2["lambda"]),
                             feature_source=multiview.raw_feature_l2.source,
+                            source_confidence=multiview_confidence,
+                            target_confidence=target_confidence,
+                            agreement_weight=(
+                                confidence_options.multiview_agreement_weight
+                                if confidence_options.enabled and confidence_options.apply_multiview
+                                else 0.0
+                            ),
                         )
                         accumulated["raw_feature_l2"] = accumulated["raw_feature_l2"] + feature["raw_feature_l2"]
                     if multiview.zncc["lambda"]:
@@ -1115,6 +1159,13 @@ class Trainer3DGRUT:
                             feature_source=multiview.zncc.source,
                             zncc_patch_size=multiview.zncc.patch_size,
                             zncc_min_patch_valid_fraction=multiview.zncc.min_patch_valid_fraction,
+                            source_confidence=multiview_confidence,
+                            target_confidence=target_confidence,
+                            agreement_weight=(
+                                confidence_options.multiview_agreement_weight
+                                if confidence_options.enabled and confidence_options.apply_multiview
+                                else 0.0
+                            ),
                         )
                         accumulated["zncc"] = accumulated["zncc"] + zncc["zncc"]
                 count = len(paired_contexts)
@@ -1157,6 +1208,7 @@ class Trainer3DGRUT:
             pseudo_depth_order_loss=lambda_pseudo_depth * loss_pseudo_depth,
             pseudo_depth_l1_loss=lambda_pseudo_depth_l1 * loss_pseudo_depth_l1,
             image_features_loss=lambda_image_features * loss_image_features,
+            geometry_confidence=confidence_mean,
             multiview_point_loss=multiview.geometric.lambda_point * loss_multiview_point,
             multiview_normal_loss=multiview.geometric.lambda_normal * loss_multiview_normal,
             multiview_raw_feature_l2_loss=multiview.raw_feature_l2["lambda"] * loss_multiview_l2,
@@ -1315,6 +1367,9 @@ class Trainer3DGRUT:
             if self.conf.loss.use_appearance_variance:
                 appearance_variance = np.mean(batch_metrics["losses"]["appearance_variance_loss"])
                 writer.add_scalar("loss/appearance_variance/train", appearance_variance, global_step)
+            if self.conf.loss.confidence.enabled:
+                confidence = np.mean(batch_metrics["losses"]["geometry_confidence"])
+                writer.add_scalar("geometry/confidence_mean/train", confidence, global_step)
             if self.conf.loss.multiview.enabled:
                 for name in ("point", "normal", "raw_feature_l2", "zncc"):
                     value = np.mean(batch_metrics["losses"][f"multiview_{name}_loss"])

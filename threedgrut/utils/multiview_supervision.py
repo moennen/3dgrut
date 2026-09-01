@@ -104,8 +104,8 @@ def reproject_to_target(
     return grid.clamp(-1.0, 1.0), points_world, in_bounds
 
 
-def _masked_mean(value: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-    weight = valid.to(value.dtype)
+def _masked_mean(value: torch.Tensor, valid: torch.Tensor, confidence: torch.Tensor | None = None) -> torch.Tensor:
+    weight = valid.to(value.dtype) if confidence is None else valid.to(value.dtype) * confidence
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
@@ -137,8 +137,17 @@ def multiview_supervision_loss(
     zncc_patch_size: int = 5,
     zncc_min_patch_valid_fraction: float = 0.7,
     signed_normals: bool = False,
+    source_confidence: torch.Tensor | None = None,
+    target_confidence: torch.Tensor | None = None,
+    agreement_weight: float = 0.0,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-    """Compute selectable geometry, raw-feature, and ZNCC losses on visible reprojections."""
+    """Compute selectable losses on visible reprojections, optionally reliability-weighted.
+
+    Structural source/target confidence maps are expected to be detached. ``agreement_weight``
+    further downweights pixels whose rendered target distance only barely passes the visibility
+    tolerance; it is detached too, preventing a model from reducing its own loss by making
+    disagreement look uncertain.
+    """
     grid, source_points, projected_valid = reproject_to_target(source_batch, source_outputs["pred_dist"], target_batch)
     target_depth = _sample(target_outputs["pred_dist"], grid)
     target_opacity = _sample(target_outputs["pred_opacity"], grid)
@@ -163,16 +172,32 @@ def multiview_supervision_loss(
         & (depth_error <= depth_tolerance)
     )
 
+    if agreement_weight < 0.0:
+        raise ValueError("agreement_weight must be non-negative")
+    confidence = torch.ones_like(source_outputs["pred_dist"])
+    if source_confidence is not None:
+        if source_confidence.shape != confidence.shape:
+            raise ValueError("source_confidence must match pred_dist [B, H, W, 1]")
+        confidence = confidence * source_confidence
+    if target_confidence is not None:
+        if target_confidence.shape != target_outputs["pred_dist"].shape:
+            raise ValueError("target_confidence must match target pred_dist [B, H, W, 1]")
+        confidence = confidence * _sample(target_confidence, grid)
+    if agreement_weight:
+        agreement = torch.exp(-agreement_weight * (depth_error / depth_tolerance.clamp_min(1e-8)).square())
+        confidence = confidence * agreement.detach()
+    confidence = torch.nan_to_num(confidence.detach(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+
     zero = source_outputs["pred_dist"].new_zeros(())
     losses = {"point": zero, "normal": zero, "raw_feature_l2": zero, "zncc": zero}
     if weights.point:
         point_error = (source_points - target_points).norm(dim=-1, keepdim=True) / max(scene_extent, 1e-8)
-        losses["point"] = _masked_mean(_charbonnier(point_error), valid)
+        losses["point"] = _masked_mean(_charbonnier(point_error), valid, confidence)
     if weights.normal:
         target_normals = F.normalize(_sample(target_outputs["pred_normals"], grid), dim=-1)
         source_normals = F.normalize(source_outputs["pred_normals"], dim=-1)
         dot = (source_normals * target_normals).sum(dim=-1, keepdim=True)
-        losses["normal"] = _masked_mean(1.0 - (dot if signed_normals else dot.abs()), valid)
+        losses["normal"] = _masked_mean(1.0 - (dot if signed_normals else dot.abs()), valid, confidence)
 
     source_features = target_features = None
     if weights.raw_feature_l2 or weights.zncc:
@@ -180,7 +205,7 @@ def multiview_supervision_loss(
         target_features = _sample(_feature_map(target_outputs, feature_source), grid)
     if weights.raw_feature_l2:
         losses["raw_feature_l2"] = _masked_mean(
-            (source_features - target_features).square().mean(dim=-1, keepdim=True), valid
+            (source_features - target_features).square().mean(dim=-1, keepdim=True), valid, confidence
         )
     if weights.zncc:
         if zncc_patch_size < 1 or zncc_patch_size % 2 == 0:
@@ -197,5 +222,5 @@ def multiview_supervision_loss(
             valid.to(source_nchw.dtype).permute(0, 3, 1, 2), zncc_patch_size, stride=1, padding=zncc_patch_size // 2
         )
         patch_valid = patch_valid.permute(0, 2, 3, 1) >= zncc_min_patch_valid_fraction
-        losses["zncc"] = _masked_mean((1.0 - zncc).view_as(valid), valid & patch_valid)
+        losses["zncc"] = _masked_mean((1.0 - zncc).view_as(valid), valid & patch_valid, confidence)
     return losses, valid
