@@ -580,9 +580,16 @@ def run_cell(cell: Cell, log_dir: Path, timeout_s: int) -> dict:
 
     with open(log_path, "w") as log_handle:
         try:
+            # The tracer invokes `slangc` by name.  The harness already chooses its child
+            # interpreter via sys.executable, so make the matching venv bin directory visible
+            # too instead of relying on the caller having activated that environment.
+            environment = os.environ.copy()
+            venv_bin = str(Path(sys.executable).parent)
+            environment["PATH"] = venv_bin + os.pathsep + environment.get("PATH", "")
             completed = subprocess.run(
                 cell.command(),
                 cwd=REPO_ROOT,
+                env=environment,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 timeout=timeout_s,
