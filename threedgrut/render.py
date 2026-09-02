@@ -80,7 +80,7 @@ class Renderer:
         # Configure DataLoader arguments for the current platform
         dataloader_kwargs = configure_dataloader_for_platform(
             {
-                "num_workers": 8,
+                "num_workers": int(getattr(conf, "num_workers", 8)),
                 "batch_size": 1,
                 "shuffle": False,
                 "collate_fn": None,

@@ -9,6 +9,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
+import torch
 
 ABLATON = Path(__file__).resolve().parents[1]
 
@@ -56,6 +57,7 @@ def test_reference_image_maps_are_requested_only_for_ob3d(tmp_path):
         tnt_reconstruction_root=tmp_path / "tnt",
         out_dir=tmp_path / "out",
         n_iterations=30000,
+        num_workers=0,
         moge3_model="moge.pt",
         cache_root=None,
         config_name="apps/colmap_3dgut.yaml",
@@ -67,6 +69,7 @@ def test_reference_image_maps_are_requested_only_for_ob3d(tmp_path):
     assert "dataset.load_depth_gt=true" in ob3d
     assert "dataset.load_normal_gt=true" in ob3d
     assert "dataset.load_depth_gt=true" not in dtu
+    assert "num_workers=0" in dtu
 
 
 def test_cache_root_is_namespaced_by_suite_and_scene(tmp_path):
@@ -76,6 +79,7 @@ def test_cache_root_is_namespaced_by_suite_and_scene(tmp_path):
         tnt_reconstruction_root=tmp_path / "tnt",
         out_dir=tmp_path / "out",
         n_iterations=30000,
+        num_workers=0,
         moge3_model="moge.pt",
         cache_root=tmp_path / "cache",
         config_name="apps/colmap_3dgut.yaml",
@@ -85,6 +89,47 @@ def test_cache_root_is_namespaced_by_suite_and_scene(tmp_path):
     command, _ = runner.train_command(args, "dtu", "scan24", variant)
     assert f"dataset.pseudo_depth.cache_dir={tmp_path / 'cache' / 'dtu' / 'scan24' / 'pseudo_depth'}" in command
     assert f"dataset.image_features.cache_dir={tmp_path / 'cache' / 'dtu' / 'scan24' / 'image_features'}" in command
+
+
+def test_prune_artifacts_keeps_final_checkpoint_and_score_outputs(tmp_path):
+    run = tmp_path / "run"
+    final = run / "ckpt_last.pt"
+    duplicate = run / "ours_30000" / "ckpt_30000.pt"
+    score_mesh = tmp_path / "scores" / "dtu" / "variant" / "scan" / "export" / "mesh.ply"
+    duplicate.parent.mkdir(parents=True)
+    score_mesh.parent.mkdir(parents=True)
+    final.write_bytes(b"final")
+    duplicate.write_bytes(b"duplicate")
+    score_mesh.write_bytes(b"mesh")
+
+    assert runner.prune_duplicate_checkpoints(run) == [str(duplicate)]
+    assert final.read_bytes() == b"final"
+    assert not duplicate.exists()
+    assert score_mesh.read_bytes() == b"mesh"
+
+
+def test_renderer_honors_zero_configured_workers(monkeypatch):
+    from types import SimpleNamespace
+
+    from threedgrut.render import Renderer
+
+    class Dataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            return torch.tensor(index)
+
+    monkeypatch.setattr("threedgrut.render.datasets.make_test", lambda **_: Dataset())
+    conf = SimpleNamespace(dataset=SimpleNamespace(type="unused"), num_workers=0)
+    _, dataloader = Renderer.create_test_dataloader(object(), conf)
+    assert dataloader.num_workers == 0
+
+
+def test_trainer_import_resolves_multiview_batch_annotation():
+    import threedgrut.trainer as trainer
+
+    assert trainer.Batch.__name__ == "Batch"
 
 
 def test_surface_and_recall_report_official_source_units_after_normalization():

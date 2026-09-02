@@ -166,6 +166,24 @@ def newest_run(out_dir: Path, experiment: str) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def prune_duplicate_checkpoints(run_dir: Path) -> list[str]:
+    """Remove only intermediate snapshots superseded by ``ckpt_last.pt``.
+
+    The score stage consumes ``ckpt_last.pt`` and produces colored meshes, exported depths and
+    JSON metrics that are expensive to reproduce.  None of those are disposable here.  Training
+    writes periodic snapshots under ``ours_<step>/ckpt_<step>.pt``; once a score completed, they
+    are the only redundant artifacts for this ablation protocol.
+    """
+    removed = []
+    for directory in run_dir.glob("ours_*"):
+        if not directory.is_dir():
+            continue
+        for checkpoint in directory.glob("ckpt_*.pt"):
+            checkpoint.unlink()
+            removed.append(str(checkpoint))
+    return removed
+
+
 def train_command(args, suite: str, scene: str, variant: Variant) -> tuple[list[str], str]:
     experiment = f"geom30k_{suite}_{variant.name}_{scene}"
     overrides = list(COMMON + variant.overrides)
@@ -195,6 +213,7 @@ def train_command(args, suite: str, scene: str, variant: Variant) -> tuple[list[
             f"out_dir={args.out_dir / 'runs'}",
             f"experiment_name={experiment}",
             f"n_iterations={args.n_iterations}",
+            f"num_workers={args.num_workers}",
             *overrides,
             *args.override,
         ],
@@ -232,6 +251,12 @@ def main() -> int:
     parser.add_argument("--suites", default="ob3d,dtu,tnt", help="Comma-separated suite shard")
     parser.add_argument("--variants", default=None, help="Comma-separated variant shard")
     parser.add_argument("--n-iterations", type=int, default=30000)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Training and final render DataLoader workers per cell; default 0 avoids /dev/shm exhaustion on TnT.",
+    )
     parser.add_argument("--moge3-model", default="/mnt/oss/MoGe/checkpoints/moge-3-vitl/model.pt")
     parser.add_argument(
         "--cache-root",
@@ -245,6 +270,11 @@ def main() -> int:
     parser.add_argument("--surface-query-chunk-size", type=int, default=25_000)
     parser.add_argument("--override", action="append", default=[])
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--prune-artifacts",
+        action="store_true",
+        help="After successful scoring, remove only redundant ours_*/ckpt_*.pt snapshots; preserve ckpt_last.pt and all score artifacts.",
+    )
     parser.add_argument(
         "--skip-score", action="store_true", help="Train only; report will show unavailable DTU/TnT metrics."
     )
@@ -307,7 +337,10 @@ def main() -> int:
             "variant": variant.name,
             "description": variant.description,
             "n_iterations": args.n_iterations,
-            "overrides": command[12:],
+            # The executable, script, config selector/name and four run identifiers precede
+            # the reproducibility overrides. Keep num_workers too: it changes the TnT render
+            # execution path and must not disappear from a JSONL record.
+            "overrides": command[8:],
             "log": str(logs / f"{experiment}.log"),
         }
         print(f"[{index}/{len(cells)}] {suite}/{scene} {variant.name}", flush=True)
@@ -356,6 +389,8 @@ def main() -> int:
                 row["score_returncode"] = score_returncode
                 if score_status == "ok":
                     row["evaluation"] = json.loads(score_path.read_text())
+                    if args.prune_artifacts:
+                        row["pruned_checkpoints"] = prune_duplicate_checkpoints(run_dir)
             else:
                 row["score_status"] = "skipped"
         else:

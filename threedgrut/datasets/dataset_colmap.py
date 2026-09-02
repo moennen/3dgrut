@@ -869,7 +869,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
     @torch.cuda.nvtx.range("colmap_dataset::_getitem")
     def __getitem__(self, idx) -> dict:
         # Load image and get its actual dimensions
-        image_data = np.asarray(Image.open(self.image_paths[idx]))
+        with Image.open(self.image_paths[idx]) as image:
+            image_data = np.asarray(image.convert("RGB"))
         actual_h, actual_w = image_data.shape[:2]
 
         assert image_data.dtype == np.uint8, "Image data must be of type uint8"
@@ -996,7 +997,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             intr, _, _, _, _ = self.intrinsics[camera_id]
 
             # Load actual image to get dimensions
-            image_data = np.asarray(Image.open(self.image_paths[i_cam]))
+            with Image.open(self.image_paths[i_cam]) as image:
+                image_data = np.asarray(image.convert("RGB"))
             h, w = image_data.shape[:2]
 
             f_w = intr["focal_length"][0]

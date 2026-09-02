@@ -32,7 +32,7 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 import threedgrut.datasets as datasets
-from threedgrut.datasets.protocols import BoundedMultiViewDataset, get_dataset_world_transform
+from threedgrut.datasets.protocols import Batch, BoundedMultiViewDataset, get_dataset_world_transform
 from threedgrut.datasets.utils import DEFAULT_DEVICE, MultiEpochsDataLoader, PointCloud
 from threedgrut.model.losses import ssim
 from threedgrut.model.model import MixtureOfGaussians

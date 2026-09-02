@@ -5,6 +5,10 @@ geometry additions on this branch.  It trains every cell for 30,000 iterations b
 scores rendered ray-depth/mesh geometry, and creates both `geometry-ablation.md` and
 `geometry-ablation.pdf` in the output directory.
 
+It also defaults to `num_workers=0`: final TnT rendering shares this setting, preventing its
+DataLoader workers from exhausting container `/dev/shm`. Raise `--num-workers` only on a host
+with enough shared memory.
+
 The default is the fixed one-third benchmark subset, not a random subset:
 
 - OB3D: `archiviz-flat`, `classroom`, `lone-monk`, `san-miguel`
