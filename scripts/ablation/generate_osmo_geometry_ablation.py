@@ -46,8 +46,17 @@ def main() -> None:
     )
     parser.add_argument("--platform", default=None, help="Optional OSMO platform, e.g. dgx-h100")
     parser.add_argument("--gpu", type=int, default=1)
-    parser.add_argument("--cpu", type=int, default=16)
-    parser.add_argument("--memory", default="128Gi")
+    parser.add_argument(
+        "--cpu",
+        type=int,
+        default=15,
+        help="CPU cores per one-GPU task; 15 fits the 1/8-node limit on the L40S pool.",
+    )
+    parser.add_argument(
+        "--memory",
+        default="120Gi",
+        help="RAM per one-GPU task; 120 Gi fits the 1/8-node limit on the L40S pool.",
+    )
     parser.add_argument("--storage", default="300Gi")
     parser.add_argument("--moge3-model", default="/opt/models/moge-3-vitl/model.pt")
     parser.add_argument("--radio-repo", default="/opt/RADIO")
@@ -125,7 +134,6 @@ def main() -> None:
                 *cache_input,
                 "    outputs:",
                 f"      - url: {output_url}",
-                "        path: results",
                 "    checkpoint:",
                 "      - path: results/runs",
                 f"        url: {args.output_url.rstrip('/')}/checkpoints/{suite}/{name}",

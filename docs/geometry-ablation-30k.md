@@ -124,8 +124,10 @@ at `/opt/RADIO`. Build and push that image before submission; do not install the
 dependencies independently in every task.
 
 First inspect your available pool and choose an appropriate one-GPU resource shape. Surface
-evaluation needs substantially more host memory than reconstruction, so start at 16 CPUs, 128 GiB
-RAM, and 300 GiB ephemeral storage per task.
+evaluation needs substantially more host memory than reconstruction. The generator defaults to
+15 CPUs, 120 GiB RAM, and 300 GiB ephemeral storage per task; these values fit the one-eighth
+per-GPU resource limit enforced by the eight-GPU L40S pool. Override them only after checking the
+target pool's per-GPU limits.
 
 ```bash
 osmo pool list

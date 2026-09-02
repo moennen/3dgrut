@@ -30,6 +30,36 @@ scorer = load("score_geometry_checkpoint")
 merger = load("merge_geometry_ablation_results")
 
 
+def test_osmo_generator_uses_current_url_output_schema(tmp_path, monkeypatch):
+    workflow = tmp_path / "workflow.yaml"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_osmo_geometry_ablation.py",
+            "--output",
+            str(workflow),
+            "--image",
+            "registry.example.com/3dgrut:test",
+            "--dataset-url",
+            "s3://bucket/data",
+            "--output-url",
+            "s3://bucket/runs",
+            "--suites",
+            "ob3d",
+            "--variants",
+            "gaussian",
+        ],
+    )
+    generator = load("generate_osmo_geometry_ablation")
+    generator.main()
+    text = workflow.read_text()
+    assert "      - url: s3://bucket/runs/shards/ob3d/gaussian" in text
+    assert "        path: results" not in text
+    assert "      cpu: 15" in text
+    assert "      memory: 120Gi" in text
+
+
 def test_matrix_is_one_factor_plus_a_compatible_full_stack():
     variants = {variant.name: variant for variant in runner.VARIANTS}
     assert "full_geometry" in variants
