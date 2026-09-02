@@ -32,6 +32,15 @@ def main() -> None:
     parser.add_argument(
         "--dataset-url", required=True, help="OSMO-readable object-store URL containing the data layout"
     )
+    parser.add_argument(
+        "--dataset-layout",
+        choices=("flat", "namespaced"),
+        default="flat",
+        help=(
+            "Layout below --dataset-url. 'flat' is produced by `osmo data upload` of the five dataset roots; "
+            "'namespaced' preserves ob3d/, dtu_dataset/, and tnt_dataset/ parent directories."
+        ),
+    )
     parser.add_argument("--output-url", required=True, help="Object-store prefix for isolated task outputs")
     parser.add_argument(
         "--cache-url", default=None, help="Optional prewarmed cache-root URL; must contain suite/scene directories"
@@ -73,6 +82,24 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"Unknown variants: {sorted(unknown)}")
 
+    data = "{{input:0}}"
+    if args.dataset_layout == "flat":
+        dataset_roots = {
+            "ob3d": f"{data}/OB3D_colmap",
+            "dtu": f"{data}/dtu",
+            "dtu_eval": f"{data}/dtu_eval",
+            "tnt": f"{data}/tnt",
+            "tnt_reconstruction": f"{data}/tnt_gof",
+        }
+    else:
+        dataset_roots = {
+            "ob3d": f"{data}/ob3d/OB3D_colmap",
+            "dtu": f"{data}/dtu_dataset/dtu",
+            "dtu_eval": f"{data}/dtu_dataset/dtu_eval",
+            "tnt": f"{data}/tnt_dataset/tnt",
+            "tnt_reconstruction": f"{data}/tnt_dataset/tnt_gof",
+        }
+
     resource = [
         "  resources:",
         "    geometry:",
@@ -97,7 +124,6 @@ def main() -> None:
             output_url = args.output_url.rstrip("/") + f"/shards/{suite}/{name}"
             cache_input = ["      - url: " + args.cache_url.rstrip("/")] if args.cache_url else []
             cache_root = "{{input:1}}" if args.cache_url else "{{output}}/results/cache"
-            data = "{{input:0}}"
             training_command = " ".join(
                 [
                     ".venv/bin/python scripts/ablation/run_geometry_ablation.py",
@@ -107,11 +133,11 @@ def main() -> None:
                     f"--variants {name}",
                     f"--moge3-model {quote(args.moge3_model)}",
                     f"--cache-root '{cache_root}'",
-                    f"--ob3d-root '{data}/ob3d/OB3D_colmap'",
-                    f"--dtu-root '{data}/dtu_dataset/dtu'",
-                    f"--dtu-eval-root '{data}/dtu_dataset/dtu_eval'",
-                    f"--tnt-root '{data}/tnt_dataset/tnt'",
-                    f"--tnt-reconstruction-root '{data}/tnt_dataset/tnt_gof'",
+                    f"--ob3d-root '{dataset_roots['ob3d']}'",
+                    f"--dtu-root '{dataset_roots['dtu']}'",
+                    f"--dtu-eval-root '{dataset_roots['dtu_eval']}'",
+                    f"--tnt-root '{dataset_roots['tnt']}'",
+                    f"--tnt-reconstruction-root '{dataset_roots['tnt_reconstruction']}'",
                     "--resume",
                 ]
             )

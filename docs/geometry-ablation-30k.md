@@ -153,6 +153,12 @@ Generate and validate the workflow. `--cache-url` is optional; omit it for a fir
 run, but expect each worker to populate a private cache. With a prewarmed object-store cache,
 the URL must contain the `ob3d/`, `dtu/`, and `tnt/` scene subtrees produced above.
 
+`--dataset-layout flat` is the default and matches `osmo data upload` when the five input roots
+are uploaded separately: the object-store root must directly contain `OB3D_colmap/`, `dtu/`,
+`dtu_eval/`, `tnt/`, and `tnt_gof/`. This is the layout in
+`s3://nicolasm-3dgrut/3dgrut/data/`. Use `--dataset-layout namespaced` only when the root instead
+preserves the local `ob3d/`, `dtu_dataset/`, and `tnt_dataset/` parent directories.
+
 ```bash
 .venv/bin/python scripts/ablation/generate_osmo_geometry_ablation.py \
   --output /tmp/geometry-30k-osmo.yaml \

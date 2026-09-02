@@ -58,6 +58,9 @@ def test_osmo_generator_uses_current_url_output_schema(tmp_path, monkeypatch):
     assert "        path: results" not in text
     assert "      cpu: 15" in text
     assert "      memory: 120Gi" in text
+    assert "--ob3d-root '{{input:0}}/OB3D_colmap'" in text
+    assert "--dtu-root '{{input:0}}/dtu'" in text
+    assert "--tnt-reconstruction-root '{{input:0}}/tnt_gof'" in text
 
 
 def test_matrix_is_one_factor_plus_a_compatible_full_stack():
