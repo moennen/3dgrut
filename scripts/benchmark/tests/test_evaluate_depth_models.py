@@ -109,6 +109,28 @@ def test_camera_fusion_max_depth_uses_ambisur_camera_focus_radius():
     assert benchmark.camera_fusion_max_depth(frames) == 4.0
 
 
+def test_transform_aabb_keeps_all_transformed_corners():
+    transform = np.eye(4)
+    transform[:3, 3] = [3.0, -2.0, 1.0]
+    bounds = benchmark.transform_aabb(np.array([[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]]), transform)
+    np.testing.assert_allclose(bounds, [[3.0, -2.0, 1.0], [5.0, 2.0, 7.0]])
+
+
+def test_bounded_tsdf_configuration_records_gt_assistance_and_axis_guard():
+    config, metadata = benchmark.tsdf_config_for_bounds(
+        voxel_size=0.01,
+        max_depth=5.0,
+        bounds=np.array([[0.0, 0.0, 0.0], [20.0, 10.0, 5.0]]),
+        source="official test volume",
+        bound_mode="benchmark",
+        max_voxels_per_axis=1000,
+    )
+    assert config.voxel_size == 0.02
+    np.testing.assert_allclose(config.world_bounds, [[-0.1, -0.1, -0.1], [20.1, 10.1, 5.1]])
+    assert metadata["bounds_source"] == "official test volume"
+    assert metadata["grid_shape"] == [1000, 500, 250]
+
+
 def test_memory_snapshot_is_flushed_as_jsonl(tmp_path):
     path = tmp_path / "memory.jsonl"
     benchmark.write_memory_snapshot(path, "before_tsdf")

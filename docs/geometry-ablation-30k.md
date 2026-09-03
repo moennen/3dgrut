@@ -95,6 +95,14 @@ uses the shared `threedgrut.geometry.tsdf.fuse_depth_frames` extractor (includin
 then uses visibility-aware recall and bounded exact surface queries.  DTU reports visible recall
 at 5 mm and Chamfer in mm; TnT reports recall/F1 at its official scene threshold.
 
+Scoring defaults to `--tsdf-bound-mode benchmark --tsdf-max-voxels-per-axis 2048`.  The former
+rejects rendered depths outside the official DTU observation volume or TnT crop before fusion,
+with one truncation-width of padding; this reproduces the GT-assisted extraction convention used
+by PGSR/AmbiSuR and is recorded in the score JSON.  It does not alter the official metric crop.
+Use `--tsdf-bound-mode none` only for a reconstruction-only extraction comparison.  Open3D's
+`ScalableTSDFVolume` has no enforceable block budget, so this lowers peak risk but cannot promise
+that every scene fits in 64 GiB; retain the 120 GiB OSMO resource default for primary runs.
+
 ## Report regeneration
 
 The driver regenerates the report after each invocation.  To regenerate it after merging or

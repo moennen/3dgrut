@@ -76,6 +76,13 @@ then writes `memory.jsonl`, including process RSS and cgroup memory before TSDF 
 integrated frame, after mesh extraction/sampling/release, and after surface scoring. The file is
 flushed per sample, so its final line identifies the last completed stage after an OOM kill.
 
+By default, benchmark fusion uses `--tsdf-bound-mode benchmark`: it rejects depth samples outside
+the official DTU `ObsMask` volume or TnT selection-polygon volume before TSDF integration, with one
+truncation-width of padding. This is deliberately **GT-assisted extraction**, matching the public
+PGSR/AmbiSuR TnT pipelines, and is recorded in every result's `tsdf` object. It does not change the
+official surface metric or its final crop. Use `--tsdf-bound-mode none` for a reconstruction-only
+mesh, and use `--tsdf-max-voxels-per-axis 0` to disable the default 2048-axis resolution guard.
+
 
 ### 6. Inspect the machine-readable records
 
@@ -103,7 +110,7 @@ jq -c '{suite, scene, model, alignment}' /mnt/oss/results/depth-benchmark-2026-0
 - The generated PDF includes visible-scan recall curves for raw, scale, and affine conditions. DTU uses absolute millimetre tolerances; TnT uses each scene's official tolerance multiplier so scenes can be averaged fairly.
 - All meshes are fused through `threedgrut.geometry.tsdf.fuse_depth_frames`, shared with `extract_mesh_tsdf.py`. Source RGB is fused too, so the exported PLY files contain vertex colors; color does not affect the geometry metrics.
 - Mesh scoring keeps the two-million-sample default, but executes exact nearest-neighbour queries in 100,000-sample batches to bound host memory. `--surface-query-chunk-size` changes only peak memory, not the metric.
-- For DTU/TnT, aligned maps are written one frame at a time and RGB-D frames are lazily loaded into TSDF fusion. The Open3D mesh is released after sampling and before scoring. A 64 GB host should therefore be sufficient for the standard protocol; use `--surface-query-chunk-size 25000` only as an additional exact-query memory guard.
+- For DTU/TnT, aligned maps are written one frame at a time and RGB-D frames are lazily loaded into TSDF fusion. The Open3D mesh is released after sampling and before scoring. This bounds Python/query memory but **does not make Open3D's sparse TSDF a fixed-memory algorithm**: a 64 GiB host can still exhaust memory during fusion or mesh extraction. The default official-volume cull and 2048-axis resolution guard substantially constrain that risk; use `--memory-profile` to verify a scene, or run an unchanged higher-memory protocol.
 - TSDF depth is capped before Open3D integration. By default the cap is `2 ×` the nearest training camera's distance to the least-squares camera focus, matching AmbiSuR's adaptive extraction rule; it is never inferred from a model-depth maximum. Use `--fusion-max-depth-dtu` or `--fusion-max-depth-tnt` only for an explicit, recorded scene-unit cap. The selected source and cap are saved in each result's `tsdf` record.
 
 ## Evaluate a 3dgrut reconstruction checkpoint

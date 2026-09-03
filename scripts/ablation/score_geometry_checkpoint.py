@@ -10,6 +10,7 @@ can have a high host-memory peak, so an evaluation OOM must not discard the comp
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import subprocess
 import sys
@@ -28,10 +29,13 @@ from evaluate_depth_models import (  # noqa: E402
     Frame,
     _empty_surface_metrics,
     _sample_mesh,
+    benchmark_source_bounds,
     camera_fusion_max_depth,
     dtu_scene,
     observed_volume_mask,
     tnt_scene,
+    transform_aabb,
+    tsdf_config_for_bounds,
     visibility_maps,
     voxel_downsample,
 )
@@ -40,7 +44,7 @@ from depthrecall.io_cameras import read_manifest_views
 from depthrecall.io_points import apply_alignment
 from depthrecall.metric import MetricConfig, evaluate
 from depthrecall.surface import evaluate_surface
-from threedgrut.geometry.tsdf import DepthFrame, TSDFConfig, fuse_depth_frames
+from threedgrut.geometry.tsdf import DepthFrame, fuse_depth_frames
 
 
 def world_to_camera(view) -> np.ndarray:
@@ -132,13 +136,36 @@ def evaluate_scene(args, export_dir: Path) -> dict:
         benchmark.recall_taus,
         scale,
     )
-    config = TSDFConfig(voxel_source * scale, voxel_source * scale * 5, camera_fusion_max_depth(frames))
+    if args.tsdf_bound_mode == "benchmark":
+        bounds_source, bounds_source_name = benchmark_source_bounds(benchmark)
+        bounds_render = transform_aabb(bounds_source, scan_to_render)
+    else:
+        bounds_render, bounds_source_name = None, None
+    config, tsdf_metadata = tsdf_config_for_bounds(
+        voxel_source * scale,
+        camera_fusion_max_depth(frames),
+        bounds_render,
+        bounds_source_name,
+        args.tsdf_bound_mode,
+        args.tsdf_max_voxels_per_axis,
+    )
+    # Preserve the original ablation score schema for downstream run records while adding the
+    # requested/effective bounded-extraction metadata.
+    tsdf_metadata.update(
+        voxel_size_render=config.voxel_size,
+        truncation_render=config.truncation,
+        max_depth_render=config.max_depth,
+    )
     mesh = fuse_depth_frames(depth_frames, config)
     import open3d as o3d
 
     mesh_path = export_dir / "mesh.ply"
     o3d.io.write_triangle_mesh(str(mesh_path), mesh, write_vertex_normals=True, write_vertex_colors=True)
     predicted = _sample_mesh(mesh, args.mesh_samples) if len(mesh.triangles) else np.empty((0, 3))
+    # Surface scoring only requires sampled points; retaining Open3D's C++ mesh can otherwise
+    # overlap its peak allocation with the two cKDTrees.
+    del mesh
+    gc.collect()
     if args.suite == "dtu" and len(predicted):
         predicted_scan = apply_alignment(predicted, np.linalg.inv(scan_to_render))
         predicted = predicted[observed_volume_mask(predicted_scan, benchmark.dtu_obsmask)]
@@ -167,11 +194,7 @@ def evaluate_scene(args, export_dir: Path) -> dict:
         "recall": recall,
         "surface": surface,
         "mesh": str(mesh_path),
-        "tsdf": {
-            "voxel_size_render": config.voxel_size,
-            "truncation_render": config.truncation,
-            "max_depth_render": config.max_depth,
-        },
+        "tsdf": tsdf_metadata,
     }
 
 
@@ -191,7 +214,26 @@ def main() -> None:
     parser.add_argument("--voxel-size-dtu", type=float, default=2.0, help="DTU millimetres in scan space")
     parser.add_argument("--voxel-size-tnt", type=float, default=0.01, help="TnT metres in scan space")
     parser.add_argument("--gt-voxel", type=float, default=None, help="Optional GT downsample in scan-space units")
+    parser.add_argument(
+        "--tsdf-bound-mode",
+        choices=("none", "benchmark"),
+        default="benchmark",
+        help=(
+            "Pre-integrate only the official DTU ObsMask/TnT crop volume, expanded by one truncation. "
+            "Benchmark mode is GT-assisted and matches PGSR/AmbiSuR extraction."
+        ),
+    )
+    parser.add_argument(
+        "--tsdf-max-voxels-per-axis",
+        type=int,
+        default=2048,
+        help="Coarsen a bounded TSDF only above this axis resolution; 0 disables the resolution guard.",
+    )
     args = parser.parse_args()
+    if args.tsdf_max_voxels_per_axis < 0:
+        parser.error("--tsdf-max-voxels-per-axis must be non-negative")
+    if args.tsdf_max_voxels_per_axis == 0:
+        args.tsdf_max_voxels_per_axis = None
     # Keep every cell's depths, visibility maps and colored mesh.  A shared ``export`` folder
     # would make a later scene silently overwrite the artifacts linked by an earlier JSON row.
     export_dir = args.out.with_suffix("") / "export"

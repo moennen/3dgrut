@@ -41,6 +41,18 @@ it is representation-agnostic and turns every checkpoint into a usable mesh. It 
 described as a Gaussian-native surface: its result depends on view selection, depth convention,
 voxel size, truncation, masks, and component filtering. Record all of those with a mesh.
 
+### Bounded benchmark fusion
+
+The benchmark and ablation scorers stream one RGB-D frame at a time, then reject a frame's depth
+samples outside the official DTU observation volume or TnT selection-polygon volume before Open3D
+integration. The selected box is padded by one truncation distance, and the global voxel size is
+coarsened only if its longest box axis would exceed the configured 2048-voxel resolution. This is
+the practical PGSR/AmbiSuR-style evaluation convention, and every score records the requested and
+effective voxel size, box, and source. It is **GT-assisted benchmark extraction**, not a deployable
+reconstruction method; reconstruction-only extraction must use no benchmark box or a separately
+declared camera/SfM/model-derived box. Open3D's sparse volume exposes no hard block budget, so this
+is a guard against runaway extent rather than a formal 64 GiB guarantee.
+
 ### Proposed enhancement: pixel-footprint adaptive TSDF
 
 The fixed voxel size is simple but spends the same memory on distant, textureless space as it

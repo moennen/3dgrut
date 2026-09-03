@@ -25,6 +25,7 @@ class TSDFConfig:
     max_depth: float
     min_component_triangles: int = 50
     keep_largest_components: int = 1
+    world_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
 
     def __post_init__(self) -> None:
         if self.voxel_size <= 0:
@@ -37,6 +38,13 @@ class TSDFConfig:
             raise ValueError("min_component_triangles must be non-negative")
         if self.keep_largest_components < 1:
             raise ValueError("keep_largest_components must be at least one")
+        if self.world_bounds is not None:
+            bounds = np.asarray(self.world_bounds, dtype=np.float64)
+            if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)) or np.any(bounds[1] <= bounds[0]):
+                raise ValueError("world_bounds must be finite [[xmin, ymin, zmin], [xmax, ymax, zmax]]")
+            # Store an immutable, JSON-friendly representation.  This also prevents an ndarray supplied by a
+            # caller from being mutated after validation.
+            object.__setattr__(self, "world_bounds", tuple(tuple(float(value) for value in row) for row in bounds))
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,78 @@ def z_depth_to_ray_distance(z_depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     if K.shape != (3, 3) or K[0, 0] <= 0 or K[1, 1] <= 0:
         raise ValueError(f"K must be a pinhole 3x3 matrix with positive focal lengths, got {K}")
     return z_depth * _ray_length_grid(K, *z_depth.shape)
+
+
+def expand_world_bounds(bounds: np.ndarray, padding: float) -> np.ndarray:
+    """Return an axis-aligned world-space box expanded uniformly by ``padding``.
+
+    Benchmark crop boxes end exactly on the valid surface domain.  Leaving one TSDF truncation
+    distance around that domain prevents the crop from cutting a zero crossing at its boundary.
+    """
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)) or np.any(bounds[1] <= bounds[0]):
+        raise ValueError("bounds must be finite [[xmin, ymin, zmin], [xmax, ymax, zmax]]")
+    if padding < 0 or not np.isfinite(padding):
+        raise ValueError(f"padding must be finite and non-negative, got {padding}")
+    return np.stack([bounds[0] - padding, bounds[1] + padding])
+
+
+def adaptive_voxel_size(voxel_size: float, bounds: np.ndarray | None, max_voxels_per_axis: int | None) -> float:
+    """Keep a requested TSDF resolution unless a bounded domain would exceed an axis budget.
+
+    Open3D's scalable volume remains sparse, so this is a resolution guard rather than a claim
+    of a fixed byte allocation.  It is intentionally monotonic: it may coarsen a requested
+    voxel size, never make it finer.
+    """
+    if voxel_size <= 0 or not np.isfinite(voxel_size):
+        raise ValueError(f"voxel_size must be finite and positive, got {voxel_size}")
+    if max_voxels_per_axis is None:
+        return float(voxel_size)
+    if max_voxels_per_axis < 1:
+        raise ValueError("max_voxels_per_axis must be at least one, or None")
+    if bounds is None:
+        return float(voxel_size)
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)) or np.any(bounds[1] <= bounds[0]):
+        raise ValueError("bounds must be finite [[xmin, ymin, zmin], [xmax, ymax, zmax]]")
+    return max(float(voxel_size), float(np.max(bounds[1] - bounds[0]) / max_voxels_per_axis))
+
+
+def world_bounds_mask(
+    z_depth: np.ndarray, K: np.ndarray, world_to_camera: np.ndarray, bounds: np.ndarray
+) -> np.ndarray:
+    """Mask z-depth pixels whose unprojected point lies inside a world-space AABB.
+
+    The projection is processed in small row chunks so high-resolution maps do not create a
+    second full-resolution XYZ tensor merely to impose an extraction bound.
+    """
+    z_depth = np.asarray(z_depth, dtype=np.float32)
+    K = np.asarray(K, dtype=np.float64)
+    world_to_camera = np.asarray(world_to_camera, dtype=np.float64)
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if z_depth.ndim != 2:
+        raise ValueError(f"z_depth must be [H, W], got {z_depth.shape}")
+    if K.shape != (3, 3) or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ValueError(f"K must be a pinhole 3x3 matrix with positive focal lengths, got {K}")
+    if world_to_camera.shape != (4, 4):
+        raise ValueError(f"world_to_camera must be 4x4, got {world_to_camera.shape}")
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)) or np.any(bounds[1] <= bounds[0]):
+        raise ValueError("bounds must be finite [[xmin, ymin, zmin], [xmax, ymax, zmax]]")
+
+    height, width = z_depth.shape
+    x_over_z = ((np.arange(width, dtype=np.float32) + 0.5 - K[0, 2]) / K[0, 0]).astype(np.float32)
+    # For row vectors, X_world = (X_camera - t) @ R.
+    rotation = world_to_camera[:3, :3].astype(np.float32)
+    translation = (-world_to_camera[:3, 3] @ rotation).astype(np.float32)
+    result = np.zeros((height, width), dtype=bool)
+    for start in range(0, height, 128):
+        stop = min(start + 128, height)
+        depth = z_depth[start:stop]
+        y_over_z = ((np.arange(start, stop, dtype=np.float32)[:, None] + 0.5 - K[1, 2]) / K[1, 1]).astype(np.float32)
+        camera = np.stack([depth * x_over_z[None, :], depth * y_over_z, depth], axis=-1)
+        world = camera @ rotation + translation
+        result[start:stop] = np.all((world >= bounds[0]) & (world <= bounds[1]), axis=-1)
+    return result
 
 
 def rgb_to_uint8(rgb: np.ndarray | None, depth_shape: tuple[int, int]) -> np.ndarray:
@@ -178,6 +258,8 @@ def integrate_depth(
         if valid.shape != z_depth.shape:
             raise ValueError(f"valid mask {valid.shape} does not match depth {z_depth.shape}")
         usable &= valid
+    if config.world_bounds is not None:
+        usable &= world_bounds_mask(z_depth, K, world_to_camera, np.asarray(config.world_bounds))
     z_depth = np.where(usable, z_depth, 0.0).astype(np.float32)
 
     height, width = z_depth.shape

@@ -156,11 +156,17 @@ Only after the smoke succeeds, use the full protocol. Do not set `--max-frames`,
 `--max-image-side`, `--mesh-samples`, or `--gt-voxel`; this preserves full resolution and the
 two-million-sample surface metric default. The evaluator streams aligned maps/RGB-D frames into
 TSDF fusion and releases the Open3D mesh before surface scoring. Exact nearest-neighbour queries
-use 100,000-sample batches, which is suitable for a 64 GB host. Only use
-`--surface-query-chunk-size` to reduce peak RAM further; it does not alter the metric.
+use 100,000-sample batches. Only use `--surface-query-chunk-size` to reduce peak RAM further; it
+does not alter the metric. This does not make Open3D's sparse TSDF fixed-memory: a 64 GiB host can
+still OOM during fusion or mesh extraction.
 TSDF fusion uses AmbiSuR's adaptive camera-focus depth cap by default (`2 ×` nearest camera
 radius), not a prediction maximum. Set `--fusion-max-depth-dtu` or `--fusion-max-depth-tnt` only
 when an explicit cap in that suite's units is required; it is recorded in `results.jsonl`.
+It also defaults to `--tsdf-bound-mode benchmark --tsdf-max-voxels-per-axis 2048`, rejecting
+depth outside the official DTU observation volume or TnT crop before fusion. This is explicitly
+GT-assisted extraction, aligned with PGSR/AmbiSuR's TnT convention, and is recorded per row.
+Use `--tsdf-bound-mode none` only for a reconstruction-only extraction comparison. For primary
+full runs retain a higher-memory worker even with this guard.
 
 ```bash
 export OUT=$WORK/results/full

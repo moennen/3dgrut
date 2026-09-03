@@ -4,7 +4,14 @@
 import numpy as np
 import pytest
 
-from threedgrut.geometry.tsdf import TSDFConfig, ray_distance_to_z_depth, rgb_to_uint8, z_depth_to_ray_distance
+from threedgrut.geometry.tsdf import (
+    TSDFConfig,
+    adaptive_voxel_size,
+    ray_distance_to_z_depth,
+    rgb_to_uint8,
+    world_bounds_mask,
+    z_depth_to_ray_distance,
+)
 
 
 def test_ray_distance_to_z_depth_is_exact_on_the_optical_axis():
@@ -65,3 +72,18 @@ def test_rgb_to_uint8_rejects_invalid_input(rgb, message):
 def test_tsdf_config_rejects_invalid_units(kwargs):
     with pytest.raises(ValueError):
         TSDFConfig(**kwargs)
+
+
+def test_adaptive_voxel_size_only_coarsens_bounded_grid():
+    bounds = np.array([[0.0, 0.0, 0.0], [20.0, 10.0, 5.0]])
+    assert adaptive_voxel_size(0.01, bounds, 1000) == pytest.approx(0.02)
+    assert adaptive_voxel_size(0.05, bounds, 1000) == pytest.approx(0.05)
+    assert adaptive_voxel_size(0.01, None, 1000) == pytest.approx(0.01)
+
+
+def test_world_bounds_mask_unprojects_z_depth_in_world_coordinates():
+    K = np.array([[1.0, 0.0, 1.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+    depth = np.full((1, 3), 2.0, dtype=np.float32)
+    # Pixel centres project to x = -2, 0, 2 at z=2.  Keep only the centre point.
+    bounds = np.array([[-0.1, -1.0, 1.9], [0.1, 1.0, 2.1]])
+    np.testing.assert_array_equal(world_bounds_mask(depth, K, np.eye(4), bounds), [[False, True, False]])

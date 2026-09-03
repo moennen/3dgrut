@@ -44,10 +44,17 @@ from depthrecall.io_points import apply_alignment, read_ply, voxel_downsample
 from depthrecall.metric import MetricConfig
 from depthrecall.metric import evaluate as evaluate_recall
 from depthrecall.surface import DEFAULT_QUERY_CHUNK_SIZE, evaluate_surface
-from depthrecall.tnt import OFFICIAL_TAU_METRES, crop_volume_mask, gt_to_render_alignment
+from depthrecall.tnt import OFFICIAL_TAU_METRES, crop_volume_mask, gt_to_render_alignment, read_crop_volume
 from threedgrut.datasets.gt_geometry import depth_validity, find_gt_paths, read_gt_map, resize_gt_map
 from threedgrut.datasets.pseudo_depth import BACKENDS
-from threedgrut.geometry.tsdf import DepthFrame, TSDFConfig, fuse_depth_frames, z_depth_to_ray_distance
+from threedgrut.geometry.tsdf import (
+    DepthFrame,
+    TSDFConfig,
+    adaptive_voxel_size,
+    expand_world_bounds,
+    fuse_depth_frames,
+    z_depth_to_ray_distance,
+)
 
 MODELS = {
     "dav2": ("transformers", "depth-anything/Depth-Anything-V2-Base-hf"),
@@ -138,6 +145,99 @@ class BenchmarkScene:
     visibility: dict[str, Path]
     dtu_obsmask: Path | None = None
     tnt_crop: Path | None = None
+
+
+def transform_aabb(bounds: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """Transform an AABB and return its conservative axis-aligned enclosure."""
+    bounds = np.asarray(bounds, dtype=np.float64)
+    transform = np.asarray(transform, dtype=np.float64)
+    if bounds.shape != (2, 3) or transform.shape != (4, 4):
+        raise ValueError("bounds must be (2, 3) and transform must be (4, 4)")
+    corners = np.stack(np.meshgrid(*zip(bounds[0], bounds[1]), indexing="ij"), axis=-1).reshape(-1, 3)
+    homogeneous = np.concatenate([corners, np.ones((len(corners), 1))], axis=1)
+    transformed = (homogeneous @ transform.T)[:, :3]
+    return np.stack([transformed.min(axis=0), transformed.max(axis=0)])
+
+
+def tnt_crop_aabb(path: Path) -> np.ndarray:
+    """Conservative AABB of the official TnT selection-polygon volume, in scan coordinates."""
+    axis, axis_min, axis_max, polygon = read_crop_volume(path)
+    bounds = np.stack([polygon.min(axis=0), polygon.max(axis=0)])
+    bounds[0, axis], bounds[1, axis] = axis_min, axis_max
+    return bounds
+
+
+def dtu_obsmask_aabb(path: Path) -> np.ndarray:
+    """AABB of DTU's official reconstruction-side observation volume, in scan millimetres."""
+    try:
+        from scipy.io import loadmat
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("DTU ObsMask files need scipy") from exc
+    data = loadmat(str(path))
+    lower = np.asarray(data["BB"], dtype=np.float64)[0]
+    resolution = float(np.asarray(data["Res"]).reshape(-1)[0])
+    shape = np.asarray(data["ObsMask"]).shape
+    if lower.shape != (3,) or len(shape) != 3 or resolution <= 0:
+        raise ValueError(f"Malformed DTU observation mask: {path}")
+    return np.stack([lower, lower + resolution * (np.asarray(shape) - 1)])
+
+
+def benchmark_source_bounds(scene: BenchmarkScene) -> tuple[np.ndarray, str]:
+    """Return the official, explicitly GT-assisted reconstruction bound in scan coordinates."""
+    if scene.dtu_obsmask is not None:
+        bounds, source = dtu_obsmask_aabb(scene.dtu_obsmask), "DTU official ObsMask volume"
+    elif scene.tnt_crop is not None:
+        bounds, source = tnt_crop_aabb(scene.tnt_crop), "TnT official SelectionPolygonVolume"
+    else:
+        raise ValueError(f"{scene.family}/{scene.name} has no official reconstruction bound")
+    return bounds, source
+
+
+def benchmark_fusion_bounds(scene: BenchmarkScene) -> tuple[np.ndarray, str]:
+    """Return the official, explicitly GT-assisted reconstruction bound in render coordinates."""
+    bounds, source = benchmark_source_bounds(scene)
+    return (transform_aabb(bounds, scene.gt_to_world), source) if scene.gt_to_world is not None else (bounds, source)
+
+
+def tsdf_config_for_bounds(
+    voxel_size: float,
+    max_depth: float,
+    bounds: np.ndarray | None,
+    source: str | None,
+    bound_mode: Literal["none", "benchmark"],
+    max_voxels_per_axis: int | None,
+) -> tuple[TSDFConfig, dict]:
+    """Choose a recorded TSDF configuration from an optional already-render-space bound."""
+    effective_voxel = adaptive_voxel_size(voxel_size, bounds, max_voxels_per_axis)
+    padded_bounds = expand_world_bounds(bounds, effective_voxel * 5) if bounds is not None else None
+    config = TSDFConfig(effective_voxel, effective_voxel * 5, max_depth, world_bounds=padded_bounds)
+    metadata = {
+        "requested_voxel_size": voxel_size,
+        "voxel_size": config.voxel_size,
+        "truncation": config.truncation,
+        "max_depth": config.max_depth,
+        "bounds_mode": bound_mode,
+        "bounds_source": source,
+        "bounds_render": padded_bounds.tolist() if padded_bounds is not None else None,
+        "max_voxels_per_axis": max_voxels_per_axis,
+    }
+    if bounds is not None:
+        grid_shape = np.ceil((bounds[1] - bounds[0]) / config.voxel_size).astype(int)
+        metadata["grid_shape"] = grid_shape.tolist()
+        metadata["dense_grid_voxels"] = int(np.prod(grid_shape, dtype=np.int64))
+    return config, metadata
+
+
+def tsdf_config_for_scene(
+    scene: BenchmarkScene,
+    voxel_size: float,
+    max_depth: float,
+    bound_mode: Literal["none", "benchmark"],
+    max_voxels_per_axis: int | None,
+) -> tuple[TSDFConfig, dict]:
+    """Choose a recorded TSDF configuration without hiding benchmark-assisted culling."""
+    bounds, source = benchmark_fusion_bounds(scene) if bound_mode == "benchmark" else (None, None)
+    return tsdf_config_for_bounds(voxel_size, max_depth, bounds, source, bound_mode, max_voxels_per_axis)
 
 
 def _scaled_shape(height: int, width: int, max_side: int | None) -> tuple[int, int]:
@@ -476,6 +576,8 @@ def evaluate_benchmark_scene(
     surface_query_chunk_size: int,
     fusion_max_depth: float | None,
     fusion_depth_radius_multiplier: float,
+    tsdf_bound_mode: Literal["none", "benchmark"],
+    tsdf_max_voxels_per_axis: int | None,
     memory_profile: bool = False,
 ) -> list[dict]:
     # The oracle alignment is fitted to the same scan z-buffer used for visibility, in the
@@ -499,7 +601,9 @@ def evaluate_benchmark_scene(
             alignment=scene.gt_to_world,
             gt_masks=scene.masks,
         ).asdict()
-        config = TSDFConfig(voxel_size, voxel_size * 5, max_depth=max_depth)
+        config, tsdf_metadata = tsdf_config_for_scene(
+            scene, voxel_size, max_depth, tsdf_bound_mode, tsdf_max_voxels_per_axis
+        )
         snapshot("before_tsdf")
         mesh = fuse_depth_frames(
             saved_depth_frames(scene.frames, views),
@@ -553,9 +657,7 @@ def evaluate_benchmark_scene(
                 "views": len(views),
                 "oracle_alignment": alignment != "raw",
                 "tsdf": {
-                    "voxel_size": config.voxel_size,
-                    "truncation": config.truncation,
-                    "max_depth": config.max_depth,
+                    **tsdf_metadata,
                     "max_depth_source": fusion_range_source,
                     "camera_focus_radius_multiplier": (
                         fusion_depth_radius_multiplier if fusion_max_depth is None else None
@@ -646,6 +748,24 @@ def main() -> None:
         help="Camera-focus radius multiplier for automatic TSDF depth caps (AmbiSuR adaptive default: 2).",
     )
     parser.add_argument(
+        "--tsdf-bound-mode",
+        choices=("none", "benchmark"),
+        default="benchmark",
+        help=(
+            "Pre-integrate only the official DTU ObsMask/TnT crop volume, expanded by one truncation. "
+            "This mirrors PGSR/AmbiSuR but is GT-assisted benchmark extraction; use none for deployable extraction."
+        ),
+    )
+    parser.add_argument(
+        "--tsdf-max-voxels-per-axis",
+        type=int,
+        default=2048,
+        help=(
+            "Coarsen a bounded TSDF only when its longest axis would exceed this resolution; "
+            "0 disables this resolution guard. Open3D scalable TSDF allocation remains sparse."
+        ),
+    )
+    parser.add_argument(
         "--mesh-samples",
         type=int,
         default=2_000_000,
@@ -667,6 +787,10 @@ def main() -> None:
         help="Write RSS/cgroup memory samples around TSDF and mesh scoring to each condition's memory.jsonl.",
     )
     args = parser.parse_args()
+    if args.tsdf_max_voxels_per_axis is not None and args.tsdf_max_voxels_per_axis < 0:
+        parser.error("--tsdf-max-voxels-per-axis must be non-negative")
+    if args.tsdf_max_voxels_per_axis == 0:
+        args.tsdf_max_voxels_per_axis = None
     args.out_dir.mkdir(parents=True, exist_ok=True)
     models = [value.strip() for value in args.models.split(",") if value.strip()]
     unknown = set(models) - set(MODELS)
@@ -703,6 +827,8 @@ def main() -> None:
                 args.surface_query_chunk_size,
                 args.fusion_max_depth_dtu,
                 args.fusion_depth_radius_multiplier,
+                args.tsdf_bound_mode,
+                args.tsdf_max_voxels_per_axis,
                 args.memory_profile,
             ):
                 row["model"] = model
@@ -724,6 +850,8 @@ def main() -> None:
                 args.surface_query_chunk_size,
                 args.fusion_max_depth_tnt,
                 args.fusion_depth_radius_multiplier,
+                args.tsdf_bound_mode,
+                args.tsdf_max_voxels_per_axis,
                 args.memory_profile,
             ):
                 row["model"] = model
@@ -745,6 +873,11 @@ def main() -> None:
                     "radius_multiplier": args.fusion_depth_radius_multiplier,
                     "dtu_explicit_max_depth": args.fusion_max_depth_dtu,
                     "tnt_explicit_max_depth": args.fusion_max_depth_tnt,
+                },
+                "tsdf_bounds": {
+                    "mode": args.tsdf_bound_mode,
+                    "max_voxels_per_axis": args.tsdf_max_voxels_per_axis,
+                    "note": "benchmark mode is GT-assisted, matching PGSR/AmbiSuR TnT extraction",
                 },
             },
             indent=2,

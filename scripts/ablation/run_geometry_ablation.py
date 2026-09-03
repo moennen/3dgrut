@@ -268,6 +268,21 @@ def main() -> int:
     parser.add_argument("--timeout-s", type=int, default=43200)
     parser.add_argument("--mesh-samples", type=int, default=2_000_000)
     parser.add_argument("--surface-query-chunk-size", type=int, default=25_000)
+    parser.add_argument(
+        "--tsdf-bound-mode",
+        choices=("none", "benchmark"),
+        default="benchmark",
+        help=(
+            "Use the official DTU/TnT reconstruction volume while fusing score meshes. "
+            "This is GT-assisted benchmark extraction, matching PGSR/AmbiSuR."
+        ),
+    )
+    parser.add_argument(
+        "--tsdf-max-voxels-per-axis",
+        type=int,
+        default=2048,
+        help="Coarsen a bounded scoring TSDF only above this axis resolution; 0 disables the guard.",
+    )
     parser.add_argument("--override", action="append", default=[])
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -280,6 +295,8 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.tsdf_max_voxels_per_axis < 0:
+        parser.error("--tsdf-max-voxels-per-axis must be non-negative")
 
     selected = selected_scenes(
         args.dataset_scale, {"ob3d": args.ob3d_scenes, "dtu": args.dtu_scenes, "tnt": args.tnt_scenes}
@@ -305,6 +322,11 @@ def main() -> int:
                 "scenes": selected,
                 "n_iterations": args.n_iterations,
                 "moge3_model": args.moge3_model,
+                "tsdf": {
+                    "bound_mode": args.tsdf_bound_mode,
+                    "max_voxels_per_axis": args.tsdf_max_voxels_per_axis or None,
+                    "note": "benchmark mode is GT-assisted, matching PGSR/AmbiSuR extraction",
+                },
                 "variants": {v.name: {"description": v.description, "overrides": list(v.overrides)} for v in variants},
             },
             indent=2,
@@ -383,6 +405,10 @@ def main() -> int:
                     str(args.mesh_samples),
                     "--surface-query-chunk-size",
                     str(args.surface_query_chunk_size),
+                    "--tsdf-bound-mode",
+                    args.tsdf_bound_mode,
+                    "--tsdf-max-voxels-per-axis",
+                    str(args.tsdf_max_voxels_per_axis),
                 ]
                 score_status, score_returncode = run_command(score, logs / f"{experiment}_score.log", args.timeout_s)
                 row["score_status"] = score_status
